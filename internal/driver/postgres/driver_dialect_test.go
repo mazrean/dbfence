@@ -175,6 +175,81 @@ func TestStateRevokeMembership(t *testing.T) {
 	}
 }
 
+func TestNonSuperuserChecks(t *testing.T) {
+	t.Parallel()
+	roles := map[string]roleAccess{
+		"settable": {set: true, use: true},
+		"admined":  {admin: true},
+		"foreign":  {},
+		"super":    {superuser: true, admin: true},
+	}
+	tests := []struct {
+		name      string
+		selfGrant string
+		role      string
+		version   int
+		wantSet   bool
+		wantAlter bool
+	}{
+		{name: "settable", version: 170000, role: "settable", wantSet: true},
+		{name: "admin only", version: 170000, role: "admined", wantAlter: true},
+		{name: "foreign role", version: 170000, role: "foreign"},
+		{name: "superuser role", version: 170000, role: "super"},
+		{name: "new role with self grant", version: 170000, role: "new", selfGrant: "set, inherit", wantSet: true, wantAlter: true},
+		{name: "new role without self grant", version: 170000, role: "new", wantAlter: true},
+		{name: "self", version: 170000, role: "admin", wantSet: true, wantAlter: true},
+		{name: "CREATEROLE alters any role before 16", version: 150000, role: "foreign", wantAlter: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := &state{user: "admin", version: tt.version, createRole: true, roles: roles, createroleSelfGrant: tt.selfGrant}
+			if got := st.canSet(tt.role); got != tt.wantSet {
+				t.Errorf("canSet = %v, want %v", got, tt.wantSet)
+			}
+			if got := st.canAlter(tt.role); got != tt.wantAlter {
+				t.Errorf("canAlter = %v, want %v", got, tt.wantAlter)
+			}
+		})
+	}
+}
+
+func TestNonSuperuserWarnings(t *testing.T) {
+	t.Parallel()
+	st := &state{
+		user: "admin", version: 170000,
+		roles: map[string]roleAccess{"mine": {set: true, use: true}, "theirs": {}, "kept": {}, "ignored": {}},
+		owners: map[model.Object]string{
+			{Type: model.ObjectSchema, Database: "app", Schema: "s"}: "theirs",
+		},
+		desired: &model.Desired{
+			Roles:     []model.Role{{ID: pg("kept")}},
+			Databases: []model.Database{{Name: "app", Owner: "theirs"}, {Name: "ok", Owner: "mine"}, {Name: "same", Owner: "theirs"}},
+			Schemas:   []model.Schema{{Database: "app", Name: "s", Owner: "theirs"}, {Database: "app", Name: "new", Owner: "kept"}},
+			Ignore:    model.Ignore{Roles: []string{"ign.*"}},
+		},
+	}
+	cur := &model.Current{
+		Databases: []model.Database{{Name: "same", Owner: "theirs"}},
+		Roles:     []model.RoleState{{ID: pg("admin")}, {ID: pg("mine")}, {ID: pg("theirs")}, {ID: pg("kept")}, {ID: pg("ignored")}, {ID: pg("pg_monitor")}},
+	}
+	got := strings.Join(append(st.ownerWarnings(cur), st.pruneWarnings(cur)...), "\n")
+	for _, want := range []string{
+		`database "app": "admin" cannot SET ROLE "theirs"`,
+		`schema "new" in database "app": "admin" cannot SET ROLE "kept"`,
+		`role "theirs": "admin" does not have its privileges`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{`database "ok"`, `database "same"`, `schema "s"`, `role "mine"`, `role "kept"`, `role "ignored"`, "pg_monitor"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("unexpected %q in\n%s", unwanted, got)
+		}
+	}
+}
+
 func TestDriverWithoutInspectBehavesLikeDialect(t *testing.T) {
 	t.Parallel()
 	d := &Driver{}

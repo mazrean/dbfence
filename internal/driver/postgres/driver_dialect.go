@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
@@ -25,6 +26,17 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 		}
 	}
 	return d.Dialect.DropRole(id, reachable)
+}
+
+// AlterRole implements diff.Dialect. Changes to roles the connected user
+// may not alter are reported instead of planned, since they would stop
+// apply part-way.
+func (d *Driver) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.Statement, []string) {
+	stmts, warns := d.Dialect.AlterRole(r, cur, force)
+	if len(stmts) == 0 || d.st == nil || d.st.canAlter(r.ID.Name) {
+		return stmts, warns
+	}
+	return nil, append(warns, fmt.Sprintf("role %q differs from the configuration, but %q may not alter it (it needs ADMIN OPTION on the role, or superuser for superuser roles); not changed", r.ID, d.st.user))
 }
 
 // Revoke implements diff.Dialect. Each grantor's grant is revoked.

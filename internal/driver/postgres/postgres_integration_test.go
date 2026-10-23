@@ -347,6 +347,35 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("non-superuser admin limits are reported in plan", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE n_admin LOGIN CREATEROLE CREATEDB PASSWORD 'pw'", "CREATE ROLE n_alice LOGIN", "CREATE ROLE n_ghost")
+		d := s.open(t, "n_admin")
+		pw := "new"
+		desired := &model.Desired{
+			Engine:    model.EnginePostgres,
+			Roles:     []model.Role{{ID: pg("n_alice"), Password: &pw}, {ID: pg("n_rw")}},
+			Databases: []model.Database{{Name: "n_db", Owner: "n_rw"}},
+			Ignore:    model.Ignore{Roles: []string{"[^n].*|n_admin"}},
+		}
+		res, err := planFor(t, d, desired, diff.Options{ForcePassword: true})
+		for _, want := range []string{
+			`database "n_db": "n_admin" cannot SET ROLE "n_rw"`,
+			`role "n_alice" differs from the configuration, but "n_admin" may not alter it`,
+			`role "n_ghost": "n_admin" does not have its privileges`,
+		} {
+			if !strings.Contains(res.text, want) {
+				t.Errorf("plan lacks %q:\n%s", want, res.text)
+			}
+		}
+		if strings.Contains(res.text, "ALTER ROLE") {
+			t.Errorf("plan alters a role it may not:\n%s", res.text)
+		}
+		// The warned owner change is what fails.
+		if err == nil || !strings.Contains(err.Error(), `must be able to SET ROLE "n_rw"`) {
+			t.Errorf("apply error = %v", err)
+		}
+	})
+
 	t.Run("exec errors carry detail", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE detail_owner", "CREATE DATABASE detail_db OWNER detail_owner")
 		d := s.open(t, "postgres")

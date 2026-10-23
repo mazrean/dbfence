@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -122,8 +123,89 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		}
 		cur.InspectedDatabases = append(cur.InspectedDatabases, db.Name)
 	}
+	if !st.superuser {
+		cur.Warnings = append(cur.Warnings, st.ownerWarnings(cur)...)
+		cur.Warnings = append(cur.Warnings, st.pruneWarnings(cur)...)
+	}
 	d.st = st
 	return cur, nil
+}
+
+// canSet reports whether the connected user may make role an owner:
+// CREATE DATABASE ... OWNER, ALTER ... OWNER TO and CREATE SCHEMA ...
+// AUTHORIZATION need SET ROLE on it (membership before PostgreSQL 16).
+func (st *state) canSet(role string) bool {
+	if st.superuser || role == st.user {
+		return true
+	}
+	if a, ok := st.roles[role]; ok {
+		return a.set
+	}
+	// Created by the plan: PostgreSQL 16+ grants the creator SET only
+	// when createrole_self_grant includes it.
+	return st.version >= pg16 && slices.Contains(strings.Split(strings.ReplaceAll(st.createroleSelfGrant, " ", ""), ","), "set")
+}
+
+// ownerWarnings warns about owner changes the connected user cannot make.
+func (st *state) ownerWarnings(cur *model.Current) []string {
+	var warns []string
+	check := func(what, owner, have string) {
+		if owner != "" && owner != have && !st.canSet(owner) {
+			warns = append(warns, fmt.Sprintf("%s: %q cannot SET ROLE %q, so making it the owner will fail; run GRANT %s TO %s WITH SET TRUE, INHERIT FALSE first",
+				what, st.user, owner, Ident(owner), Ident(st.user)))
+		}
+	}
+	for _, db := range st.desired.Databases {
+		have := ""
+		if i := slices.IndexFunc(cur.Databases, func(c model.Database) bool { return c.Name == db.Name }); i >= 0 {
+			have = cur.Databases[i].Owner
+		}
+		check(fmt.Sprintf("database %q", db.Name), db.Owner, have)
+	}
+	for _, s := range st.desired.Schemas {
+		check(fmt.Sprintf("schema %q in database %q", s.Name, s.Database), s.Owner, st.owners[model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}])
+	}
+	return warns
+}
+
+// pruneWarnings warns about unmanaged roles whose objects the connected
+// user may not reassign, so that --prune would fail on them.
+func (st *state) pruneWarnings(cur *model.Current) []string {
+	var ignore []*regexp.Regexp
+	for _, p := range st.desired.Ignore.Roles {
+		if re, err := regexp.Compile("^(?:" + p + ")$"); err == nil {
+			ignore = append(ignore, re)
+		}
+	}
+	var warns []string
+	for _, r := range cur.Roles {
+		name := r.ID.Name
+		if name == st.user || st.roles[name].use || (Dialect{}).IsSystemRole(r.ID) ||
+			slices.ContainsFunc(st.desired.Roles, func(d model.Role) bool { return d.ID == r.ID }) ||
+			slices.ContainsFunc(ignore, func(re *regexp.Regexp) bool { return re.MatchString(name) }) {
+			continue
+		}
+		warns = append(warns, fmt.Sprintf("role %q: %q does not have its privileges, so dropping it with --prune will fail at REASSIGN OWNED; run GRANT %s TO %s first",
+			name, st.user, Ident(name), Ident(st.user)))
+	}
+	return warns
+}
+
+// canAlter reports whether the connected user may ALTER role: from
+// PostgreSQL 16 on it needs ADMIN OPTION on it, before that CREATEROLE;
+// only superusers may alter superusers.
+func (st *state) canAlter(role string) bool {
+	a, known := st.roles[role]
+	switch {
+	case st.superuser || role == st.user || !known:
+		return true
+	case a.superuser:
+		return false
+	case st.version >= pg16:
+		return a.admin
+	default:
+		return st.createRole
+	}
 }
 
 // providerDatabase reports databases reserved by PostgreSQL or a managed
