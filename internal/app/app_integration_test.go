@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,8 +15,11 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/mazrean/dbfence/internal/app"
+	"github.com/mazrean/dbfence/internal/apply"
+	"github.com/mazrean/dbfence/internal/driver/mysql"
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/plan"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
 )
@@ -366,6 +370,52 @@ func TestMySQLWithoutSystemTableAccess(t *testing.T) {
 			defer func() { _ = appDB.Close() }()
 			if err := appDB.PingContext(t.Context()); err != nil {
 				t.Errorf("dbf_it_app cannot log in with the declared password: %v", err)
+			}
+		})
+	}
+}
+
+// TestMySQLErrorsDoNotLeakSecrets checks that server errors quoting a
+// failed statement, including the truncated "near '...'" fragment of
+// syntax errors, never print the password.
+func TestMySQLErrorsDoNotLeakSecrets(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	drv, err := mysql.Open(t.Context(), h.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = drv.Close() }()
+	long := strings.Repeat("SECRET0123456789", 6)
+	tests := []struct {
+		name, prefix, password, wantMsg string
+		leak                            []string
+	}{
+		{
+			name: "truncated near fragment", prefix: "CREATE USER 'dbf_leak'@'%' IDENTIFIED WITH auth-pam BY ",
+			password: long, leak: []string{long[:8]}, wantMsg: "BY '<redacted>' at line 1",
+		},
+		{
+			name: "short password", prefix: "CREATE USER 'dbf_leak'@'x.example.com' IDENTIFIED WITH auth-pam BY ",
+			password: "x", wantMsg: "near '-pam BY '<redacted>'' at line 1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionCreate, Resource: `role "dbf_leak"`, Statements: []plan.Statement{
+				plan.SQL("", tt.prefix, plan.Secret(drv.Literal(tt.password))),
+			}}}}
+			err := apply.Run(t.Context(), drv, p, io.Discard, false)
+			if err == nil {
+				t.Fatal("apply succeeded")
+			}
+			if !strings.Contains(err.Error(), "1064") || !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("error = %v, want substring %q", err, tt.wantMsg)
+			}
+			for _, l := range tt.leak {
+				if strings.Contains(err.Error(), l) {
+					t.Errorf("error leaked %q: %v", l, err)
+				}
 			}
 		})
 	}

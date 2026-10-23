@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/mazrean/dbfence/internal/apply"
@@ -82,7 +83,7 @@ type Options struct {
 }
 
 // ErrAborted is returned when apply is not confirmed.
-var ErrAborted = errors.New("apply aborted")
+var ErrAborted = errors.New("apply cancelled")
 
 // Validate loads the configuration, evaluating every function.
 func (a *App) Validate(_ context.Context, o Options) error {
@@ -102,7 +103,16 @@ func (a *App) Plan(ctx context.Context, o Options) (*plan.Plan, error) {
 		return nil, err
 	}
 	defer closeQuietly(drv)
-	return p, p.Render(a.io.Out, o.ShowSecrets)
+	return p, a.render(p, o)
+}
+
+// render prints the plan to stdout and its warnings to stderr as well, so
+// they stay visible when stdout is redirected.
+func (a *App) render(p *plan.Plan, o Options) error {
+	if err := p.Render(a.io.Out, o.ShowSecrets); err != nil {
+		return err
+	}
+	return p.WriteWarnings(a.io.Err)
 }
 
 // Apply prints the plan, asks for confirmation, and executes it.
@@ -112,29 +122,74 @@ func (a *App) Apply(ctx context.Context, o Options) error {
 		return err
 	}
 	defer closeQuietly(drv)
-	if err = p.Render(a.io.Out, o.ShowSecrets); err != nil {
+	if err = a.render(p, o); err != nil {
 		return err
 	}
 	if p.Empty() {
 		return nil
 	}
 	if !o.AutoApprove {
-		if _, err = fmt.Fprint(a.io.Out, "Apply these changes? Only 'yes' is accepted: "); err != nil {
+		if err = a.confirm(ctx); err != nil {
 			return err
-		}
-		line, readErr := bufio.NewReader(a.io.In).ReadString('\n')
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return readErr
-		}
-		if strings.TrimSpace(line) != "yes" {
-			return ErrAborted
 		}
 	}
 	if err = apply.Run(ctx, drv, p, a.io.Out, o.ShowSecrets); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(a.io.Out, "Applied %d statements.\n", len(p.Statements()))
+	_, err = fmt.Fprintf(a.io.Out, "Applied %s.\n", plan.Count(len(p.Statements()), "statement"))
 	return err
+}
+
+// confirm asks for confirmation and returns nil only when the answer is
+// "yes". It returns as soon as ctx is cancelled (Ctrl-C), even while the
+// read is still blocked.
+func (a *App) confirm(ctx context.Context) error {
+	if _, err := fmt.Fprint(a.io.Out, "Apply these changes? Only 'yes' is accepted: "); err != nil {
+		return err
+	}
+	type answer struct {
+		err  error
+		line string
+	}
+	ch := make(chan answer, 1)
+	go func() {
+		line, err := bufio.NewReader(a.io.In).ReadString('\n')
+		ch <- answer{line: line, err: err}
+	}()
+	var ans answer
+	select {
+	case <-ctx.Done():
+		_, _ = fmt.Fprintln(a.io.Out)
+		return fmt.Errorf("%w: interrupted: %w", ErrAborted, context.Cause(ctx))
+	case ans = <-ch:
+	}
+	// Without a terminal echo (piped stdin or EOF) the cursor is still
+	// on the prompt line.
+	if !strings.HasSuffix(ans.line, "\n") || !isTerminal(a.io.In) {
+		if _, err := fmt.Fprintln(a.io.Out); err != nil {
+			return err
+		}
+	}
+	switch {
+	case ans.err != nil && !errors.Is(ans.err, io.EOF):
+		return fmt.Errorf("read confirmation: %w", ans.err)
+	case ans.err != nil && strings.TrimSpace(ans.line) == "":
+		return fmt.Errorf("%w: no confirmation received (stdin closed); pass --auto-approve to apply non-interactively", ErrAborted)
+	case strings.TrimSpace(ans.line) != "yes":
+		return fmt.Errorf("%w: the answer was not \"yes\"", ErrAborted)
+	}
+	return nil
+}
+
+// isTerminal reports whether r is a character device, whose input the
+// terminal echoes.
+func isTerminal(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }
 
 func closeQuietly(c io.Closer) { _ = c.Close() }

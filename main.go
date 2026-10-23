@@ -13,6 +13,12 @@ import (
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		// The first signal cancels ctx; restore the default handling so
+		// a second Ctrl-C kills the process even if something blocks.
+		<-ctx.Done()
+		stop()
+	}()
 	code := run(ctx, os.Args[1:], di.InitializeApp(ctx), os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
