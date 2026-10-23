@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/mazrean/dbfence/internal/model"
 )
 
 // Statement is a single SQL statement executed on Database ("" means the
@@ -26,7 +28,10 @@ type Statement struct {
 	kind   Kind
 	parts  []Fragment
 	notes  []string
-	target Target
+	// defaults are the roles a SET DEFAULT ROLE statement makes the
+	// default roles of its target; empty for SET DEFAULT ROLE NONE.
+	defaults []model.RoleID
+	target   Target
 }
 
 // New builds a statement of kind on target from SQL fragments. Dialect
@@ -52,6 +57,18 @@ func (s Statement) RoleChange() RoleChange { return s.role }
 // WithRoleChange returns s with the role attributes it sets.
 func (s Statement) WithRoleChange(c RoleChange) Statement {
 	s.role = c
+	return s
+}
+
+// DefaultRoles returns the roles a statement of KindSetDefaultRole makes
+// the default roles of its target role. They replace all current default
+// roles, so an empty result means none.
+func (s Statement) DefaultRoles() []model.RoleID { return slices.Clone(s.defaults) }
+
+// WithDefaultRoles returns s with the default roles it sets (see
+// DefaultRoles).
+func (s Statement) WithDefaultRoles(roles []model.RoleID) Statement {
+	s.defaults = slices.Clone(roles)
 	return s
 }
 

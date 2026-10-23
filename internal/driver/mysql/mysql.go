@@ -1103,7 +1103,7 @@ func (d Dialect) SetDefaultRoles(r model.Role, cur model.RoleState) []plan.State
 		roles = append(roles, d.Account(id))
 	}
 	return []plan.Statement{plan.New("", plan.KindSetDefaultRole, plan.RoleTarget(r.ID),
-		plan.Keyword("SET DEFAULT ROLE "), plan.Join(", ", roles...), plan.Keyword(" TO "), d.Account(r.ID))}
+		plan.Keyword("SET DEFAULT ROLE "), plan.Join(", ", roles...), plan.Keyword(" TO "), d.Account(r.ID)).WithDefaultRoles(want)}
 }
 
 // RevokeMembership implements diff.Dialect.

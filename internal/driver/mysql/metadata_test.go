@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/mazrean/dbfence/internal/model"
@@ -114,6 +115,35 @@ func TestStatementMetadata(t *testing.T) {
 				if got != tt.want[i] {
 					t.Errorf("%s:\nmetadata %+v\nwant     %+v", s.SQL(), got, tt.want[i])
 				}
+			}
+		})
+	}
+}
+
+// SET DEFAULT ROLE says which roles it makes the default roles, so that
+// the plan check can tell whether it narrows those of the connected user.
+func TestSetDefaultRolesMetadata(t *testing.T) {
+	t.Parallel()
+	u := model.RoleID{Name: "u", Host: "%"}
+	a, b := model.RoleID{Name: "a", Host: "%"}, model.RoleID{Name: "b", Host: "%"}
+	tests := []struct {
+		name     string
+		memberOf []model.RoleID
+		want     []model.RoleID
+		cur      model.RoleState
+	}{
+		{name: "roles", memberOf: []model.RoleID{b, a}, cur: model.RoleState{ID: u}, want: []model.RoleID{a, b}},
+		{name: "none", memberOf: []model.RoleID{}, cur: model.RoleState{ID: u, MemberOf: []model.RoleID{a}, DefaultRoles: []model.RoleID{a}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stmts := Dialect{}.SetDefaultRoles(model.Role{ID: u, MemberOf: tt.memberOf}, tt.cur)
+			if len(stmts) != 1 {
+				t.Fatalf("got %q, want one statement", sqls(stmts))
+			}
+			if got := stmts[0].DefaultRoles(); !slices.Equal(got, tt.want) {
+				t.Errorf("%s: DefaultRoles() = %v, want %v", stmts[0].SQL(), got, tt.want)
 			}
 		})
 	}

@@ -1,7 +1,7 @@
 // Package policy checks a finished plan against the protections dbfence
 // promises, independently of the diff logic that produced it. It reads
-// only statement metadata (Kind, Target, RoleChange, AsRole), never SQL
-// text, and does no I/O.
+// only statement metadata (Kind, Target, RoleChange, DefaultRoles,
+// AsRole), never SQL text, and does no I/O.
 package policy
 
 import (
@@ -102,7 +102,11 @@ func (c *checker) check(s plan.Statement) []string {
 		if t.Grantee == c.cur.CurrentUser {
 			return []string{fmt.Sprintf("revokes a membership or ADMIN OPTION of the connected user %q in %q", t.Grantee, t.Role)}
 		}
-	case plan.KindOther, plan.KindGrant, plan.KindRevoke, plan.KindGrantMembership, plan.KindSetDefaultRole,
+	case plan.KindSetDefaultRole:
+		if t.Role == c.cur.CurrentUser {
+			return c.narrowsDefaultRoles(s.DefaultRoles())
+		}
+	case plan.KindOther, plan.KindGrant, plan.KindRevoke, plan.KindGrantMembership,
 		plan.KindCreateDatabase, plan.KindAlterDatabase, plan.KindCreateSchema, plan.KindAlterSchema:
 		// Nothing they do can drop a protected object or lock the
 		// connected user out.
@@ -256,6 +260,30 @@ func (c *checker) lockOut(ch plan.RoleChange) []string {
 	}
 	if ch.ConnectionLimit != nil && *ch.ConnectionLimit == 0 && !c.superuser() {
 		out = append(out, fmt.Sprintf("sets connection limit 0 on the connected user %q, which is not a superuser", id))
+	}
+	return out
+}
+
+// narrowsDefaultRoles checks a SET DEFAULT ROLE of the connected user
+// (MySQL): it must keep every current default role, or, when those could
+// not be read, every role granted to it, so that later sessions still
+// have the privileges dbfence gets from them.
+func (c *checker) narrowsDefaultRoles(set []model.RoleID) []string {
+	id := c.cur.CurrentUser
+	i := slices.IndexFunc(c.cur.Roles, func(r model.RoleState) bool { return r.ID == id })
+	if i < 0 {
+		return []string{fmt.Sprintf("sets the default roles of the connected user %q, whose current default roles are unknown", id)}
+	}
+	cur := c.cur.Roles[i]
+	keep := cur.DefaultRoles
+	if cur.DefaultRolesUnknown {
+		keep = cur.MemberOf
+	}
+	var out []string
+	for _, r := range keep {
+		if !slices.Contains(set, r) {
+			out = append(out, fmt.Sprintf("removes %q from the default roles of the connected user %q", r, id))
+		}
 	}
 	return out
 }
