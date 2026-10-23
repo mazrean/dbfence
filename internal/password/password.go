@@ -196,6 +196,10 @@ func PostgresMD5(user, password string) string {
 	return "md5" + hex.EncodeToString(sum[:])
 }
 
+// maxSCRAMIterations bounds the PBKDF2 work a stored verifier can demand
+// from plan; PostgreSQL's default is 4096.
+const maxSCRAMIterations = 10_000_000
+
 // matchSCRAM checks "SCRAM-SHA-256$<iter>:<salt>$<StoredKey>:<ServerKey>".
 func matchSCRAM(verifier, password string) (bool, error) {
 	malformed := fmt.Errorf("%w: malformed SCRAM verifier", ErrUnsupported)
@@ -204,20 +208,27 @@ func matchSCRAM(verifier, password string) (bool, error) {
 		return false, malformed
 	}
 	iterStr, saltStr, ok1 := strings.Cut(params, ":")
-	storedStr, _, ok2 := strings.Cut(keys, ":")
+	storedStr, serverStr, ok2 := strings.Cut(keys, ":")
 	if !ok1 || !ok2 {
 		return false, malformed
 	}
 	iter, err := strconv.Atoi(iterStr)
-	if err != nil {
+	if err != nil || iter < 1 {
 		return false, malformed
 	}
+	if iter > maxSCRAMIterations {
+		return false, fmt.Errorf("%w: SCRAM iteration count above %d", ErrUnsupported, maxSCRAMIterations)
+	}
 	salt, err := base64.StdEncoding.DecodeString(saltStr)
-	if err != nil {
+	if err != nil || len(salt) == 0 {
 		return false, malformed
 	}
 	storedKey, err := base64.StdEncoding.DecodeString(storedStr)
-	if err != nil {
+	if err != nil || len(storedKey) != sha256.Size {
+		return false, malformed
+	}
+	serverKey, err := base64.StdEncoding.DecodeString(serverStr)
+	if err != nil || len(serverKey) != sha256.Size {
 		return false, malformed
 	}
 	got, err := SCRAMStoredKey(password, salt, iter)

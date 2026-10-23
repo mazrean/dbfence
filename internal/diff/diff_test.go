@@ -38,7 +38,7 @@ func scram(t *testing.T, pw string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return []byte("SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(key) + ":x")
+	return []byte("SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(key) + ":" + base64.StdEncoding.EncodeToString(make([]byte, 32)))
 }
 
 func pgDesired() *model.Desired {

@@ -71,8 +71,9 @@ func TestMatchPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scram := "SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" +
-		base64.StdEncoding.EncodeToString(key) + ":AAAA"
+	b64 := base64.StdEncoding.EncodeToString
+	key32 := b64(make([]byte, 32))
+	scram := "SCRAM-SHA-256$4096:" + b64(salt) + "$" + b64(key) + ":" + key32
 	tests := []struct {
 		name, verifier, user, password string
 		want, wantErr                  bool
@@ -80,6 +81,14 @@ func TestMatchPostgres(t *testing.T) {
 		{"scram match", scram, "app", "secret", true, false},
 		{"scram mismatch", scram, "app", "nope", false, false},
 		{"scram malformed", "SCRAM-SHA-256$x", "app", "secret", false, true},
+		{"scram zero iterations", "SCRAM-SHA-256$0:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram negative iterations", "SCRAM-SHA-256$-5:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram too many iterations", "SCRAM-SHA-256$10000001:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram empty salt", "SCRAM-SHA-256$4096:$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram empty keys", "SCRAM-SHA-256$4096:" + b64(salt) + "$:", "app", "secret", false, true},
+		{"scram short stored key", "SCRAM-SHA-256$4096:" + b64(salt) + "$AAAA:" + key32, "app", "secret", false, true},
+		{"scram short server key", "SCRAM-SHA-256$4096:" + b64(salt) + "$" + b64(key) + ":AAAA", "app", "secret", false, true},
+		{"scram missing server key", "SCRAM-SHA-256$4096:" + b64(salt) + "$" + b64(key), "app", "secret", false, true},
 		{"md5 match", PostgresMD5("app", "secret"), "app", "secret", true, false},
 		{"md5 other user", PostgresMD5("app", "secret"), "bob", "secret", false, false},
 		{"no password", "", "app", "secret", false, false},
