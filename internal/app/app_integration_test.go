@@ -250,6 +250,10 @@ func TestMySQLIntegration(t *testing.T) {
 	h.apply(app.Options{})
 	// Converging proves caching_sha2_password verification against a real server.
 	h.assertConverged(app.Options{})
+	// _ is escaped, so the grant does not cover look-alike databases.
+	if got := h.query("SELECT DISTINCT Db FROM mysql.db WHERE User LIKE 'dbf\\_it\\_%'"); len(got) != 1 || got[0] != `dbf\_it\_app` {
+		t.Errorf("granted database patterns = %q", got)
+	}
 
 	h.write(mysqlConfig("second"))
 	if n, out := h.plan(app.Options{}); n != 1 || !strings.Contains(out, "ALTER USER 'dbf_it_app'@'%' IDENTIFIED WITH caching_sha2_password BY '<redacted>'") {
@@ -259,11 +263,14 @@ func TestMySQLIntegration(t *testing.T) {
 	h.assertConverged(app.Options{})
 
 	h.exec("GRANT DELETE ON dbf_it_app.* TO 'dbf_it_app'@'%'")
+	h.exec("GRANT SELECT ON `dbf\\_it\\_app`.* TO 'dbf_it_ro'@'%' WITH GRANT OPTION")
+	h.exec("SET DEFAULT ROLE NONE TO 'dbf_it_app'@'%'")
 	h.exec("ALTER USER 'dbf_it_app'@'%' ACCOUNT LOCK")
 	h.exec("CREATE USER 'dbf_it_stray'@'%'")
 	h.exec("CREATE DATABASE dbf_it_legacy")
 	n, out := h.plan(app.Options{})
-	if n != 2 || !strings.Contains(out, `unmanaged role "dbf_it_stray@%"`) || !strings.Contains(out, `unmanaged database "dbf_it_legacy"`) {
+	if n != 4 || !strings.Contains(out, "REVOKE GRANT OPTION ON `dbf\\_it\\_app`.*") ||
+		!strings.Contains(out, "SET DEFAULT ROLE 'dbf_it_ro'@'%' TO 'dbf_it_app'@'%'") || !strings.Contains(out, `unmanaged role "dbf_it_stray@%"`) || !strings.Contains(out, `unmanaged database "dbf_it_legacy"`) {
 		t.Fatalf("drift plan: %d\n%s", n, out)
 	}
 	h.apply(app.Options{Prune: true})
@@ -341,6 +348,10 @@ func TestMySQLWithoutSystemTableAccess(t *testing.T) {
 			h.apply(app.Options{})
 			// Unknown state is re-asserted idempotently, so applying again must succeed.
 			h.apply(app.Options{})
+			// Created accounts do not make a partial account list look complete.
+			if _, out := h.plan(app.Options{}); !strings.Contains(out, tt.wantWarn) {
+				t.Errorf("plan after apply lacks %q:\n%s", tt.wantWarn, out)
+			}
 
 			if got := h.query("SELECT CONCAT(FROM_USER, '>', TO_USER) FROM mysql.role_edges WHERE TO_USER = 'dbf_it_app'"); len(got) != 1 || got[0] != "dbf_it_ro>dbf_it_app" {
 				t.Errorf("role edges = %v", got)

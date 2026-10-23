@@ -71,7 +71,9 @@ type RoleState struct {
 	// when the connected user cannot read verifiers.
 	PasswordHash     []byte
 	MemberOf         []RoleID
-	ConnectionLimit  int
+	// DefaultRoles are the roles activated at login (MySQL only).
+	DefaultRoles    []RoleID
+	ConnectionLimit int
 	CreateDB         bool
 	Replication      bool
 	BypassRLS        bool
@@ -83,6 +85,8 @@ type RoleState struct {
 	// AttributesUnknown is set when the account exists but its login,
 	// authentication plugin and password could not be read.
 	AttributesUnknown bool
+	// DefaultRolesUnknown is set when DefaultRoles could not be read.
+	DefaultRolesUnknown bool
 }
 
 // Schema is a PostgreSQL schema inside Database.
@@ -105,6 +109,10 @@ type Object struct {
 	Type     ObjectType
 	Database string
 	Schema   string
+	// Pattern is the raw MySQL grant target when an inspected grant is a
+	// wildcard pattern rather than a literal database name. Database then
+	// holds the pattern with escapes removed. Always empty in Desired.
+	Pattern string
 }
 
 func (o Object) String() string {
@@ -177,6 +185,9 @@ type Current struct {
 	Privileges []Privilege
 	// InspectedDatabases lists databases whose schemas were inspected.
 	InspectedDatabases []string
+	// Warnings are engine specific findings of the inspection that the
+	// plan reports.
+	Warnings []string
 	// Unreadable lists what could not be inspected.
 	Unreadable Unreadable
 }

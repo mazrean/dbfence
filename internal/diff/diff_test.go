@@ -286,7 +286,7 @@ func TestComputeMySQL(t *testing.T) {
 		`CREATE USER 'app'@'%' IDENTIFIED WITH caching_sha2_password BY '<redacted>'`,
 		"CREATE DATABASE `app` CHARACTER SET utf8mb4",
 		`GRANT 'reader'@'%' TO 'app'@'%'`,
-		`SET DEFAULT ROLE ALL TO 'app'@'%'`,
+		`SET DEFAULT ROLE 'reader'@'%' TO 'app'@'%'`,
 		"GRANT INSERT, SELECT ON `app`.* TO 'app'@'%'",
 	}
 	if diff := cmp.Diff(want, statements(p)); diff != "" {
@@ -300,7 +300,7 @@ func TestComputeMySQL(t *testing.T) {
 	salt := "abcdefghij0123456789"
 	cur.Roles = append(cur.Roles,
 		model.RoleState{ID: reader},
-		model.RoleState{ID: app, Login: true, AuthPlugin: password.PluginCachingSHA2, MemberOf: []model.RoleID{reader}, PasswordReadable: true,
+		model.RoleState{ID: app, Login: true, AuthPlugin: password.PluginCachingSHA2, MemberOf: []model.RoleID{reader}, DefaultRoles: []model.RoleID{reader}, PasswordReadable: true,
 			PasswordHash: []byte("$A$005$" + salt + string(password.SHA256Crypt([]byte(`p'w\`), []byte(salt), 5000)))},
 	)
 	cur.Databases = append(cur.Databases, model.Database{Name: "app", Charset: "utf8mb4", Collation: "utf8mb4_0900_ai_ci"})
@@ -358,7 +358,7 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 			want: []string{
 				`CREATE USER 'reader'@'%' ACCOUNT LOCK`,
 				`GRANT 'reader'@'%' TO 'app'@'%'`,
-				`SET DEFAULT ROLE ALL TO 'app'@'%'`,
+				`SET DEFAULT ROLE 'reader'@'%' TO 'app'@'%'`,
 				"GRANT SELECT ON `app`.* TO 'app'@'%'",
 			},
 			wantWarns: []string{"cannot read login state", "cannot read role memberships", "cannot read privileges", `unmanaged role "stray@%"`},
@@ -367,7 +367,7 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 			name: "forced password with unknown credentials",
 			current: &model.Current{
 				CurrentUser: me,
-				Roles:       []model.RoleState{{ID: me, AttributesUnknown: true}, {ID: reader, AttributesUnknown: true}, {ID: app, AttributesUnknown: true, MemberOf: []model.RoleID{reader}}},
+				Roles:       []model.RoleState{{ID: me, AttributesUnknown: true}, {ID: reader, AttributesUnknown: true}, {ID: app, AttributesUnknown: true, MemberOf: []model.RoleID{reader}, DefaultRoles: []model.RoleID{reader}}},
 				Databases:   []model.Database{{Name: "app"}},
 				Privileges:  []model.Privilege{{Grantee: app, Object: dbObj("app"), Name: "SELECT"}},
 				Unreadable:  model.Unreadable{RoleAttributes: true},
@@ -389,7 +389,7 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 				`CREATE USER IF NOT EXISTS 'reader'@'%' ACCOUNT LOCK`,
 				`CREATE USER IF NOT EXISTS 'app'@'%' IDENTIFIED BY '<redacted>'`,
 				`GRANT 'reader'@'%' TO 'app'@'%'`,
-				`SET DEFAULT ROLE ALL TO 'app'@'%'`,
+				`SET DEFAULT ROLE 'reader'@'%' TO 'app'@'%'`,
 				"GRANT SELECT ON `app`.* TO 'app'@'%'",
 				"REVOKE DELETE ON `app`.* FROM 'app'@'%'",
 				"DROP DATABASE `legacy`",

@@ -51,6 +51,13 @@ type Dialect interface {
 	RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement
 }
 
+// DefaultRoleSetter is implemented by dialects whose granted roles must be
+// activated separately (MySQL). SetDefaultRoles is called once per role
+// with managed memberships, after its memberships are granted and revoked.
+type DefaultRoleSetter interface {
+	SetDefaultRoles(r model.Role, cur model.RoleState) []plan.Statement
+}
+
 // Execution phases. Roles come first because databases and schemas
 // reference owners; drops run in reverse dependency order.
 const (
@@ -86,7 +93,7 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 	if err != nil {
 		return nil, err
 	}
-	df := &differ{d: d, opts: opts, desired: desired, current: current, ignore: ig}
+	df := &differ{d: d, opts: opts, desired: desired, current: current, ignore: ig, warnings: slices.Clone(current.Warnings)}
 	if !current.Unreadable.Roles {
 		if err := df.checkReferences(); err != nil {
 			return nil, err
@@ -213,13 +220,13 @@ func (df *differ) roles() {
 				df.add(phaseMembership, plan.ActionGrant, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.GrantMembership(r.ID, m))
 			}
 		}
-		if unknown {
-			continue
-		}
 		for _, m := range model.SortRoleIDs(slices.Clone(have)) {
-			if !slices.Contains(want, m) {
+			if !unknown && !slices.Contains(want, m) {
 				df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.RevokeMembership(r.ID, m))
 			}
+		}
+		if s, ok := df.d.(DefaultRoleSetter); ok {
+			df.add(phaseMembership, plan.ActionUpdate, "default roles of "+roleResource(r.ID), s.SetDefaultRoles(r, cur))
 		}
 	}
 }
