@@ -42,6 +42,7 @@ func run(pass *analysis.Pass) (any, error) {
 			case *ast.CallExpr:
 				checkConversion(pass, n)
 			case *ast.Ident:
+				checkInstance(pass, n)
 				if trusted || test {
 					return true
 				}
@@ -67,6 +68,50 @@ func checkConversion(pass *analysis.Pass, call *ast.CallExpr) {
 		return
 	}
 	pass.Reportf(call.Pos(), "plan.Keyword converts a non-constant value to SQL text; use a constant, or quote the value with the engine Dialect")
+}
+
+// checkInstance reports id when it instantiates a generic function with
+// plan.Keyword for a type parameter whose constraint has type terms (such
+// as ~string), since the function may then convert a string to it.
+func checkInstance(pass *analysis.Pass, id *ast.Ident) {
+	inst, ok := pass.TypesInfo.Instances[id]
+	if !ok {
+		return
+	}
+	fn, ok := pass.TypesInfo.Uses[id].(*types.Func)
+	if !ok {
+		return
+	}
+	sig, ok := fn.Origin().Type().(*types.Signature)
+	if !ok {
+		return
+	}
+	tparams := sig.TypeParams()
+	for i := range inst.TypeArgs.Len() {
+		if i < tparams.Len() && isKeyword(inst.TypeArgs.At(i)) && hasTypeTerms(tparams.At(i).Constraint()) {
+			pass.Reportf(id.Pos(), "plan.Keyword instantiates a type parameter that admits string conversions; SQL text must be a constant")
+		}
+	}
+}
+
+// hasTypeTerms reports whether the constraint t lists types, directly or
+// through embedded interfaces.
+func hasTypeTerms(t types.Type) bool {
+	iface, ok := t.Underlying().(*types.Interface)
+	if !ok {
+		return true
+	}
+	for i := range iface.NumEmbeddeds() {
+		switch e := iface.EmbeddedType(i).(type) {
+		case *types.Union:
+			return true
+		default:
+			if _, ok := e.Underlying().(*types.Interface); !ok || hasTypeTerms(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isKeyword(t types.Type) bool {

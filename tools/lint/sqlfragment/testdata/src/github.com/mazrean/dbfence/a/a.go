@@ -12,6 +12,19 @@ type word string
 
 const typed word = "DROP ROLE "
 
+type stringish interface{ ~string }
+
+func conv[T ~string](s string) T { return T(s) }
+
+func same[T stringish](v T) T { return v }
+
+func pick[T comparable](a, b T) T {
+	if a == b {
+		return a
+	}
+	return b
+}
+
 func f(name string, w word, k plan.Keyword) {
 	// A runtime string cannot become SQL text.
 	_ = plan.SQL("", plan.Keyword(name))                    // want `plan.Keyword converts a non-constant value to SQL text`
@@ -25,6 +38,10 @@ func f(name string, w word, k plan.Keyword) {
 	_ = plan.SQL("", plan.NewToken(name))                   // want `plan.NewToken may be used only by the engine Dialects`
 	quote := plan.QuotedIdent                               // want `plan.QuotedIdent may be used only by the engine Dialects`
 	_ = quote
+
+	_ = plan.SQL("", conv[plan.Keyword](name)) // want `plan.Keyword instantiates a type parameter that admits string conversions`
+	_ = same(k)                                // want `plan.Keyword instantiates a type parameter that admits string conversions`
+	_ = pick[plan.Keyword](k, "CASCADE")
 
 	// Constants, Keyword values and numbers are fine.
 	_ = plan.SQL("", plan.Keyword("GRANT "), plan.Keyword(create), plan.Keyword(typed))
