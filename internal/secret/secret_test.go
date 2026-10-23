@@ -1,0 +1,155 @@
+package secret
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+func TestRedactVariants(t *testing.T) {
+	t.Parallel()
+	const pw = "p@ss w'rd/<&>+\u00e9"
+	// The registered value has é decomposed; output may show it NFC.
+	const decomposed = "p@ss w'rd/<&>+e\u0301"
+	jsonText, err := json.Marshal(pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		text string
+	}{
+		{name: "raw", text: decomposed},
+		{name: "NFC", text: pw},
+		{name: "query escape", text: url.QueryEscape(pw)},
+		{name: "path escape", text: url.PathEscape(pw)},
+		{name: "urlencode", text: strings.ReplaceAll(url.QueryEscape(pw), "+", "%20")},
+		{name: "base64 std", text: base64.StdEncoding.EncodeToString([]byte(pw))},
+		{name: "base64 url", text: base64.URLEncoding.EncodeToString([]byte(pw))},
+		{name: "base64 raw url", text: base64.RawURLEncoding.EncodeToString([]byte(pw))},
+		{name: "json", text: string(jsonText)},
+		{name: "go quoted", text: fmt.Sprintf("%q", pw)},
+		{name: "sql literal", text: "'" + strings.ReplaceAll(pw, "'", "''") + "'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewRegistry()
+			r.Add(decomposed)
+			got := r.Redact("before " + tt.text + " after")
+			if !strings.Contains(got, Placeholder) || strings.Contains(got, "ss w") || strings.Contains(got, "ss%20w") {
+				t.Errorf("Redact = %q, want the %s form redacted", got, tt.name)
+			}
+			if !strings.HasPrefix(got, "before ") || !strings.HasSuffix(got, " after") {
+				t.Errorf("Redact = %q, want the surrounding text kept", got)
+			}
+		})
+	}
+}
+
+func TestRedact(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		secrets []string
+	}{
+		{name: "nothing registered", secrets: nil, in: "hello", want: "hello"},
+		{name: "short secret is ignored", secrets: []string{"abc"}, in: "abc abcd", want: "abc abcd"},
+		{name: "minimum length", secrets: []string{"abcd"}, in: "xabcdx", want: "x<redacted>x"},
+		{name: "every occurrence", secrets: []string{"hunter2"}, in: "hunter2 and hunter2", want: "<redacted> and <redacted>"},
+		{name: "longest wins", secrets: []string{"secret", "secret-long"}, in: "a secret-long b", want: "a <redacted> b"},
+		{name: "overlapping secrets leave no fragment", secrets: []string{"abcd", "cdefgh"}, in: "xabcdefghx", want: "x<redacted>x"},
+		{name: "overlapping occurrences", secrets: []string{"aaaa"}, in: "aaaaaa", want: "<redacted>"},
+		{name: "multi-line secret is redacted per line", secrets: []string{"line-one\nline-two"}, in: "line-one\n", want: "<redacted>\n"},
+		{name: "control characters as escaped in output", secrets: []string{"pw\x1b[2Kxyz"}, in: `pw\x1b[2Kxyz`, want: "<redacted>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewRegistry()
+			for _, s := range tt.secrets {
+				r.Add(s)
+			}
+			if got := r.Redact(tt.in); got != tt.want {
+				t.Errorf("Redact(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
+
+func TestWriter(t *testing.T) {
+	t.Parallel()
+	const pw = "s3cr3t-value"
+	tests := []struct {
+		name   string
+		want   string
+		writes []string
+		show   bool
+		flush  bool
+	}{
+		{name: "split across writes", writes: []string{"password s3c", "r3t-", "value ok\n"}, want: "password <redacted> ok\n"},
+		{name: "partial line waits for a newline", writes: []string{"s3cr3t-"}, want: ""},
+		{name: "flush writes the partial line redacted", writes: []string{"prompt s3cr3t-value: "}, flush: true, want: "prompt <redacted>: "},
+		{name: "several lines in one write", writes: []string{"a s3cr3t-value\nb s3cr3t-value\nc s3"}, want: "a <redacted>\nb <redacted>\n"},
+		{name: "show secrets bypasses redaction", writes: []string{"pw s3cr3t-value\n"}, show: true, want: "pw s3cr3t-value\n"},
+		{name: "control characters are escaped", writes: []string{"name \x1b[2K\r\ttab\n"}, want: "name \\x1b[2K\\r\ttab\n"},
+		{name: "show secrets still escapes", writes: []string{"\x1b\n"}, show: true, want: "\\x1b\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewRegistry()
+			r.Add(pw)
+			var out bytes.Buffer
+			w := NewWriter(&out, r)
+			w.ShowSecrets(tt.show)
+			for _, s := range tt.writes {
+				n, err := w.Write([]byte(s))
+				if err != nil || n != len(s) {
+					t.Fatalf("Write(%q) = %d, %v", s, n, err)
+				}
+			}
+			if tt.flush {
+				if err := w.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out.String() != tt.want {
+				t.Errorf("output = %q, want %q", out.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestWriterErrors(t *testing.T) {
+	t.Parallel()
+	w := NewWriter(failWriter{}, NewRegistry())
+	if _, err := w.Write([]byte("line\n")); err == nil {
+		t.Error("Write: want the underlying error")
+	}
+	if _, err := w.Write([]byte("partial")); err != nil {
+		t.Errorf("Write of a partial line = %v, want nil", err)
+	}
+	if err := w.Flush(); err == nil {
+		t.Error("Flush: want the underlying error")
+	}
+}
+
+func TestRegisterDefault(t *testing.T) {
+	t.Parallel()
+	Register("default-registry-secret")
+	if got := Default().Redact("x default-registry-secret"); got != "x "+Placeholder {
+		t.Errorf("Default().Redact = %q", got)
+	}
+}
