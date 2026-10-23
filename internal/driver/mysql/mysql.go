@@ -801,7 +801,11 @@ func (d Dialect) DropRole(id model.RoleID, _ []string) []plan.Statement {
 }
 
 // GrantMembership implements diff.Dialect. SetDefaultRoles activates the role.
-func (d Dialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement {
+func (d Dialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) ([]plan.Statement, []string) {
+	return d.grantMembership(member, role, opts), nil
+}
+
+func (d Dialect) grantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement {
 	q := "GRANT " + d.Account(role) + " TO " + d.Account(member)
 	if opts.Admin != nil && *opts.Admin {
 		q += " WITH ADMIN OPTION"
@@ -817,9 +821,9 @@ func (d Dialect) AlterMembership(member, role model.RoleID, want model.Membershi
 		return nil, nil
 	}
 	if *want.Admin {
-		return d.GrantMembership(member, role, want), nil
+		return d.grantMembership(member, role, want), nil
 	}
-	return append(d.RevokeMembership(member, role), d.GrantMembership(member, role, want)...), nil
+	return append(d.revokeMembership(member, role), d.grantMembership(member, role, want)...), nil
 }
 
 // losesAdmin reports whether AlterMembership revokes and grants role again
@@ -853,7 +857,11 @@ func (d Dialect) SetDefaultRoles(r model.Role, cur model.RoleState) []plan.State
 }
 
 // RevokeMembership implements diff.Dialect.
-func (d Dialect) RevokeMembership(member, role model.RoleID) []plan.Statement {
+func (d Dialect) RevokeMembership(member, role model.RoleID) ([]plan.Statement, []string) {
+	return d.revokeMembership(member, role), nil
+}
+
+func (d Dialect) revokeMembership(member, role model.RoleID) []plan.Statement {
 	return []plan.Statement{plan.SQL("", "REVOKE "+d.Account(role)+" FROM "+d.Account(member))}
 }
 
@@ -925,12 +933,12 @@ func (d Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, g
 }
 
 // Revoke implements diff.Dialect.
-func (d Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "REVOKE "+strings.Join(privs, ", ")+" ON "+d.grantTarget(obj)+" FROM "+d.Account(grantee))}
+func (d Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
+	return []plan.Statement{plan.SQL("", "REVOKE "+strings.Join(privs, ", ")+" ON "+d.grantTarget(obj)+" FROM "+d.Account(grantee))}, nil
 }
 
 // RevokeGrantOption implements diff.Dialect. MySQL tracks the grant
 // option per level, not per privilege.
-func (d Dialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, _ []string) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "REVOKE GRANT OPTION ON "+d.grantTarget(obj)+" FROM "+d.Account(grantee))}
+func (d Dialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, _ []string) ([]plan.Statement, []string) {
+	return []plan.Statement{plan.SQL("", "REVOKE GRANT OPTION ON "+d.grantTarget(obj)+" FROM "+d.Account(grantee))}, nil
 }

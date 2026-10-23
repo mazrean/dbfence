@@ -131,7 +131,7 @@ func (d *simDialect) DropRole(id model.RoleID, databases []string) []plan.Statem
 	})
 }
 
-func (d *simDialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement {
+func (d *simDialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) ([]plan.Statement, []string) {
 	return d.op(func(cur *model.Current) error {
 		i := roleIndex(cur, member)
 		if i < 0 || roleIndex(cur, role) < 0 {
@@ -144,7 +144,7 @@ func (d *simDialect) GrantMembership(member, role model.RoleID, opts model.Membe
 			setMemberOptions(r, role, model.MembershipState{Inherit: r.Inherit, Set: true}, opts)
 		}
 		return nil
-	})
+	}), nil
 }
 
 func setMemberOptions(r *model.RoleState, role model.RoleID, st model.MembershipState, opts model.MembershipOptions) {
@@ -171,13 +171,13 @@ func (d *simDialect) AlterMembership(member, role model.RoleID, want model.Membe
 	}), nil
 }
 
-func (d *simDialect) RevokeMembership(member, role model.RoleID) []plan.Statement {
+func (d *simDialect) RevokeMembership(member, role model.RoleID) ([]plan.Statement, []string) {
 	return d.op(func(cur *model.Current) error {
 		i := roleIndex(cur, member)
 		cur.Roles[i].MemberOf = slices.DeleteFunc(cur.Roles[i].MemberOf, func(m model.RoleID) bool { return m == role })
 		delete(cur.Roles[i].MemberOptions, role)
 		return nil
-	})
+	}), nil
 }
 
 func (d *simDialect) requireRole(cur *model.Current, name string) error {
@@ -327,17 +327,17 @@ func (d *simDialect) Grant(grantee model.RoleID, obj model.Object, privs []strin
 	})
 }
 
-func (d *simDialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
+func (d *simDialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
 	return d.op(func(cur *model.Current) error {
 		materialize(cur, obj)
 		cur.Privileges = slices.DeleteFunc(cur.Privileges, func(p model.Privilege) bool {
 			return p.Grantee == grantee && p.Object == obj && slices.Contains(privs, p.Name)
 		})
 		return nil
-	})
+	}), nil
 }
 
-func (d *simDialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
+func (d *simDialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
 	return d.op(func(cur *model.Current) error {
 		for i, p := range cur.Privileges {
 			if p.Grantee == grantee && p.Object == obj && slices.Contains(privs, p.Name) {
@@ -345,7 +345,7 @@ func (d *simDialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, p
 			}
 		}
 		return nil
-	})
+	}), nil
 }
 
 // convergeDesired is a configuration exercising owners, memberships,

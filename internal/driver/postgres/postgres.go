@@ -443,13 +443,18 @@ func (Dialect) DropRole(id model.RoleID, databases []string) []plan.Statement {
 }
 
 // GrantMembership implements diff.Dialect.
-func (Dialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement {
+func (Dialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) ([]plan.Statement, []string) {
+	return []plan.Statement{newMembership(member.Name, role.Name, opts)}, nil
+}
+
+// newMembership renders the GRANT of a membership that does not exist.
+func newMembership(member, role string, opts model.MembershipOptions) plan.Statement {
 	if opts.Admin != nil && !*opts.Admin {
 		// A new grant has no ADMIN OPTION; GRANT cannot express FALSE
 		// before PostgreSQL 16.
 		opts.Admin = nil
 	}
-	return []plan.Statement{plan.SQL("", grantMembership(member.Name, role.Name, opts))}
+	return plan.SQL("", grantMembership(member, role, opts))
 }
 
 // grantMembership renders GRANT role TO member with the declared
@@ -493,8 +498,8 @@ func (Dialect) AlterMembership(member, role model.RoleID, want model.MembershipO
 }
 
 // RevokeMembership implements diff.Dialect.
-func (Dialect) RevokeMembership(member, role model.RoleID) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "REVOKE "+Ident(role.Name)+" FROM "+Ident(member.Name))}
+func (Dialect) RevokeMembership(member, role model.RoleID) ([]plan.Statement, []string) {
+	return []plan.Statement{plan.SQL("", "REVOKE "+Ident(role.Name)+" FROM "+Ident(member.Name))}, nil
 }
 
 // CreateDatabase implements diff.Dialect.
@@ -654,13 +659,13 @@ func (Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, gra
 }
 
 // Revoke implements diff.Dialect.
-func (Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
+func (Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
 	db, target := onObject(obj)
-	return []plan.Statement{plan.SQL(db, "REVOKE "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Grantee(grantee.Name))}
+	return []plan.Statement{plan.SQL(db, "REVOKE "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Grantee(grantee.Name))}, nil
 }
 
 // RevokeGrantOption implements diff.Dialect.
-func (Dialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
+func (Dialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
 	db, target := onObject(obj)
-	return []plan.Statement{plan.SQL(db, "REVOKE GRANT OPTION FOR "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Grantee(grantee.Name))}
+	return []plan.Statement{plan.SQL(db, "REVOKE GRANT OPTION FOR "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Grantee(grantee.Name))}, nil
 }

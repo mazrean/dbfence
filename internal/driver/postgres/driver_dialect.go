@@ -227,20 +227,20 @@ func (st *state) alterMembership(member, role string, want model.MembershipOptio
 }
 
 // Revoke implements diff.Dialect. Each grantor's grant is revoked.
-func (d *Driver) Revoke(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
+func (d *Driver) Revoke(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
 	if d.st == nil {
 		return d.Dialect.Revoke(grantee, obj, privs)
 	}
-	return d.st.revoke(grantee.Name, obj, privs, false)
+	return d.st.revoke(grantee.Name, obj, privs, false), nil
 }
 
 // RevokeGrantOption implements diff.Dialect. Each grantor's grant option
 // is revoked.
-func (d *Driver) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
+func (d *Driver) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
 	if d.st == nil {
 		return d.Dialect.RevokeGrantOption(grantee, obj, privs)
 	}
-	return d.st.revoke(grantee.Name, obj, privs, true)
+	return d.st.revoke(grantee.Name, obj, privs, true), nil
 }
 
 // DefaultPublicPrivileges implements diff.PublicDefaulter for the
@@ -255,11 +255,11 @@ func (d *Driver) DefaultPublicPrivileges(obj model.Object) []string {
 // RevokeMembership implements diff.Dialect. From PostgreSQL 16 on a
 // membership has one grant per grantor, and REVOKE only removes the
 // grant named by GRANTED BY.
-func (d *Driver) RevokeMembership(member, role model.RoleID) []plan.Statement {
+func (d *Driver) RevokeMembership(member, role model.RoleID) ([]plan.Statement, []string) {
 	if d.st == nil || d.st.version < pg16 {
 		return d.Dialect.RevokeMembership(member, role)
 	}
-	return d.st.revokeMembership(member.Name, role.Name)
+	return d.st.revokeMembership(member.Name, role.Name), nil
 }
 
 // cascadeNote explains a CASCADE in the plan output: what grantor
@@ -437,7 +437,7 @@ func (st *state) revokeMembership(member, role string) []plan.Statement {
 		out = append(out, plan.SQL("", q))
 	}
 	if !revoked {
-		out = Dialect{}.RevokeMembership(model.RoleID{Name: member}, model.RoleID{Name: role})
+		out = []plan.Statement{plan.SQL("", "REVOKE "+Ident(role)+" FROM "+Ident(member))}
 	}
 	return append(out, st.regrantMembers(role, dependents)...)
 }
@@ -452,7 +452,7 @@ func (st *state) regrantMembers(role string, dependents []string) []plan.Stateme
 			return r.ID.Name == dep && slices.Contains(r.MemberOf, id)
 		})
 		if i >= 0 {
-			out = append(out, Dialect{}.GrantMembership(model.RoleID{Name: dep}, id, st.desired.Roles[i].MemberOptions[id])...)
+			out = append(out, newMembership(dep, role, st.desired.Roles[i].MemberOptions[id]))
 		}
 	}
 	return out

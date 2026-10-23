@@ -37,12 +37,14 @@ type Dialect interface {
 	// DropRole drops id. databases lists existing databases that survive the plan.
 	DropRole(id model.RoleID, databases []string) []plan.Statement
 	// GrantMembership grants role to member with the declared options.
-	GrantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement
+	// Like the other methods returning warnings, it reports changes the
+	// connected user may not make instead of planning them.
+	GrantMembership(member, role model.RoleID, opts model.MembershipOptions) ([]plan.Statement, []string)
 	// AlterMembership converges the options of the existing membership of
 	// member in role to the declared want. It is called only when a
 	// declared option differs from have.
 	AlterMembership(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string)
-	RevokeMembership(member, role model.RoleID) []plan.Statement
+	RevokeMembership(member, role model.RoleID) ([]plan.Statement, []string)
 
 	CreateDatabase(db model.Database) []plan.Statement
 	AlterDatabase(db, cur model.Database) ([]plan.Statement, []string)
@@ -53,8 +55,8 @@ type Dialect interface {
 	DropSchema(s model.Schema) []plan.Statement
 
 	Grant(grantee model.RoleID, obj model.Object, privs []string, grantOption bool) []plan.Statement
-	Revoke(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement
-	RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement
+	Revoke(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string)
+	RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string)
 }
 
 // DefaultRoleSetter is implemented by dialects whose granted roles must be
@@ -151,6 +153,12 @@ func (df *differ) add(phase int, action plan.Action, resource string, stmts []pl
 	c := change{phase: phase}
 	c.Action, c.Resource, c.Statements = action, resource, stmts
 	df.changes = append(df.changes, c)
+}
+
+// addWarned adds the statements and warnings returned by a Dialect method.
+func (df *differ) addWarned(phase int, action plan.Action, resource string, stmts []plan.Statement, warns []string) {
+	df.warnings = append(df.warnings, warns...)
+	df.add(phase, action, resource, stmts)
 }
 
 func (df *differ) warn(format string, args ...any) {
@@ -273,7 +281,8 @@ func (df *differ) roles() {
 		for _, m := range want {
 			opts := r.MemberOptions[m]
 			if unknown || !slices.Contains(have, m) {
-				df.add(phaseMembership, plan.ActionGrant, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.GrantMembership(r.ID, m, opts))
+				stmts, warns := df.d.GrantMembership(r.ID, m, opts)
+				df.addWarned(phaseMembership, plan.ActionGrant, fmt.Sprintf("membership of %q in %q", r.ID, m), stmts, warns)
 				continue
 			}
 			df.membershipOptions(r.ID, m, opts, cur.MemberOptions[m])
@@ -286,7 +295,8 @@ func (df *differ) roles() {
 				df.warn("not revoking membership of the connected user %q in %q: dbfence may rely on it", df.show(r.ID), df.show(m))
 				continue
 			}
-			df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", df.show(r.ID), df.show(m)), df.d.RevokeMembership(r.ID, m))
+			stmts, warns := df.d.RevokeMembership(r.ID, m)
+			df.addWarned(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", df.show(r.ID), df.show(m)), stmts, warns)
 		}
 		if s, ok := df.d.(DefaultRoleSetter); ok {
 			if self {
@@ -568,11 +578,13 @@ func (df *differ) privileges() {
 	}
 	for _, g := range sortedGroups(revokeOpts) {
 		privs := sortedPrivs(revokeOpts[g])
-		df.add(phaseRevoke, plan.ActionRevoke, "grant option for "+res(g, privs, "from"), df.d.RevokeGrantOption(g.grantee, g.obj, privs))
+		stmts, warns := df.d.RevokeGrantOption(g.grantee, g.obj, privs)
+		df.addWarned(phaseRevoke, plan.ActionRevoke, "grant option for "+res(g, privs, "from"), stmts, warns)
 	}
 	for _, g := range sortedGroups(revokes) {
 		privs := sortedPrivs(revokes[g])
-		df.add(phaseRevoke, plan.ActionRevoke, res(g, privs, "from"), df.d.Revoke(g.grantee, g.obj, privs))
+		stmts, warns := df.d.Revoke(g.grantee, g.obj, privs)
+		df.addWarned(phaseRevoke, plan.ActionRevoke, res(g, privs, "from"), stmts, warns)
 		df.warnHeldByPublic(g, privs)
 	}
 }

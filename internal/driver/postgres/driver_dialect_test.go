@@ -8,6 +8,9 @@ import (
 	"github.com/mazrean/dbfence/internal/plan"
 )
 
+// first drops the warnings returned with stmts.
+func first(stmts []plan.Statement, _ []string) []plan.Statement { return stmts }
+
 func sqlOf(stmts []plan.Statement) string {
 	out := make([]string, len(stmts))
 	for i, s := range stmts {
@@ -361,15 +364,15 @@ func TestDriverWithoutInspectBehavesLikeDialect(t *testing.T) {
 	t.Parallel()
 	d := &Driver{}
 	obj := model.Object{Type: model.ObjectDatabase, Database: "app"}
-	if got, want := sqlOf(d.Revoke(pg("a"), obj, []string{"CONNECT"})), sqlOf(Dialect{}.Revoke(pg("a"), obj, []string{"CONNECT"})); got != want {
+	if got, want := sqlOf(first(d.Revoke(pg("a"), obj, []string{"CONNECT"}))), sqlOf(first(Dialect{}.Revoke(pg("a"), obj, []string{"CONNECT"}))); got != want {
 		t.Errorf("Revoke = %s, want %s", got, want)
 	}
-	if got := sqlOf(d.RevokeMembership(pg("u"), pg("g"))); got != `REVOKE "g" FROM "u"` {
+	if got := sqlOf(first(d.RevokeMembership(pg("u"), pg("g")))); got != `REVOKE "g" FROM "u"` {
 		t.Errorf("RevokeMembership = %s", got)
 	}
 	// Before PostgreSQL 16 there is a single grant without GRANTED BY.
 	d.st = &state{version: 150000, members: []memberEntry{{role: "g", member: "u", grantor: "x"}}}
-	if got := sqlOf(d.RevokeMembership(pg("u"), pg("g"))); got != `REVOKE "g" FROM "u"` {
+	if got := sqlOf(first(d.RevokeMembership(pg("u"), pg("g")))); got != `REVOKE "g" FROM "u"` {
 		t.Errorf("RevokeMembership on 15 = %s", got)
 	}
 }
@@ -383,7 +386,7 @@ func TestPublicRendering(t *testing.T) {
 		got  []plan.Statement
 	}{
 		{name: "grant", got: Dialect{}.Grant(model.PublicRole, db, []string{"CONNECT"}, false), want: `GRANT CONNECT ON DATABASE "app" TO PUBLIC`},
-		{name: "revoke", got: Dialect{}.Revoke(model.PublicRole, db, []string{"CONNECT"}), want: `REVOKE CONNECT ON DATABASE "app" FROM PUBLIC`},
+		{name: "revoke", got: first(Dialect{}.Revoke(model.PublicRole, db, []string{"CONNECT"})), want: `REVOKE CONNECT ON DATABASE "app" FROM PUBLIC`},
 		{name: "role named PUBLIC is quoted", got: Dialect{}.Grant(pg("PUBLIC"), db, []string{"CONNECT"}, false), want: `GRANT CONNECT ON DATABASE "app" TO "PUBLIC"`},
 	}
 	for _, tt := range tests {

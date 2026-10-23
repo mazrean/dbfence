@@ -18,6 +18,9 @@ var (
 
 func dbObj(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
 
+// first drops the warnings returned with stmts.
+func first(stmts []plan.Statement, _ []string) []plan.Statement { return stmts }
+
 func sqls(stmts []plan.Statement) []string {
 	var out []string
 	for _, s := range stmts {
@@ -56,7 +59,7 @@ func TestGrantTarget(t *testing.T) {
 				t.Errorf("Grant = %s, want %s", got[0], tt.want)
 			}
 			wantRevoke := strings.Replace(strings.Replace(tt.want, "GRANT", "REVOKE", 1), " TO ", " FROM ", 1)
-			if got := sqls(tt.d.Revoke(app, tt.obj, []string{"SELECT"})); got[0] != wantRevoke {
+			if got := sqls(first(tt.d.Revoke(app, tt.obj, []string{"SELECT"}))); got[0] != wantRevoke {
 				t.Errorf("Revoke = %s, want %s", got[0], wantRevoke)
 			}
 		})

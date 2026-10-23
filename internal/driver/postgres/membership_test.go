@@ -23,7 +23,7 @@ func TestGrantMembershipRendering(t *testing.T) {
 		{name: "admin false with set", want: `GRANT "g" TO "u" WITH SET FALSE`, opts: model.MembershipOptions{Admin: &no, Set: &no}},
 	}
 	for _, tt := range tests {
-		if got := sqlOf(Dialect{}.GrantMembership(pg("u"), pg("g"), tt.opts)); got != tt.want {
+		if got := sqlOf(first(Dialect{}.GrantMembership(pg("u"), pg("g"), tt.opts))); got != tt.want {
 			t.Errorf("%s: got %s, want %s", tt.name, got, tt.want)
 		}
 	}
