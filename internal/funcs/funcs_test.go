@@ -129,3 +129,50 @@ func TestFunctionErrorsDoNotLeakValues(t *testing.T) {
 		})
 	}
 }
+
+func TestJSONKey(t *testing.T) {
+	t.Parallel()
+	doc := `{"s":"p@ss","big":12345678901234567890,"f":1e21,"neg":-0.5,"b":true,"n":null,"o":{"a":"<&>"},"a":[1]}`
+	tests := []struct {
+		name    string
+		doc     string
+		key     string
+		want    string
+		wantErr string
+	}{
+		{"string", doc, "s", "p@ss", ""},
+		{"big integer keeps precision", doc, "big", "12345678901234567890", ""},
+		{"exponent kept as written", doc, "f", "1e21", ""},
+		{"negative float", doc, "neg", "-0.5", ""},
+		{"bool", doc, "b", "true", ""},
+		{"null", doc, "n", "", `key "n" in secret "id" is null`},
+		{"object", doc, "o", "", "use jsondecode"},
+		{"array", doc, "a", "", "use jsondecode"},
+		{"missing", doc, "x", "", `key "x" not found in secret "id"`},
+		{"not json", "xSECRET", "k", "", `secret "id" is not a JSON object`},
+		{"json array", `["xSECRET"]`, "k", "", `secret "id" is not a JSON object`},
+		{"json string", `"xSECRET"`, "k", "", `secret "id" is not a JSON object`},
+		{"json null", `null`, "k", "", `secret "id" is not a JSON object`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := jsonKey("id", tt.doc, tt.key)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "'x'") {
+					t.Errorf("error leaks the secret: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.AsString() != tt.want {
+				t.Errorf("got %q, want %q", got.AsString(), tt.want)
+			}
+		})
+	}
+}

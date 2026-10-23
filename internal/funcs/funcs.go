@@ -223,31 +223,39 @@ func (r *Registry) awsFunc() function.Function {
 				return cty.NilVal, err
 			}
 			if key, ok := optionalString(args[1:]); ok {
-				return jsonKey(v.AsString(), key)
+				return jsonKey(id, v.AsString(), key)
 			}
 			return v, nil
 		},
 	})
 }
 
-func jsonKey(doc, key string) (cty.Value, error) {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(doc), &m); err != nil {
-		return cty.NilVal, fmt.Errorf("secret is not a JSON object: %w", err)
+// jsonKey extracts key from the JSON object doc. Strings are returned
+// as is; numbers and booleans as their exact JSON text. Errors never
+// quote doc, which holds secret material.
+func jsonKey(id, doc, key string) (cty.Value, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(doc), &m); err != nil || m == nil {
+		return cty.NilVal, fmt.Errorf("secret %q is not a JSON object", id)
 	}
-	v, ok := m[key]
+	raw, ok := m[key]
 	if !ok {
-		return cty.NilVal, fmt.Errorf("key %q not found in secret", key)
+		return cty.NilVal, fmt.Errorf("key %q not found in secret %q", key, id)
 	}
-	switch v := v.(type) {
-	case string:
-		return cty.StringVal(v), nil
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return cty.NilVal, err
+	text := strings.TrimSpace(string(raw))
+	switch {
+	case text == "null":
+		return cty.NilVal, fmt.Errorf("key %q in secret %q is null", key, id)
+	case strings.HasPrefix(text, `"`):
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return cty.NilVal, fmt.Errorf("key %q in secret %q is not a valid JSON string", key, id)
 		}
-		return cty.StringVal(string(b)), nil
+		return cty.StringVal(v), nil
+	case strings.HasPrefix(text, "{"), strings.HasPrefix(text, "["):
+		return cty.NilVal, fmt.Errorf("key %q in secret %q is an object or array, not a string; use jsondecode(aws_secretsmanager(%q)) instead", key, id, id)
+	default: // number, true or false: keep the exact text, e.g. no float rounding.
+		return cty.StringVal(text), nil
 	}
 }
 
