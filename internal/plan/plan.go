@@ -31,7 +31,9 @@ type Statement struct {
 	// defaults are the roles a SET DEFAULT ROLE statement makes the
 	// default roles of its target; empty for SET DEFAULT ROLE NONE.
 	defaults []model.RoleID
-	target   Target
+	// privs are the privileges a GRANT or REVOKE of privileges names.
+	privs  []string
+	target Target
 }
 
 // New builds a statement of kind on target from SQL fragments. Dialect
@@ -70,6 +72,17 @@ func (s Statement) DefaultRoles() []model.RoleID { return slices.Clone(s.default
 // DefaultRoles).
 func (s Statement) WithDefaultRoles(roles []model.RoleID) Statement {
 	s.defaults = slices.Clone(roles)
+	return s
+}
+
+// Privileges returns the privileges a statement of KindGrant or
+// KindRevoke grants or revokes.
+func (s Statement) Privileges() []string { return slices.Clone(s.privs) }
+
+// WithPrivileges returns s with the privileges it grants or revokes (see
+// Privileges).
+func (s Statement) WithPrivileges(privs []string) Statement {
+	s.privs = slices.Clone(privs)
 	return s
 }
 

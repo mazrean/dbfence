@@ -844,7 +844,7 @@ func revokePrivileges(grantee string, obj model.Object, privs []string, optionOn
 	}
 	parts = append(parts, privileges(privs), plan.Keyword(" ON "), on, plan.Keyword(" FROM "), Grantee(grantee))
 	target := plan.PrivilegeTarget(model.RoleID{Name: grantee}, obj).WithOption(optionOnly)
-	return plan.New(db, plan.KindRevoke, target, append(parts, tail...)...)
+	return plan.New(db, plan.KindRevoke, target, append(parts, tail...)...).WithPrivileges(privs)
 }
 
 // pg15 is the server_version_num from which the public schema of a new
@@ -877,7 +877,7 @@ func (Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, gra
 	if grantOption {
 		parts = append(parts, plan.Keyword(" WITH GRANT OPTION"))
 	}
-	return []plan.Statement{plan.New(db, plan.KindGrant, plan.PrivilegeTarget(grantee, obj).WithOption(grantOption), parts...)}
+	return []plan.Statement{plan.New(db, plan.KindGrant, plan.PrivilegeTarget(grantee, obj).WithOption(grantOption), parts...).WithPrivileges(privs)}
 }
 
 // Revoke implements diff.Dialect.

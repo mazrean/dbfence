@@ -1186,13 +1186,13 @@ func (d Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, g
 	if grantOption {
 		parts = append(parts, plan.Keyword(" WITH GRANT OPTION"))
 	}
-	return []plan.Statement{plan.New("", plan.KindGrant, plan.PrivilegeTarget(grantee, obj).WithOption(grantOption), parts...)}
+	return []plan.Statement{plan.New("", plan.KindGrant, plan.PrivilegeTarget(grantee, obj).WithOption(grantOption), parts...).WithPrivileges(privs)}
 }
 
 // Revoke implements diff.Dialect.
 func (d Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
 	return []plan.Statement{plan.New("", plan.KindRevoke, plan.PrivilegeTarget(grantee, obj),
-		plan.Keyword("REVOKE "), privileges(privs), plan.Keyword(" ON "), d.grantTarget(obj), plan.Keyword(" FROM "), d.Account(grantee))}, nil
+		plan.Keyword("REVOKE "), privileges(privs), plan.Keyword(" ON "), d.grantTarget(obj), plan.Keyword(" FROM "), d.Account(grantee)).WithPrivileges(privs)}, nil
 }
 
 // RevokeGrantOption implements diff.Dialect. MySQL tracks the grant

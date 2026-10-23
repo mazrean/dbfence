@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/mazrean/dbfence/internal/model"
@@ -25,7 +26,9 @@ func TestStatementMetadata(t *testing.T) {
 		change plan.RoleChange
 		kind   plan.Kind
 		// limit is the connection limit set, or "" for none.
-		limit  string
+		limit string
+		// privs are the privileges granted or revoked, comma-separated.
+		privs  string
 		target plan.Target
 	}
 	roleT := plan.Target{Object: plan.ObjectRole, Role: r}
@@ -122,17 +125,17 @@ func TestStatementMetadata(t *testing.T) {
 		{
 			name:  "grant to PUBLIC on a schema",
 			stmts: d.Grant(model.PublicRole, schObj, []string{"USAGE"}, false),
-			want:  []meta{{kind: plan.KindGrant, target: plan.Target{Object: plan.ObjectSchema, Database: "app", Schema: "s", Grantee: model.PublicRole}}},
+			want:  []meta{{kind: plan.KindGrant, privs: "USAGE", target: plan.Target{Object: plan.ObjectSchema, Database: "app", Schema: "s", Grantee: model.PublicRole}}},
 		},
 		{
 			name:  "revoke grant option",
 			stmts: first(d.RevokeGrantOption(r, db, []string{"CONNECT"})),
-			want:  []meta{{kind: plan.KindRevoke, target: plan.Target{Object: plan.ObjectDatabase, Database: "app", Grantee: r, Option: true}}},
+			want:  []meta{{kind: plan.KindRevoke, privs: "CONNECT", target: plan.Target{Object: plan.ObjectDatabase, Database: "app", Grantee: r, Option: true}}},
 		},
 		{
 			name:  "revoke as the grantor",
 			stmts: first(drv.Revoke(r, db, []string{"CONNECT"})),
-			want:  []meta{{kind: plan.KindRevoke, target: plan.Target{Object: plan.ObjectDatabase, Database: "app", Grantee: r}}},
+			want:  []meta{{kind: plan.KindRevoke, privs: "CONNECT", target: plan.Target{Object: plan.ObjectDatabase, Database: "app", Grantee: r}}},
 		},
 	}
 	for _, tt := range tests {
@@ -143,7 +146,7 @@ func TestStatementMetadata(t *testing.T) {
 			}
 			for i, s := range tt.stmts {
 				c := s.RoleChange()
-				got := meta{kind: s.Kind(), target: s.Target()}
+				got := meta{kind: s.Kind(), target: s.Target(), privs: strings.Join(s.Privileges(), ",")}
 				if c.ConnectionLimit != nil {
 					got.limit = strconv.Itoa(*c.ConnectionLimit)
 				}
