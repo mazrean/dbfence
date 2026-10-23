@@ -393,6 +393,19 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("statements without effect fail", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE w_grp", "CREATE ROLE w_u", "GRANT w_grp TO w_u")
+		d := s.open(t, "postgres")
+		// A repeated GRANT only raises a NOTICE.
+		if err := d.Exec(t.Context(), "", `GRANT "w_grp" TO "w_u"`); err != nil {
+			t.Errorf("repeated grant: %v", err)
+		}
+		err := d.Exec(t.Context(), "", `REVOKE "w_grp" FROM "w_u" GRANTED BY "w_grp"`)
+		if err == nil || !strings.Contains(err.Error(), "has not been granted membership") {
+			t.Errorf("no-op revoke: %v", err)
+		}
+	})
+
 	t.Run("exec errors carry detail", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE detail_owner", "CREATE DATABASE detail_db OWNER detail_owner")
 		d := s.open(t, "postgres")

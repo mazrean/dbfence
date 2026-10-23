@@ -32,8 +32,9 @@ type Driver struct {
 	conns map[string]*sql.DB
 	// st is the state captured by the last Inspect. Driver methods that
 	// override Dialect use it to render grantor-aware statements.
-	st *state
-	mu sync.Mutex
+	st      *state
+	notices noticeLog
+	mu      sync.Mutex
 }
 
 // defaultConnectTimeout bounds connection attempts when the DSN does not
@@ -46,12 +47,52 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 	if err != nil {
 		return nil, err
 	}
-	db := stdlib.OpenDB(*cfg)
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
+	d := &Driver{cfg: cfg, conns: map[string]*sql.DB{}}
+	// Per-database connections copy the handler.
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { d.notices.add(n) }
+	d.db = stdlib.OpenDB(*cfg)
+	if err := d.db.PingContext(ctx); err != nil {
+		_ = d.db.Close()
 		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
-	return &Driver{cfg: cfg, db: db, conns: map[string]*sql.DB{}}, nil
+	return d, nil
+}
+
+// noticeLog collects the server notices of the running statement.
+type noticeLog struct {
+	list []*pgconn.Notice
+	mu   sync.Mutex
+}
+
+func (l *noticeLog) add(n *pgconn.Notice) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.list = append(l.list, n)
+}
+
+func (l *noticeLog) take() []*pgconn.Notice {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := l.list
+	l.list = nil
+	return out
+}
+
+// noEffectWarnings are the SQLSTATEs of warnings PostgreSQL returns when a
+// GRANT or REVOKE did nothing (warning, privilege_not_granted,
+// privilege_not_revoked). Ignoring them makes a plan that never converges
+// look applied.
+var noEffectWarnings = []string{"01000", "01007", "01006"}
+
+// noticeError returns an error for the first warning saying that the
+// statement had no effect.
+func noticeError(notices []*pgconn.Notice) error {
+	for _, n := range notices {
+		if n.SeverityUnlocalized == "WARNING" && slices.Contains(noEffectWarnings, n.Code) {
+			return fmt.Errorf("statement did not take full effect: %w", withDetail((*pgconn.PgError)(n)))
+		}
+	}
+	return nil
 }
 
 // parseConfig parses dsn and applies the session settings dbfence relies
@@ -122,8 +163,11 @@ func (d *Driver) Exec(ctx context.Context, database, query string) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.ExecContext(ctx, query)
-	return withDetail(err)
+	d.notices.take()
+	if _, err = c.ExecContext(ctx, query); err != nil {
+		return withDetail(err)
+	}
+	return noticeError(d.notices.take())
 }
 
 // detailError adds the server's DETAIL and HINT, which often name the

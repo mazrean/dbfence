@@ -152,6 +152,30 @@ func TestWithDetail(t *testing.T) {
 	}
 }
 
+func TestNoticeError(t *testing.T) {
+	t.Parallel()
+	notice := func(severity, code string) *pgconn.Notice {
+		return &pgconn.Notice{Severity: severity, SeverityUnlocalized: severity, Code: code, Message: "m"}
+	}
+	tests := []struct {
+		name    string
+		notices []*pgconn.Notice
+		wantErr bool
+	}{
+		{"none", nil, false},
+		{"notice", []*pgconn.Notice{notice("NOTICE", "00000")}, false},
+		{"other warning", []*pgconn.Notice{notice("WARNING", "25P01")}, false},
+		{"membership not revoked", []*pgconn.Notice{notice("NOTICE", "00000"), notice("WARNING", "01000")}, true},
+		{"privilege not revoked", []*pgconn.Notice{notice("WARNING", "01006")}, true},
+		{"privilege not granted", []*pgconn.Notice{notice("WARNING", "01007")}, true},
+	}
+	for _, tt := range tests {
+		if err := noticeError(tt.notices); (err != nil) != tt.wantErr {
+			t.Errorf("%s: err = %v", tt.name, err)
+		}
+	}
+}
+
 func TestIsSystemRole(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
