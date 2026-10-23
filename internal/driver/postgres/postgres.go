@@ -343,7 +343,14 @@ func passwordMatches(verifier, user, pw string) (bool, error) {
 func (d Dialect) EnsureRole(r model.Role) []plan.Statement { return d.CreateRole(r) }
 
 // AlterRole implements diff.Dialect.
-func (Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.Statement, []string) {
+func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.Statement, []string) {
+	return d.alterRole(r, cur, force, false)
+}
+
+// alterRole renders AlterRole. groupedUnreadable suppresses the warning
+// about an unreadable verifier, which Inspect then reports once for all
+// roles.
+func (Dialect) alterRole(r model.Role, cur model.RoleState, force, groupedUnreadable bool) ([]plan.Statement, []string) {
 	var opts []string
 	var warns []string
 	for _, o := range roleOpts(r, cur) {
@@ -359,6 +366,7 @@ func (Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.
 		switch {
 		case force:
 			setPassword = true
+		case !cur.PasswordReadable && groupedUnreadable:
 		case !cur.PasswordReadable:
 			warns = append(warns, fmt.Sprintf("cannot read the password verifier of role %q (superuser required); password not compared, use --force-password to set it", r.ID))
 		default:

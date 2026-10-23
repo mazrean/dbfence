@@ -420,3 +420,46 @@ func TestDefaultPublicPrivileges(t *testing.T) {
 		t.Errorf("Dialect: got %q, want USAGE", got)
 	}
 }
+
+func TestUnreadableVerifiers(t *testing.T) {
+	t.Parallel()
+	pw := "pw"
+	desired := &model.Desired{Roles: []model.Role{
+		{ID: model.RoleID{Name: "b"}, Password: &pw},
+		{ID: model.RoleID{Name: "a"}, Password: &pw},
+		{ID: model.RoleID{Name: "nopw"}},
+		{ID: model.RoleID{Name: "new"}, Password: &pw},
+	}}
+	tests := []struct {
+		name  string
+		want  string
+		roles []model.RoleState
+	}{
+		{name: "none exist", roles: nil, want: ""},
+		{name: "one", roles: []model.RoleState{{ID: model.RoleID{Name: "a"}}, {ID: model.RoleID{Name: "nopw"}}}, want: `cannot read the password verifiers of existing role "a" (superuser required)`},
+		{name: "several sorted", roles: []model.RoleState{{ID: model.RoleID{Name: "b"}}, {ID: model.RoleID{Name: "a"}}}, want: `existing roles "a", "b" (superuser required)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := unreadableVerifiersWarning(desired, &model.Current{Roles: tt.roles})
+			if (tt.want == "") != (got == "") || !strings.Contains(got, tt.want) {
+				t.Errorf("warning = %q, want substring %q", got, tt.want)
+			}
+		})
+	}
+
+	// The Driver leaves the per-role warning to the grouped one; the
+	// stateless Dialect keeps it.
+	r := model.Role{ID: model.RoleID{Name: "a"}, Password: &pw}
+	cur := model.RoleState{ID: r.ID}
+	if _, warns := (&Driver{st: &state{superuser: true}}).AlterRole(r, cur, false); len(warns) != 0 {
+		t.Errorf("Driver warnings = %q, want none", warns)
+	}
+	if _, warns := (Dialect{}).AlterRole(r, cur, false); len(warns) != 1 {
+		t.Errorf("Dialect warnings = %q, want one", warns)
+	}
+	if stmts, _ := (&Driver{st: &state{superuser: true}}).AlterRole(r, cur, true); len(stmts) != 1 {
+		t.Errorf("forced password statements = %d, want 1", len(stmts))
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -108,6 +109,8 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		if err := d.inspectPasswords(ctx, cur); err != nil {
 			return nil, err
 		}
+	} else if w := unreadableVerifiersWarning(desired, cur); w != "" {
+		cur.Warnings = append(cur.Warnings, w)
 	}
 	for _, db := range desired.Databases {
 		if !slices.ContainsFunc(cur.Databases, func(c model.Database) bool { return c.Name == db.Name }) {
@@ -134,6 +137,28 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	}
 	d.st = st
 	return cur, nil
+}
+
+// unreadableVerifiersWarning names, in one warning, the existing declared
+// roles whose password cannot be compared because pg_authid is not
+// readable. Driver.AlterRole leaves the per-role warning out.
+func unreadableVerifiersWarning(desired *model.Desired, cur *model.Current) string {
+	var names []string
+	for _, r := range desired.Roles {
+		if r.Password != nil && slices.ContainsFunc(cur.Roles, func(c model.RoleState) bool { return c.ID.Name == r.ID.Name }) {
+			names = append(names, strconv.Quote(r.ID.Name))
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	slices.Sort(names)
+	noun := "role"
+	if len(names) > 1 {
+		noun = "roles"
+	}
+	return fmt.Sprintf("cannot read the password verifiers of existing %s %s (superuser required): their passwords are not compared and are set only with --force-password",
+		noun, strings.Join(names, ", "))
 }
 
 // checkMembershipOptions rejects inherit and set membership options

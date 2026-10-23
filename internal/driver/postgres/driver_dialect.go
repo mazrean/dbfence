@@ -46,10 +46,10 @@ func (d *Driver) DropSchema(s model.Schema) []plan.Statement {
 // may not alter are reported instead of planned, since they would stop
 // apply part-way.
 func (d *Driver) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.Statement, []string) {
-	stmts, warns := d.Dialect.AlterRole(r, cur, force)
 	if d.st == nil {
-		return stmts, warns
+		return d.Dialect.AlterRole(r, cur, force)
 	}
+	stmts, warns := d.Dialect.alterRole(r, cur, force, true)
 	inherit, inheritWarns := d.st.inheritOptions(r)
 	stmts = append(stmts, inherit...)
 	warns = append(warns, inheritWarns...)

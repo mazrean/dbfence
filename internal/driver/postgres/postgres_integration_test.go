@@ -474,6 +474,25 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("unreadable verifiers are reported in one warning", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE uv_admin LOGIN CREATEROLE PASSWORD 'pw'", "CREATE ROLE uv_a LOGIN", "CREATE ROLE uv_b LOGIN")
+		d := s.open(t, "uv_admin")
+		pw := "secret"
+		desired := &model.Desired{
+			Engine: model.EnginePostgres,
+			Roles:  []model.Role{{ID: pg("uv_b"), Password: &pw}, {ID: pg("uv_a"), Password: &pw}, {ID: pg("uv_new"), Password: &pw}},
+			Ignore: model.Ignore{Roles: []string{".*"}, Databases: []string{".*"}},
+		}
+		res, err := planFor(t, d, desired, diff.Options{})
+		if err != nil {
+			t.Fatalf("apply: %v\n%s", err, res.text)
+		}
+		want := `cannot read the password verifiers of existing roles "uv_a", "uv_b" (superuser required)`
+		if !strings.Contains(res.text, want) || strings.Count(res.text, "password verifier") != 1 {
+			t.Errorf("plan lacks one grouped warning %q:\n%s", want, res.text)
+		}
+	})
+
 	t.Run("prune drops non-empty schemas", func(t *testing.T) {
 		s.exec(t, "CREATE DATABASE p_db")
 		s.exec(t, `\c p_db`, "CREATE SCHEMA junk", "CREATE SCHEMA junkfull", "CREATE TABLE junkfull.t (id int)")
