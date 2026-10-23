@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -28,21 +30,110 @@ type Driver struct {
 	cfg   *pgx.ConnConfig
 	db    *sql.DB
 	conns map[string]*sql.DB
-	mu    sync.Mutex
+	// st is the state captured by the last Inspect. Driver methods that
+	// override Dialect use it to render grantor-aware statements.
+	st      *state
+	notices noticeLog
+	mu      sync.Mutex
 }
+
+// defaultConnectTimeout bounds connection attempts when the DSN does not
+// set connect_timeout.
+const defaultConnectTimeout = 10 * time.Second
 
 // Open connects to dsn.
 func Open(ctx context.Context, dsn string) (*Driver, error) {
-	cfg, err := pgx.ParseConfig(dsn)
+	cfg, err := parseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("parse postgres dsn: %w", err)
+		return nil, err
 	}
-	db := stdlib.OpenDB(*cfg)
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
+	d := &Driver{cfg: cfg, conns: map[string]*sql.DB{}}
+	// Per-database connections copy the handler.
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { d.notices.add(n) }
+	d.db = stdlib.OpenDB(*cfg)
+	if err := d.db.PingContext(ctx); err != nil {
+		_ = d.db.Close()
 		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
-	return &Driver{cfg: cfg, db: db, conns: map[string]*sql.DB{}}, nil
+	return d, nil
+}
+
+// noticeLog collects the server notices of the running statement.
+type noticeLog struct {
+	list []*pgconn.Notice
+	mu   sync.Mutex
+}
+
+func (l *noticeLog) add(n *pgconn.Notice) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.list = append(l.list, n)
+}
+
+func (l *noticeLog) take() []*pgconn.Notice {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := l.list
+	l.list = nil
+	return out
+}
+
+// noEffectWarnings are the SQLSTATEs of warnings PostgreSQL returns when a
+// GRANT or REVOKE did nothing (warning, privilege_not_granted,
+// privilege_not_revoked). Ignoring them makes a plan that never converges
+// look applied.
+var noEffectWarnings = []string{"01000", "01007", "01006"}
+
+// noticeError returns an error for the first warning saying that the
+// statement had no effect.
+func noticeError(notices []*pgconn.Notice) error {
+	for _, n := range notices {
+		if n.SeverityUnlocalized == "WARNING" && slices.Contains(noEffectWarnings, n.Code) {
+			return fmt.Errorf("statement did not take full effect: %w", withDetail((*pgconn.PgError)(n)))
+		}
+	}
+	return nil
+}
+
+// parseConfig parses dsn and applies the session settings dbfence relies
+// on. Per-database connections copy the result.
+func parseConfig(dsn string) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, parseError(err)
+	}
+	if cfg.ConnectTimeout == 0 {
+		cfg.ConnectTimeout = defaultConnectTimeout
+	}
+	// Literals are rendered for standard_conforming_strings = on; a startup
+	// parameter overrides role and database defaults.
+	cfg.RuntimeParams["standard_conforming_strings"] = "on"
+	return cfg, nil
+}
+
+// parseError describes a DSN parse failure without the DSN, which may
+// contain a password that pgx cannot reliably mask.
+func parseError(err error) error {
+	const prefix = "parse postgres dsn: invalid connection string"
+	var pce *pgconn.ParseConfigError
+	if !errors.As(err, &pce) {
+		return errors.New(prefix)
+	}
+	// Error renders "cannot parse `<dsn>`: <msg>[ (<cause>)]"; with the DSN
+	// blanked only the static message and the cause remain.
+	bare := *pce
+	bare.ConnString = ""
+	msg := strings.TrimPrefix(bare.Error(), "cannot parse ``: ")
+	cause := errors.Unwrap(pce)
+	if cause != nil {
+		msg = strings.TrimSuffix(msg, " ("+cause.Error()+")")
+	}
+	// URL errors quote the whole URL; only their inner error is safe.
+	// Other causes (keyword/value parsing) may quote parts of the input.
+	if urlErr := (*url.Error)(nil); errors.As(cause, &urlErr) {
+		msg += ": " + urlErr.Err.Error()
+	}
+	return fmt.Errorf("%s: %s", prefix, msg)
 }
 
 func (d *Driver) conn(ctx context.Context, database string) (*sql.DB, error) {
@@ -72,7 +163,36 @@ func (d *Driver) Exec(ctx context.Context, database, query string) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.ExecContext(ctx, query)
+	d.notices.take()
+	if _, err = c.ExecContext(ctx, query); err != nil {
+		return withDetail(err)
+	}
+	return noticeError(d.notices.take())
+}
+
+// detailError adds the server's DETAIL and HINT, which often name the
+// object that blocks a statement, to a PostgreSQL error.
+type detailError struct{ pg *pgconn.PgError }
+
+func (e *detailError) Error() string {
+	var sb strings.Builder
+	sb.WriteString(e.pg.Error())
+	if e.pg.Detail != "" {
+		sb.WriteString("\nDETAIL: " + e.pg.Detail)
+	}
+	if e.pg.Hint != "" {
+		sb.WriteString("\nHINT: " + e.pg.Hint)
+	}
+	return sb.String()
+}
+
+func (e *detailError) Unwrap() error { return e.pg }
+
+func withDetail(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Detail != "" || pgErr.Hint != "") {
+		return &detailError{pg: pgErr}
+	}
 	return err
 }
 
@@ -87,188 +207,31 @@ func (d *Driver) Close() error {
 	return errors.Join(errs...)
 }
 
-// Inspect implements driver.Driver.
-func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Current, error) {
-	cur := &model.Current{}
-	var user string
-	if err := d.db.QueryRowContext(ctx, "SELECT current_user").Scan(&user); err != nil {
-		return nil, fmt.Errorf("current user: %w", err)
-	}
-	cur.CurrentUser = model.RoleID{Name: user}
-
-	steps := []func(context.Context, *model.Current) error{d.inspectDatabases, d.inspectRoles, d.inspectMembership, d.inspectDatabaseACL}
-	for _, step := range steps {
-		if err := step(ctx, cur); err != nil {
-			return nil, err
-		}
-	}
-	for _, db := range desired.Databases {
-		if !slices.ContainsFunc(cur.Databases, func(c model.Database) bool { return c.Name == db.Name }) {
-			continue
-		}
-		if err := d.inspectSchemas(ctx, cur, db.Name); err != nil {
-			return nil, err
-		}
-		cur.InspectedDatabases = append(cur.InspectedDatabases, db.Name)
-	}
-	return cur, nil
-}
-
-func (d *Driver) inspectDatabases(ctx context.Context, cur *model.Current) error {
-	return query(ctx, d.db, `SELECT datname, pg_get_userbyid(datdba), pg_encoding_to_char(encoding), datcollate, datctype
-		FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname`,
-		func(rows *sql.Rows) error {
-			var db model.Database
-			if err := rows.Scan(&db.Name, &db.Owner, &db.Encoding, &db.LcCollate, &db.LcCtype); err != nil {
-				return err
-			}
-			cur.Databases = append(cur.Databases, db)
-			return nil
-		})
-}
-
-func (d *Driver) inspectRoles(ctx context.Context, cur *model.Current) error {
-	if err := query(ctx, d.db, `SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit,
-			rolreplication, rolbypassrls, rolconnlimit
-		FROM pg_roles ORDER BY rolname`,
-		func(rows *sql.Rows) error {
-			var r model.RoleState
-			if err := rows.Scan(&r.ID.Name, &r.Login, &r.Superuser, &r.CreateDB, &r.CreateRole, &r.Inherit,
-				&r.Replication, &r.BypassRLS, &r.ConnectionLimit); err != nil {
-				return err
-			}
-			cur.Roles = append(cur.Roles, r)
-			return nil
-		}); err != nil {
-		return err
-	}
-	// pg_authid is readable by superusers only; otherwise passwords
-	// cannot be compared.
-	verifiers := map[string]sql.NullString{}
-	err := query(ctx, d.db, `SELECT rolname, rolpassword FROM pg_authid`, func(rows *sql.Rows) error {
-		var name string
-		var pw sql.NullString
-		if scanErr := rows.Scan(&name, &pw); scanErr != nil {
-			return scanErr
-		}
-		verifiers[name] = pw
-		return nil
-	})
-	if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == sqlstateInsufficientPrivilege {
-		// Expected on managed services where the admin is not a superuser.
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	for i := range cur.Roles {
-		cur.Roles[i].PasswordReadable = true
-		cur.Roles[i].PasswordHash = []byte(verifiers[cur.Roles[i].ID.Name].String)
-	}
-	return nil
-}
-
-func (d *Driver) inspectMembership(ctx context.Context, cur *model.Current) error {
-	return query(ctx, d.db, `SELECT DISTINCT m.rolname, r.rolname
-		FROM pg_auth_members am
-		JOIN pg_roles r ON r.oid = am.roleid
-		JOIN pg_roles m ON m.oid = am.member
-		ORDER BY 1, 2`,
-		func(rows *sql.Rows) error {
-			var member, role string
-			if err := rows.Scan(&member, &role); err != nil {
-				return err
-			}
-			for i := range cur.Roles {
-				if cur.Roles[i].ID.Name == member {
-					cur.Roles[i].MemberOf = append(cur.Roles[i].MemberOf, model.RoleID{Name: role})
-				}
-			}
-			return nil
-		})
-}
-
-func (d *Driver) inspectDatabaseACL(ctx context.Context, cur *model.Current) error {
-	return query(ctx, d.db, `SELECT d.datname, r.rolname, a.privilege_type, a.is_grantable
-		FROM pg_database d
-		CROSS JOIN LATERAL aclexplode(d.datacl) a
-		JOIN pg_roles r ON r.oid = a.grantee
-		WHERE NOT d.datistemplate AND d.datallowconn`,
-		func(rows *sql.Rows) error {
-			p := model.Privilege{Object: model.Object{Type: model.ObjectDatabase}}
-			if err := rows.Scan(&p.Object.Database, &p.Grantee.Name, &p.Name, &p.GrantOption); err != nil {
-				return err
-			}
-			cur.Privileges = append(cur.Privileges, p)
-			return nil
-		})
-}
-
-func (d *Driver) inspectSchemas(ctx context.Context, cur *model.Current, database string) error {
-	c, err := d.conn(ctx, database)
-	if err != nil {
-		return err
-	}
-	if err := query(ctx, c, `SELECT nspname, pg_get_userbyid(nspowner) FROM pg_namespace
-		WHERE nspname NOT LIKE 'pg\_%' AND nspname <> 'information_schema' ORDER BY nspname`,
-		func(rows *sql.Rows) error {
-			s := model.Schema{Database: database}
-			if err := rows.Scan(&s.Name, &s.Owner); err != nil {
-				return err
-			}
-			cur.Schemas = append(cur.Schemas, s)
-			return nil
-		}); err != nil {
-		return err
-	}
-	return query(ctx, c, `SELECT n.nspname, r.rolname, a.privilege_type, a.is_grantable
-		FROM pg_namespace n
-		CROSS JOIN LATERAL aclexplode(n.nspacl) a
-		JOIN pg_roles r ON r.oid = a.grantee
-		WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'`,
-		func(rows *sql.Rows) error {
-			p := model.Privilege{Object: model.Object{Type: model.ObjectSchema, Database: database}}
-			if err := rows.Scan(&p.Object.Schema, &p.Grantee.Name, &p.Name, &p.GrantOption); err != nil {
-				return err
-			}
-			cur.Privileges = append(cur.Privileges, p)
-			return nil
-		})
-}
-
-func query(ctx context.Context, db *sql.DB, q string, scan func(*sql.Rows) error) error {
-	rows, err := db.QueryContext(ctx, q)
-	if err != nil {
-		return fmt.Errorf("query %q: %w", firstLine(q), err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		if err := scan(rows); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
-}
-
-func firstLine(s string) string {
-	s, _, _ = strings.Cut(s, "\n")
-	return s
-}
-
 // Dialect renders PostgreSQL SQL. It is usable without a connection.
 type Dialect struct{}
 
 // Ident quotes an identifier.
 func Ident(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
-// Literal quotes a string literal (standard_conforming_strings = on).
-func Literal(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+// Literal quotes a string literal. A string containing a backslash is
+// rendered as an escape string, so it means the same whatever the value
+// of standard_conforming_strings.
+func Literal(s string) string {
+	q := "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	if !strings.Contains(s, `\`) {
+		return q
+	}
+	return "E" + strings.ReplaceAll(q, `\`, `\\`)
+}
 
-// IsSystemRole implements diff.Dialect.
+// IsSystemRole implements diff.Dialect. Besides PostgreSQL's own roles it
+// covers the built-in roles of managed services: Amazon RDS / Aurora
+// (rdsadmin, rdsrepladmin, rdstopmgr, rds_*), Cloud SQL (cloudsql*),
+// Azure (azuresu, azure_*) and AlloyDB (alloydb*).
 func (Dialect) IsSystemRole(id model.RoleID) bool {
 	n := id.Name
-	return n == "postgres" || n == "rdsadmin" || n == "rdsrepladmin" ||
-		hasAnyPrefix(n, "pg_", "rds_", "cloudsql", "azure_", "alloydb")
+	return slices.Contains([]string{"postgres", "rdsadmin", "rdsrepladmin", "rdstopmgr"}, n) ||
+		hasAnyPrefix(n, "pg_", "rds_", "cloudsql", "azure", "alloydb")
 }
 
 // IsSystemDatabase implements diff.Dialect.
@@ -330,9 +293,40 @@ func (Dialect) CreateRole(r model.Role) []plan.Statement {
 		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
 	}
 	if r.Password != nil {
-		parts = append(parts, " PASSWORD ", plan.Secret(Literal(*r.Password)))
+		parts = append(parts, passwordClause(*r.Password)...)
 	}
 	return []plan.Statement{plan.SQL("", parts...)}
+}
+
+// passwordClause renders the PASSWORD option. The password is sent as a
+// SCRAM-SHA-256 verifier computed here, so the plaintext never reaches
+// the server, its logs or pg_stat_statements, and a declared password
+// that looks like a verifier is still hashed. PostgreSQL clears an empty
+// password, so "" is rendered as NULL.
+func passwordClause(pw string) []any {
+	if pw == "" {
+		return []any{" PASSWORD NULL"}
+	}
+	v, err := password.SCRAMVerifier(pw)
+	if err != nil {
+		// Only reachable when crypto/pbkdf2 rejects its input (FIPS-only
+		// mode); the server then hashes the password itself.
+		v = pw
+	}
+	return []any{" PASSWORD ", plan.Secret(Literal(v))}
+}
+
+// passwordMatches reports whether the stored verifier already holds pw.
+// md5 verifiers never match, so that they are upgraded to SCRAM.
+func passwordMatches(verifier, user, pw string) (bool, error) {
+	switch {
+	case pw == "":
+		return verifier == "", nil
+	case strings.HasPrefix(verifier, "md5"):
+		return false, nil
+	default:
+		return password.MatchPostgres(verifier, user, pw)
+	}
 }
 
 // EnsureRole implements diff.Dialect. pg_roles is always readable, so
@@ -359,7 +353,7 @@ func (Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.
 		case !cur.PasswordReadable:
 			warns = append(warns, fmt.Sprintf("cannot read the password verifier of role %q (superuser required); password not compared, use --force-password to set it", r.ID))
 		default:
-			ok, err := password.MatchPostgres(string(cur.PasswordHash), r.ID.Name, *r.Password)
+			ok, err := passwordMatches(string(cur.PasswordHash), r.ID.Name, *r.Password)
 			switch {
 			case err != nil:
 				warns = append(warns, fmt.Sprintf("cannot compare the password of role %q: %v; use --force-password to set it", r.ID, err))
@@ -376,16 +370,20 @@ func (Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.
 		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
 	}
 	if setPassword {
-		parts = append(parts, " PASSWORD ", plan.Secret(Literal(*r.Password)))
+		parts = append(parts, passwordClause(*r.Password)...)
 	}
 	return []plan.Statement{plan.SQL("", parts...)}, warns
 }
 
 // DropRole implements diff.Dialect. Objects owned by the role are
-// reassigned to the connected user in every surviving database.
+// reassigned to the connected user in every surviving database except
+// those reserved by PostgreSQL or a managed service.
 func (Dialect) DropRole(id model.RoleID, databases []string) []plan.Statement {
 	var out []plan.Statement
 	for _, db := range databases {
+		if providerDatabase(db) {
+			continue
+		}
 		out = append(out,
 			plan.SQL(db, "REASSIGN OWNED BY "+Ident(id.Name)+" TO CURRENT_USER"),
 			plan.SQL(db, "DROP OWNED BY "+Ident(id.Name)),
@@ -425,7 +423,55 @@ func (Dialect) CreateDatabase(db model.Database) []plan.Statement {
 	return []plan.Statement{plan.SQL("", q)}
 }
 
-func normEncoding(s string) string { return strings.ToUpper(strings.ReplaceAll(s, "-", "")) }
+// encodingAliases maps cleaned encoding names that PostgreSQL accepts
+// (src/common/encnames.c) to the cleaned canonical name.
+var encodingAliases = map[string]string{
+	"abc": "win1258", "alt": "win866", "iso88591": "latin1", "iso88592": "latin2",
+	"iso88593": "latin3", "iso88594": "latin4", "iso88599": "latin5", "iso885910": "latin6",
+	"iso885913": "latin7", "iso885914": "latin8", "iso885915": "latin9", "iso885916": "latin10",
+	"koi8": "koi8r", "mskanji": "sjis", "shiftjis": "sjis", "tcvn": "win1258", "tcvn5712": "win1258",
+	"unicode": "utf8", "vscii": "win1258", "win": "win1251", "win932": "sjis", "win936": "gbk",
+	"win949": "uhc", "win950": "big5", "windows932": "sjis", "windows936": "gbk",
+	"windows949": "uhc", "windows950": "big5",
+}
+
+// cleanName lower-cases s and drops non-alphanumerics, like PostgreSQL's
+// clean_encoding_name and glibc's codeset normalization.
+func cleanName(s string) string {
+	var sb strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if ('a' <= r && r <= 'z') || ('0' <= r && r <= '9') {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+func normEncoding(s string) string {
+	n := cleanName(s)
+	if a, ok := encodingAliases[n]; ok {
+		return a
+	}
+	if w, ok := strings.CutPrefix(n, "windows"); ok {
+		return "win" + w
+	}
+	return n
+}
+
+// normLocale normalizes the codeset of a locale name, so that
+// en_US.UTF-8 and en_US.utf8 compare equal.
+func normLocale(s string) string {
+	name, rest, ok := strings.Cut(s, ".")
+	if !ok {
+		return strings.ToLower(s)
+	}
+	codeset, modifier, hasMod := strings.Cut(rest, "@")
+	out := strings.ToLower(name) + "." + cleanName(codeset)
+	if hasMod {
+		out += "@" + strings.ToLower(modifier)
+	}
+	return out
+}
 
 // AlterDatabase implements diff.Dialect.
 func (Dialect) AlterDatabase(db, cur model.Database) ([]plan.Statement, []string) {
@@ -436,8 +482,9 @@ func (Dialect) AlterDatabase(db, cur model.Database) ([]plan.Statement, []string
 		}
 	}
 	immutable("encoding", db.Encoding, cur.Encoding, func(a, b string) bool { return normEncoding(a) == normEncoding(b) })
-	immutable("lc_collate", db.LcCollate, cur.LcCollate, strings.EqualFold)
-	immutable("lc_ctype", db.LcCtype, cur.LcCtype, strings.EqualFold)
+	sameLocale := func(a, b string) bool { return normLocale(a) == normLocale(b) }
+	immutable("lc_collate", db.LcCollate, cur.LcCollate, sameLocale)
+	immutable("lc_ctype", db.LcCtype, cur.LcCtype, sameLocale)
 	if db.Owner != "" && db.Owner != cur.Owner {
 		return []plan.Statement{plan.SQL("", "ALTER DATABASE "+Ident(db.Name)+" OWNER TO "+Ident(db.Owner))}, warns
 	}

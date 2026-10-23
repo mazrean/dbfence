@@ -185,8 +185,10 @@ type Current struct {
 	Privileges []Privilege
 	// InspectedDatabases lists databases whose schemas were inspected.
 	InspectedDatabases []string
-	// Warnings are engine specific findings of the inspection that the
-	// plan reports.
+	// CurrentDatabase is the database the connection is bound to
+	// (PostgreSQL only).
+	CurrentDatabase string
+	// Warnings are inspection notes that diff adds to the plan.
 	Warnings []string
 	// Unreadable lists what could not be inspected.
 	Unreadable Unreadable
