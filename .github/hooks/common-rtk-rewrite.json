@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook claude"
+          }
+        ]
+      }
+    ]
+  },
+  "version": 1
+}
