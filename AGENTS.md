@@ -35,6 +35,7 @@ internal/model/      engine-neutral Desired / Current, Role, Database, Schema, P
 internal/driver/     mysql/ and postgres/: Driver (Inspect/Exec) + Dialect (SQL rendering)
 internal/password/   stored-hash verification (SCRAM, md5, mysql_native, caching_sha2)
 internal/diff/       desired vs current -> ordered *plan.Plan via diff.Dialect (no I/O)
+internal/policy/     independent safety check of a finished plan (Verify, no I/O)
 internal/plan/       Statement / Secret fragments, redacted output (no I/O)
 internal/secret/     secret registry + redacting, control-escaping output Writer
 internal/apply/      sequential execution, stop at first error
@@ -48,6 +49,7 @@ tools/lint/          repo linter module (+ outputsink analyzer)
 - Identifiers are quoted and literals escaped only through the engine Dialect; passwords go into SQL only as `plan.Secret`.
 - SQL is built only from `plan` fragments: SQL text is a constant `plan.Keyword`, runtime values enter only as `plan.QuotedIdent`/`EscapedLiteral`/`NewToken`/`Number` made by Dialect code under `internal/driver` (lint `sqlfragment`); Dialect statements use `plan.New` with their `Kind` and `Target`.
 - One `plan.Statement` is exactly one SQL command, sent alone (`;` never chains statements); to run as another role set `AsRole`, never prepend `SET ROLE`.
+- Every protection promised in README ("What `--prune` never drops", the connected user) is also an invariant in `internal/policy.Verify`, which reads only statement `Kind`/`Target`/`RoleChange`, never SQL text, and shares no code with `diff`; diff tests run every plan through it.
 - `diff` and `plan` do no I/O; engine-specific code only in `internal/driver/<engine>` and `internal/password`.
 - All output goes through the redacting `secret.Writer` streams wired in `internal/di/di.go` (`app.IO`); never use `os.Stdout`/`os.Stderr`/`fmt.Print*`/`print` elsewhere (lint `outputsink`), and `secret.Register` every new secret source.
 - Table-driven tests next to code; integration tests skip under `testing.Short()` or without Docker (fail if `CI` is set).

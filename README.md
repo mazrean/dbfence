@@ -191,6 +191,10 @@ Also kept, with a warning under `--prune` (both engines; on MySQL the database i
 
 PostgreSQL `--prune` of a role runs `REASSIGN OWNED BY ... TO CURRENT_USER` and `DROP OWNED` in every connectable database, then `DROP ROLE`. Privileges and memberships the pruned role granted to others are revoked by `DROP OWNED`, except grants it made while holding an owner's privileges through a membership with INHERIT. dbfence therefore revokes those memberships first (with `CASCADE` on PostgreSQL 16+ for memberships it granted from them). Afterwards it grants the declared ones again (memberships only on PostgreSQL 16+), unless the grantee still holds the privilege from another grantor such as the owner; this needs the connected user to be allowed to grant them, and a warning is printed when owner memberships or re-grants cannot be handled. Roles that own objects or hold privileges in databases dbfence cannot connect to (no `CONNECT`, `ALLOW_CONNECTIONS false`, templates, provider databases) or that are ignored are named in a warning, even without `--prune`: `DROP ROLE` fails for them until those objects are reassigned or dropped in that database.
 
+### Independent safety check
+
+Before `plan` prints its result and before `apply` asks for confirmation, dbfence checks the finished plan again, separately from the code that computed it, against the rules above: no drop (or `REASSIGN OWNED` / `DROP OWNED`) of the connected user, of built-in, ignored, declared or referenced roles, of roles granted to the connected user or of owners of ignored objects; no drop of the connected database or of built-in, ignored or declared databases and schemas; nothing dropped without `--prune`; no change to the connected user that disables its login, locks it, removes its superuser status or sets connection limit 0 on a non-superuser; and no revoke of the connected user's memberships or ADMIN OPTION. A plan that breaks one of them is still printed, but the command fails with exit 1 and `dbfence: error: internal safety check failed: ... (this is a bug in dbfence; please report it)`, and `apply` executes nothing.
+
 ### Functions
 
 | Function | Returns |
