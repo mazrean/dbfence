@@ -210,3 +210,12 @@ func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 	_, err := io.WriteString(w, sb.String())
 	return err
 }
+
+// Count formats n with noun, adding "s" unless n is 1 ("1 statement",
+// "2 statements").
+func Count(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}

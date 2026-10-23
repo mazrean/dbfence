@@ -127,7 +127,7 @@ func (a *App) Apply(ctx context.Context, o Options) error {
 	if err = apply.Run(ctx, drv, p, a.io.Out, o.ShowSecrets); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(a.io.Out, "Applied %d statements.\n", len(p.Statements()))
+	_, err = fmt.Fprintf(a.io.Out, "Applied %s.\n", plan.Count(len(p.Statements()), "statement"))
 	return err
 }
 

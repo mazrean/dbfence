@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"strings"
 	"testing"
@@ -10,16 +11,24 @@ import (
 )
 
 type recorder struct {
+	err    error
+	cancel context.CancelFunc
 	ran    []string
 	failAt int
 }
 
 func (r *recorder) Exec(_ context.Context, database, query string) error {
 	r.ran = append(r.ran, database+"|"+query)
-	if len(r.ran) == r.failAt {
-		return errors.New("syntax error near " + query)
+	if len(r.ran) != r.failAt {
+		return nil
 	}
-	return nil
+	if r.cancel != nil {
+		r.cancel()
+	}
+	if r.err != nil {
+		return r.err
+	}
+	return errors.New("syntax error near " + query)
 }
 
 func testPlan() *plan.Plan {
@@ -44,26 +53,67 @@ func TestRun(t *testing.T) {
 	if strings.Join(r.ran, "\n") != strings.Join(want, "\n") {
 		t.Errorf("executed %q, want %q", r.ran, want)
 	}
-	if strings.Contains(out.String(), "hunter2") {
-		t.Errorf("output leaked the secret: %s", out.String())
+	wantOut := "[1/2] CREATE ROLE \"a\" WITH PASSWORD '<redacted>'\n[2/2] (on database \"app\") CREATE SCHEMA \"s\"\n"
+	if out.String() != wantOut {
+		t.Errorf("output =\n%s\nwant\n%s", out.String(), wantOut)
 	}
 }
 
-func TestRunStopsAndRedactsErrors(t *testing.T) {
+func TestRunErrors(t *testing.T) {
 	t.Parallel()
-	r := &recorder{failAt: 1}
-	var out strings.Builder
-	err := Run(t.Context(), r, testPlan(), &out, false)
-	if err == nil {
-		t.Fatal("Run() succeeded")
+	tests := []struct {
+		err       error
+		wantIs    error
+		name      string
+		want      []string
+		failAt    int
+		cancelCtx bool
+	}{
+		{
+			name: "server error on the connection", failAt: 1,
+			want: []string{`create role "a": statement 1/2 failed: `, "(0 of 2 statements applied; run plan"},
+		},
+		{
+			name: "server error on a database", failAt: 2,
+			want: []string{`create schema "s": statement 2/2 (on database "app") failed: `, "(1 of 2 statements applied;"},
+		},
+		{
+			name: "interrupted", failAt: 2, cancelCtx: true, err: context.Canceled, wantIs: context.Canceled,
+			want: []string{`interrupted during statement 2/2 (on database "app"), whose outcome is unknown (1 statement confirmed applied;`},
+		},
+		{
+			name: "connection lost", failAt: 1, err: driver.ErrBadConn, wantIs: driver.ErrBadConn,
+			want: []string{"interrupted during statement 1/2, whose outcome is unknown (0 statements confirmed applied;"},
+		},
 	}
-	if strings.Contains(err.Error(), "hunter2") {
-		t.Errorf("error leaked the secret: %v", err)
-	}
-	if !strings.Contains(err.Error(), "0 of 2 statements applied") {
-		t.Errorf("err = %v", err)
-	}
-	if len(r.ran) != 1 {
-		t.Errorf("continued after failure: %q", r.ran)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			r := &recorder{failAt: tt.failAt, err: tt.err}
+			if tt.cancelCtx {
+				r.cancel = cancel
+			}
+			var out strings.Builder
+			err := Run(ctx, r, testPlan(), &out, false)
+			if err == nil {
+				t.Fatal("Run() succeeded")
+			}
+			if strings.Contains(err.Error(), "hunter2") {
+				t.Errorf("error leaked the secret: %v", err)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %v, want substring %q", err, w)
+				}
+			}
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Errorf("err = %v, want errors.Is %v", err, tt.wantIs)
+			}
+			if len(r.ran) != tt.failAt {
+				t.Errorf("continued after failure: %q", r.ran)
+			}
+		})
 	}
 }
