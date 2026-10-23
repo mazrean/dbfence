@@ -39,7 +39,7 @@ dbfence apply    -f dbfence.hcl          # print the SQL, ask for "yes", then ex
 `plan` writes annotated SQL to stdout (abridged):
 
 ```sql
--- warning: unmanaged role "stray" (use --prune to drop it)
+-- warning: unmanaged user "stray" (use --prune to drop it)
 
 -- [create] user "app"
 CREATE ROLE "app" WITH LOGIN CONNECTION LIMIT 20 PASSWORD '<redacted>';
@@ -57,11 +57,15 @@ REVOKE CONNECT, TEMPORARY ON DATABASE "app" FROM PUBLIC;
 ```
 
 - Each change starts with `-- [create|update|grant|revoke|drop] <resource>`. Statements that must run in another database are preceded by `-- (on database "x")`.
+- Unmanaged roles are reported as `unmanaged user "x"` when they can log in, and `unmanaged role "x"` otherwise.
+- A PostgreSQL revoke that cascades is preceded by `-- CASCADE: privileges on <object> that "<grantor>" granted to ... are revoked too; declared ones are granted again` (or `memberships in "<role>" that ...`).
 - When something is dropped, the summary is followed by `-- DESTRUCTIVE: this plan drops N objects: ...`.
 - An empty plan prints `-- No changes. The server matches the configuration.`, or, when there are warnings, `-- No changes to apply. See the N warnings above ...`.
 - Warnings are also written to stderr as `warning: ...`, so they stay visible when stdout is redirected.
 
-`apply` prints the same plan, asks for `yes` (anything else, or a closed stdin, cancels with exit 1), and prints `[k/N] <statement>` for each statement. Statements run one by one, without a transaction, and apply stops at the first error. The error says how many statements were applied; run `plan` again to see what is left.
+`apply` prints the same plan, asks for `yes` (anything else, or a closed stdin, cancels with exit 1), and prints `[k/N] <statement>` for each statement (its comment lines first). Statements run one by one, without a transaction, and apply stops at the first error. The error says how many statements were applied; run `plan` again to see what is left. An interrupted apply stops before the next statement, and the error ends with the cause, such as `interrupt signal received`.
+
+`validate` prints a summary such as `The configuration is valid (postgres: 1 database, 3 roles, 1 schema, 3 privileges).`
 
 Errors are printed to stderr as `dbfence: error: ...` (configuration diagnostics follow unindented) and exit with 1. `plan --detailed-exitcode` exits with 2 when the plan has changes; everything else that succeeds exits with 0.
 
@@ -122,7 +126,7 @@ A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:330
 ### Blocks
 
 - **`connection`**: required, exactly one. `engine` and `dsn` (a pgx URL/DSN, or a go-sql-driver/mysql DSN; it must not be empty).
-  Connecting times out after 10 seconds unless the DSN sets `connect_timeout` (PostgreSQL) or `timeout` (MySQL).
+  Connecting times out after 10 seconds unless the DSN sets `connect_timeout` (PostgreSQL) or `timeout` (MySQL). On MySQL the timeout covers the handshake and session setup as well as the dial (`connect to mysql: timed out after 10s`). PostgreSQL reports a host's timeout once, even with `sslmode=prefer`.
 - **`role "<label>"` / `user "<label>"`**: these two are the same thing, except for the login default.
   - `name` overrides the label. Use it, with an identifier-safe label, for names with upper case, spaces or quotes, because only such labels can be referenced (`user.<label>.name`).
   - `password`, `login` and `member_of` work on both engines.
@@ -138,14 +142,14 @@ A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:330
   - `admin` (`WITH ADMIN OPTION`) works on both engines. On PostgreSQL, revoking it cascades to the memberships the member granted with it, and declared ones are granted again. On MySQL, removing it revokes the role and grants it again. The connected user's ADMIN OPTION is never revoked (a warning is printed).
   - `inherit` and `set` are PostgreSQL 16+ only (a validation error on MySQL; plan fails on older PostgreSQL). On PostgreSQL 16+ the role's `inherit` attribute is only the default for new grants, so dbfence also sets `inherit` on the role's existing memberships to match, except those that declare their own `inherit`. A warning is printed while the two disagree.
   - On PostgreSQL 16+ each grantor's grant is changed with `GRANTED BY`; an option counts as held when any grant has it.
-  - On MySQL the declared `member_of` becomes exactly the account's default roles (`SET DEFAULT ROLE`), so the roles are active without `SET ROLE`.
+  - On MySQL the declared `member_of` becomes exactly the account's default roles (`SET DEFAULT ROLE`), so the roles are active without `SET ROLE`. The connected account's default roles are never narrowed: they also keep the memberships it keeps and its current default roles.
 - **`database "<label>"`**: `name`, `owner`, `encoding`, `lc_collate` and `lc_ctype` (PostgreSQL; the last three are create-only; none may be empty), or `charset` and `collation` (MySQL; letters, digits and `_`).
 - **`schema "<label>"`**: PostgreSQL only. Takes `database`, `name` and `owner`. `schema "public"` (or another template schema) can also be declared in a database the plan creates; only its owner and grants are planned.
 - **`grant`**: takes `role`, `database`, an optional `schema` (PostgreSQL), `privileges` and `with_grant_option`.
   - `ALL` expands to every privilege of that object type. `GRANT OPTION` is not a privilege; use `with_grant_option = true`.
   - A declared role's privileges on declared databases or schemas that aren't listed are revoked. Grants to an object's owner have no effect (a warning is printed).
   - The database (and schema) must be declared.
-  - MySQL: only database-level privileges (`ON db.*`) are managed. Every grant block for the same account and database must use the same `with_grant_option`, because MySQL keeps one grant option per database. `_` and `%` in database names are escaped (`my\_app`), so a grant never acts as a wildcard. Other wildcard grants are not managed; a warning is printed when one of a declared account matches a declared database.
+  - MySQL: only database-level privileges (`ON db.*`) are managed. Every grant block for the same account and database must use the same `with_grant_option`, because MySQL keeps one grant option per database. `_` and `%` in database names are escaped (`my\_app`), so a grant never acts as a wildcard. Other wildcard grants are not managed; a warning is printed when one of a declared account matches a declared database. With `partial_revokes` ON, MySQL reads names literally, so escaped rows of declared databases are revoked and granted again on the literal name.
 - **`grant` to `PUBLIC`** (PostgreSQL only): `role = "PUBLIC"` (any case, no role block needed).
   - PUBLIC is managed only on databases and schemas that have at least one PUBLIC grant block. There, PUBLIC's undeclared privileges are revoked; elsewhere they are left alone.
   - `privileges = []` (allowed only for PUBLIC) revokes everything PUBLIC holds on that object. It cannot be combined with another PUBLIC grant block on the same object.
@@ -166,9 +170,9 @@ Built-in objects are never reported or pruned:
 - PostgreSQL roles `postgres`, `pg_*`, `rdsadmin`, `rdsrepladmin`, `rdstopmgr`, `rds_*`, `cloudsql*`, `azure*` and `alloydb*`; databases `postgres`, `template0`, `template1`, `rdsadmin`, `cloudsqladmin`, `azure_maintenance`, `azure_sys` and `alloydbadmin`; schemas `public`, `information_schema` and `pg_*`.
 - MySQL accounts `root`, `mariadb.sys`, `debian-sys-maint`, `mysql.*`, `rds*`, `aws_*`, `cloudsql*` and `azure_*`; databases `mysql`, `sys`, `information_schema`, `performance_schema` and `ndbinfo`.
 
-Also kept, with a warning under `--prune`: the connected user and the database it is connected to, roles the configuration references without declaring them, roles granted to the connected user, and owners of ignored databases or schemas. Changes to the connected user that would lock it out are skipped.
+Also kept, with a warning under `--prune` (both engines; on MySQL the database is the DSN's, read through `DATABASE()`): the connected user and the database it is connected to, roles the configuration references without declaring them, roles granted to the connected user, and owners of ignored databases or schemas. Changes to the connected user that would lock it out are skipped.
 
-PostgreSQL `--prune` of a role runs `REASSIGN OWNED BY ... TO CURRENT_USER` and `DROP OWNED` in every connectable database, then `DROP ROLE`. Privileges and memberships the pruned role granted to others are revoked by `DROP OWNED`; dbfence grants the declared ones again (memberships only on PostgreSQL 16+), which needs the connected user to be allowed to grant them. Roles that own objects or hold privileges in databases dbfence cannot connect to (no `CONNECT`, `ALLOW_CONNECTIONS false`, templates, provider databases) or that are ignored are named in a warning, even without `--prune`: `DROP ROLE` fails for them until those objects are reassigned or dropped in that database.
+PostgreSQL `--prune` of a role runs `REASSIGN OWNED BY ... TO CURRENT_USER` and `DROP OWNED` in every connectable database, then `DROP ROLE`. Privileges and memberships the pruned role granted to others are revoked by `DROP OWNED`, except grants it made while holding an owner's privileges through a membership with INHERIT. dbfence therefore revokes those memberships first (with `CASCADE` on PostgreSQL 16+ for memberships it granted from them). Afterwards it grants the declared ones again (memberships only on PostgreSQL 16+), unless the grantee still holds the privilege from another grantor such as the owner; this needs the connected user to be allowed to grant them, and a warning is printed when owner memberships or re-grants cannot be handled. Roles that own objects or hold privileges in databases dbfence cannot connect to (no `CONNECT`, `ALLOW_CONNECTIONS false`, templates, provider databases) or that are ignored are named in a warning, even without `--prune`: `DROP ROLE` fails for them until those objects are reassigned or dropped in that database.
 
 ### Functions
 
@@ -197,7 +201,15 @@ If the verifier can't be read (for example on RDS or Cloud SQL, where the admin 
 
 ### Required privileges (PostgreSQL)
 
-Without superuser, changes the connected user may not make are not planned and produce a warning instead: altering a role needs ADMIN OPTION on it (superuser for superuser roles), and changing a grant made by another grantor needs superuser. Pruning a role needs the connected user to have that role's privileges; a warning names the `GRANT` to run. Privileges and memberships are revoked per grantor.
+Without superuser, changes the connected user may not make are not planned and produce a warning instead:
+
+- Altering a role needs ADMIN OPTION on it (superuser for superuser roles).
+- Changing a privilege grant made by another grantor needs superuser, or, for revokes, `SET` on that grantor.
+- Granting or revoking a membership needs ADMIN OPTION on the role on PostgreSQL 16+ (revoking another grantor's membership grant needs superuser); before 16, ADMIN OPTION or CREATEROLE for a role that is not a superuser. Membership re-grants after a `CASCADE` follow the same rules.
+- Creating schemas in, or granting on, objects owned by another role needs that owner's privileges. The warning names the `GRANT` to run: on PostgreSQL 16+ `GRANT <owner> TO <user> WITH INHERIT TRUE, SET TRUE` (`WITH SET TRUE, INHERIT FALSE` when only an owner change needs it, `WITH INHERIT TRUE` when only its privileges are needed); before 16 a plain `GRANT <owner> TO <user>`.
+- Pruning a role needs the connected user to have that role's privileges; a warning names the `GRANT` to run.
+
+Privileges and memberships are revoked per grantor.
 
 ### Required privileges (MySQL)
 
@@ -209,7 +221,7 @@ If it can't read them, it falls back as follows:
 | `mysql.user` | Accounts are listed from `information_schema.USER_ATTRIBUTES` (needs `CREATE USER`). Login state, authentication plugin and passwords of existing accounts are not compared (`--force-password` still sets the password) |
 | `mysql.user`, and the account list is not complete | `USER_ATTRIBUTES` hides accounts that hold `SYSTEM_USER` unless the connected user has it too. Declared accounts are then created with `CREATE USER IF NOT EXISTS` on every run, and existing ones are not updated. Unmanaged accounts are not reported or pruned |
 | `mysql.role_edges` | Declared memberships are granted on every run (`GRANT` is idempotent). Undeclared memberships are not revoked |
-| `mysql.default_roles` | `SET DEFAULT ROLE` is issued on every run for accounts with declared memberships |
+| `mysql.default_roles` | `SET DEFAULT ROLE` is issued on every run for declared accounts with `member_of` |
 | `mysql.db` | Declared privileges are granted on every run. Undeclared privileges are not revoked |
 
 Each fallback is reported as a warning in `plan`. Statements that are re-asserted on every run (`CREATE USER IF NOT EXISTS`, declared memberships, default roles and grants) always appear in the plan, so `--detailed-exitcode` returns 2 while there are any. A fallback with nothing to re-assert (for example, only `mysql.user` is unreadable and no password is forced) can leave the plan empty, and the exit code is then 0 despite the warnings.
