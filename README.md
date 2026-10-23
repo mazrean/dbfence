@@ -170,7 +170,7 @@ A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:330
   - `with_grant_option = true` is invalid for PUBLIC.
   - PostgreSQL's defaults are visible: `CONNECT` and `TEMPORARY` on every database, and `USAGE` on schema `public` (`CREATE` and `USAGE` before PostgreSQL 15). To manage the `public` schema's PUBLIC grants, declare `schema "public" { database = ... }`.
   - When a role loses a privilege that PUBLIC still holds on an unmanaged object, the plan warns that the role keeps it through PUBLIC. Add a PUBLIC grant block (for example `privileges = []`) to take it away.
-- **`ignore`**: takes `roles`, `databases` and `schemas` (PostgreSQL) regexps. Each pattern is anchored to the whole string.
+- **`ignore`**: takes `roles`, `databases` and `schemas` (PostgreSQL) regexps. Each pattern must be a valid regexp on its own and is anchored to the whole string; `.` also matches a newline.
   - On MySQL, `roles` patterns match the name or `name@host`: `"datadog"` ignores every host, `"datadog@%"` only the host `%` (`%` is a literal here), and `"datadog@10\\.0\\.0\\.%"` one host. An account with an empty host (shown as `"name"@""`) matches `"name@"`.
   - `schemas` patterns match the schema name or `<database>.<schema>`: `"staging"` ignores it in every database, `"analytics\\.staging"` only in `analytics` (escape the dot; an unescaped `.` matches any character).
   - Declared databases and schemas stay managed even when a pattern matches them.

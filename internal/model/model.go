@@ -237,9 +237,14 @@ type Ignore struct {
 
 // CompileIgnorePattern compiles an ignore pattern anchored to match the
 // whole name. Config validation and diff both use it, so a pattern that
-// validates is matched exactly as written.
+// validates is matched exactly as written. The pattern must be valid on
+// its own, so that unbalanced parentheses such as "a)|(b" cannot break
+// out of the anchors, and '.' also matches a newline.
 func CompileIgnorePattern(p string) (*regexp.Regexp, error) {
-	re, err := regexp.Compile("^(?:" + p + ")$")
+	if _, err := regexp.Compile(p); err != nil {
+		return nil, fmt.Errorf("compile ignore pattern: %w", err)
+	}
+	re, err := regexp.Compile("(?s)^(?:" + p + ")$")
 	if err != nil {
 		return nil, fmt.Errorf("compile ignore pattern: %w", err)
 	}
