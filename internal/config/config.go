@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/zclconf/go-cty/cty"
+	"github.com/zclconf/go-cty/cty/convert"
 	"github.com/zclconf/go-cty/cty/function"
 )
 
@@ -353,6 +354,7 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 			resources[typ] = append(resources[typ], r)
 		}
 	}
+	diags = append(diags, resolveSchemaDatabases(base, vars, resources["schema"], engine)...)
 	if diags.HasErrors() {
 		return nil, diags
 	}
@@ -469,14 +471,54 @@ func refValue(typ string, r resource, engine model.Engine, ctx *hcl.EvalContext)
 		// Schemas may only reference databases, which are resolved first.
 		db := cty.UnknownVal(cty.String)
 		if a, ok := r.attrs["database"]; ok {
-			if v, d := a.Expr.Value(ctx); !d.HasErrors() && v.Type() == cty.String {
-				db = v
+			if v, d := a.Expr.Value(ctx); !d.HasErrors() {
+				if sv, err := convert.Convert(v, cty.String); err == nil && !sv.IsNull() {
+					db = sv
+				}
 			}
 		}
 		return cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal(r.name), "database": db})
 	default:
 		return cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal(r.name)})
 	}
+}
+
+// resolveSchemaDatabases resolves schema.<label>.database references
+// between schemas regardless of declaration order, and reports references
+// that cannot be resolved instead of leaving an unknown value behind.
+func resolveSchemaDatabases(base *hcl.EvalContext, vars map[string]map[string]cty.Value, schemas []resource, engine model.Engine) hcl.Diagnostics {
+	pending := func(r resource) bool { return !vars["schema"][r.block.Labels[0]].GetAttr("database").IsKnown() }
+	for changed := true; changed; {
+		changed = false
+		ctx := refContext(base, vars)
+		for _, r := range schemas {
+			if !pending(r) {
+				continue
+			}
+			if v := refValue("schema", r, engine, ctx); v.GetAttr("database").IsKnown() {
+				vars["schema"][r.block.Labels[0]] = v
+				changed = true
+			}
+		}
+	}
+	var diags hcl.Diagnostics
+	ctx := refContext(base, vars)
+	for _, r := range schemas {
+		a, ok := r.attrs["database"]
+		if !ok || !pending(r) {
+			// A missing database is reported by the full decode.
+			continue
+		}
+		v, d := a.Expr.Value(ctx)
+		switch {
+		case d.HasErrors():
+			diags = append(diags, d...)
+		case !v.IsWhollyKnown():
+			diags = append(diags, errAt(a.Range, "Cyclic reference",
+				fmt.Sprintf("the database of schema %q cannot be resolved: it depends on itself through schema.<label>.database references.", r.block.Labels[0])))
+		}
+	}
+	return diags
 }
 
 // refContext exposes the references resolved so far.
