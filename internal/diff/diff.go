@@ -123,7 +123,19 @@ func (df *differ) warn(format string, args ...any) {
 	df.warnings = append(df.warnings, fmt.Sprintf(format, args...))
 }
 
-func roleResource(id model.RoleID) string { return fmt.Sprintf("role %q", id) }
+// roleResource names a role for plan output: "user" for login roles
+// (declared by user blocks by default), "role" otherwise.
+func (df *differ) roleResource(id model.RoleID) string {
+	kind := "role"
+	if i := slices.IndexFunc(df.desired.Roles, func(r model.Role) bool { return r.ID == id }); i >= 0 {
+		if l := df.desired.Roles[i].Login; l != nil && *l {
+			kind = "user"
+		}
+	} else if cur, ok := df.currentRole(id); ok && cur.Login {
+		kind = "user"
+	}
+	return fmt.Sprintf("%s %q", kind, id)
+}
 
 func (df *differ) currentRole(id model.RoleID) (model.RoleState, bool) {
 	i := slices.IndexFunc(df.current.Roles, func(r model.RoleState) bool { return r.ID == id })
@@ -151,7 +163,7 @@ func (df *differ) checkReferences() error {
 	}
 	for _, r := range df.desired.Roles {
 		for _, m := range r.MemberOf {
-			check(roleResource(r.ID)+" member_of", m)
+			check(df.roleResource(r.ID)+" member_of", m)
 		}
 	}
 	for _, db := range df.desired.Databases {
@@ -195,17 +207,17 @@ func (df *differ) roles() {
 		case !exists && u.Roles:
 			// Existence is unknown: create idempotently and only apply
 			// what does not need the current state.
-			df.add(phaseRole, plan.ActionCreate, roleResource(r.ID)+" (if not exists)", df.d.EnsureRole(r))
+			df.add(phaseRole, plan.ActionCreate, df.roleResource(r.ID)+" (if not exists)", df.d.EnsureRole(r))
 			cur = model.RoleState{ID: r.ID, AttributesUnknown: true}
 			stmts, warns := df.d.AlterRole(r, cur, df.opts.ForcePassword)
 			df.warnings = append(df.warnings, warns...)
-			df.add(phaseRole, plan.ActionUpdate, roleResource(r.ID), stmts)
+			df.add(phaseRole, plan.ActionUpdate, df.roleResource(r.ID), stmts)
 		case !exists:
-			df.add(phaseRole, plan.ActionCreate, roleResource(r.ID), df.d.CreateRole(r))
+			df.add(phaseRole, plan.ActionCreate, df.roleResource(r.ID), df.d.CreateRole(r))
 		default:
 			stmts, warns := df.d.AlterRole(r, cur, df.opts.ForcePassword)
 			df.warnings = append(df.warnings, warns...)
-			df.add(phaseRole, plan.ActionUpdate, roleResource(r.ID), stmts)
+			df.add(phaseRole, plan.ActionUpdate, df.roleResource(r.ID), stmts)
 		}
 		if r.MemberOf == nil {
 			continue
@@ -447,7 +459,7 @@ func (df *differ) privileges() {
 		}
 	}
 	res := func(g grantGroup, privs []string, prep string) string {
-		return fmt.Sprintf("%s on %s %q %s %q", strings.Join(privs, ", "), g.obj.Type, g.obj, prep, g.grantee)
+		return fmt.Sprintf("%s on %s %s %q", strings.Join(privs, ", "), objectLabel(g.obj), prep, g.grantee)
 	}
 	for _, g := range sortedGroups(grants) {
 		privs := sortedPrivs(grants[g])
@@ -478,9 +490,10 @@ func sortedGroups[V any](m map[grantGroup]V) []grantGroup {
 	}
 	slices.SortFunc(keys, func(a, b grantGroup) int {
 		return cmp.Or(
-			strings.Compare(a.grantee.String(), b.grantee.String()),
+			model.CompareRoleIDs(a.grantee, b.grantee),
 			strings.Compare(string(a.obj.Type), string(b.obj.Type)),
-			strings.Compare(a.obj.String(), b.obj.String()),
+			strings.Compare(a.obj.Database, b.obj.Database),
+			strings.Compare(a.obj.Schema, b.obj.Schema),
 			cmp.Compare(boolInt(a.grantOption), boolInt(b.grantOption)),
 		)
 	})
@@ -521,7 +534,7 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 		}
 		if reason := df.keepRole(r.ID, referenced, reliedOn); reason != "" {
 			if df.opts.Prune {
-				df.warn("%s %s; not pruned", roleResource(r.ID), reason)
+				df.warn("%s %s; not pruned", df.roleResource(r.ID), reason)
 			}
 			continue
 		}
@@ -529,7 +542,7 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 			df.warn("unmanaged role %q (use --prune to drop it)", r.ID)
 			continue
 		}
-		df.add(phaseDropRole, plan.ActionDrop, roleResource(r.ID), df.d.DropRole(r.ID, surviving))
+		df.add(phaseDropRole, plan.ActionDrop, df.roleResource(r.ID), df.d.DropRole(r.ID, surviving))
 	}
 }
 

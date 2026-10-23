@@ -263,7 +263,7 @@ func TestMySQLIntegration(t *testing.T) {
 	h.exec("CREATE USER 'dbf_it_stray'@'%'")
 	h.exec("CREATE DATABASE dbf_it_legacy")
 	n, out := h.plan(app.Options{})
-	if n != 2 || !strings.Contains(out, `unmanaged role "dbf_it_stray@%"`) || !strings.Contains(out, `unmanaged database "dbf_it_legacy"`) {
+	if n != 2 || !strings.Contains(out, `unmanaged role "dbf_it_stray"@"%"`) || !strings.Contains(out, `unmanaged database "dbf_it_legacy"`) {
 		t.Fatalf("drift plan: %d\n%s", n, out)
 	}
 	h.apply(app.Options{Prune: true})

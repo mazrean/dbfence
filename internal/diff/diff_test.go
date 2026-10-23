@@ -361,7 +361,7 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 				`SET DEFAULT ROLE ALL TO 'app'@'%'`,
 				"GRANT SELECT ON `app`.* TO 'app'@'%'",
 			},
-			wantWarns: []string{"cannot read login state", "cannot read role memberships", "cannot read privileges", `unmanaged role "stray@%"`},
+			wantWarns: []string{"cannot read login state", "cannot read role memberships", "cannot read privileges", `unmanaged role "stray"@"%"`},
 		},
 		{
 			name: "forced password with unknown credentials",

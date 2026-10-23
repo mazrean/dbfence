@@ -90,7 +90,7 @@ func TestComputeCurrentUser(t *testing.T) {
 			role:      model.Role{ID: myAdmin, Login: new(false)},
 			state:     model.RoleState{ID: myAdmin, Login: true},
 			want:      []string{},
-			wantWarns: []string{`not disabling login of the connected user "admin@%": it would lock dbfence out`},
+			wantWarns: []string{`not disabling login of the connected user "admin"@"%": it would lock dbfence out`},
 		},
 		{
 			name:      "login already declared",
@@ -263,8 +263,8 @@ func TestComputePruneProtection(t *testing.T) {
 			dialect: mysql.Dialect{},
 			want:    []string{`DROP USER 'stale'@'%'`},
 			wantWarns: []string{
-				`role "dba@%" is granted to the connected user "admin@%"; not pruned`,
-				`role "super@%" is granted to the connected user "admin@%"; not pruned`,
+				`role "dba"@"%" is granted to the connected user "admin"@"%"; not pruned`,
+				`role "super"@"%" is granted to the connected user "admin"@"%"; not pruned`,
 			},
 		},
 		{

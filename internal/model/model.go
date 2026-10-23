@@ -3,7 +3,10 @@
 package model
 
 import (
+	"cmp"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -26,6 +29,21 @@ func (id RoleID) String() string {
 		return id.Name
 	}
 	return id.Name + "@" + id.Host
+}
+
+// Format implements fmt.Formatter. %q quotes the name and the host
+// separately ("name"@"host") so that names containing '@' stay
+// unambiguous; other verbs print String.
+func (id RoleID) Format(f fmt.State, verb rune) {
+	if verb != 'q' {
+		_, _ = f.Write([]byte(id.String()))
+		return
+	}
+	s := strconv.Quote(id.Name)
+	if id.Host != "" {
+		s += "@" + strconv.Quote(id.Host)
+	}
+	_, _ = f.Write([]byte(s))
 }
 
 // Database is a database (MySQL: schema).
@@ -189,10 +207,13 @@ func NormalizePrivilege(p string) string {
 	return strings.Join(strings.Fields(strings.ToUpper(p)), " ")
 }
 
+// CompareRoleIDs orders role IDs by name, then host.
+func CompareRoleIDs(a, b RoleID) int {
+	return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.Host, b.Host))
+}
+
 // SortRoleIDs sorts ids in place and returns them.
 func SortRoleIDs(ids []RoleID) []RoleID {
-	slices.SortFunc(ids, func(a, b RoleID) int {
-		return strings.Compare(a.String(), b.String())
-	})
+	slices.SortFunc(ids, CompareRoleIDs)
 	return ids
 }
