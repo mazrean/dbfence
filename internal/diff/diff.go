@@ -52,11 +52,14 @@ type Dialect interface {
 }
 
 // Execution phases. Roles come first because databases and schemas
-// reference owners; drops run in reverse dependency order.
+// reference owners. Memberships follow right after roles: creating a
+// database owned by another role, or handing it over, requires the
+// connected user to be a member of that role. Drops run in reverse
+// dependency order.
 const (
 	phaseRole = iota
-	phaseDatabase
 	phaseMembership
+	phaseDatabase
 	phaseSchema
 	phaseGrant
 	phaseRevoke

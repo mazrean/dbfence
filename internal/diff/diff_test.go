@@ -96,8 +96,8 @@ func TestComputeCreateAll(t *testing.T) {
 	want := []string{
 		`CREATE ROLE "owner" WITH NOLOGIN`,
 		`CREATE ROLE "app" WITH LOGIN PASSWORD '<redacted>'`,
-		`CREATE DATABASE "app" OWNER "owner"`,
 		`GRANT "owner" TO "app"`,
+		`CREATE DATABASE "app" OWNER "owner"`,
 		`app: CREATE SCHEMA "api" AUTHORIZATION "owner"`,
 		`GRANT CONNECT ON DATABASE "app" TO "app"`,
 		`app: GRANT USAGE ON SCHEMA "api" TO "app"`,
@@ -145,8 +145,8 @@ func TestComputeDrift(t *testing.T) {
 	}
 	want := []string{
 		`ALTER ROLE "app" WITH LOGIN CONNECTION LIMIT -1`,
-		`ALTER DATABASE "app" OWNER TO "owner"`,
 		`REVOKE "postgres" FROM "app"`,
+		`ALTER DATABASE "app" OWNER TO "owner"`,
 		`app: ALTER SCHEMA "api" OWNER TO "owner"`,
 		`REVOKE GRANT OPTION FOR CONNECT ON DATABASE "app" FROM "app"`,
 		`REVOKE TEMPORARY ON DATABASE "app" FROM "app"`,
@@ -284,9 +284,9 @@ func TestComputeMySQL(t *testing.T) {
 	want := []string{
 		`CREATE USER 'reader'@'%' ACCOUNT LOCK`,
 		`CREATE USER 'app'@'%' IDENTIFIED WITH caching_sha2_password BY '<redacted>'`,
-		"CREATE DATABASE `app` CHARACTER SET utf8mb4",
 		`GRANT 'reader'@'%' TO 'app'@'%'`,
 		`SET DEFAULT ROLE ALL TO 'app'@'%'`,
+		"CREATE DATABASE `app` CHARACTER SET utf8mb4",
 		"GRANT INSERT, SELECT ON `app`.* TO 'app'@'%'",
 	}
 	if diff := cmp.Diff(want, statements(p)); diff != "" {
