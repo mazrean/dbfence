@@ -288,11 +288,70 @@ func (d Dialect) dbPrivileges(rows []dbGrant, desired *model.Desired) ([]model.P
 				}
 			}
 		}
-		for _, p := range g.privs {
-			out = append(out, model.Privilege{Grantee: g.grantee, Object: obj, Name: p, GrantOption: g.grantOption})
+		out = append(out, levelPrivileges(g, obj, desired)...)
+	}
+	return out, append(warns, mixedGrantOptions(desired)...)
+}
+
+// grantOptionPrivilege stands for a grant option that no declared
+// privilege asks for. diff revokes it as REVOKE ..., GRANT OPTION.
+const grantOptionPrivilege = "GRANT OPTION"
+
+// levelPrivileges expands one mysql.db row. MySQL keeps a single grant
+// option per (account, database), so it is compared at that level: when
+// any declared privilege there has the grant option, the declared
+// per-privilege values are reported; otherwise a held grant option shows
+// up as grantOptionPrivilege, which is not declared and gets revoked.
+func levelPrivileges(g dbGrant, obj model.Object, desired *model.Desired) []model.Privilege {
+	declared := map[string]bool{}
+	wantOption := false
+	for _, p := range desired.Privileges {
+		if p.Grantee == g.grantee && p.Object == obj {
+			declared[p.Name] = p.GrantOption
+			wantOption = wantOption || p.GrantOption
 		}
 	}
-	return out, warns
+	out := make([]model.Privilege, 0, len(g.privs)+1)
+	for _, name := range g.privs {
+		opt := false
+		if g.grantOption && wantOption {
+			opt = true
+			if d, ok := declared[name]; ok {
+				opt = d
+			}
+		}
+		out = append(out, model.Privilege{Grantee: g.grantee, Object: obj, Name: name, GrantOption: opt})
+	}
+	if g.grantOption && !wantOption {
+		out = append(out, model.Privilege{Grantee: g.grantee, Object: obj, Name: grantOptionPrivilege})
+	}
+	return out
+}
+
+// mixedGrantOptions warns about declared levels that mix privileges with
+// and without the grant option.
+func mixedGrantOptions(desired *model.Desired) []string {
+	type level struct {
+		grantee model.RoleID
+		obj     model.Object
+	}
+	seen := map[level]map[bool]bool{}
+	var order []level
+	for _, p := range desired.Privileges {
+		l := level{p.Grantee, p.Object}
+		if seen[l] == nil {
+			seen[l] = map[bool]bool{}
+			order = append(order, l)
+		}
+		seen[l][p.GrantOption] = true
+	}
+	var warns []string
+	for _, l := range order {
+		if seen[l][true] && seen[l][false] {
+			warns = append(warns, fmt.Sprintf("MySQL keeps one grant option per database: %q can grant all of its privileges on database %q, not only those declared with with_grant_option", l.grantee, l.obj.Database))
+		}
+	}
+	return warns
 }
 
 // dbObject classifies the Db column of mysql.db.

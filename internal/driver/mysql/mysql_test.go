@@ -170,3 +170,78 @@ func TestDBPrivilegesPatterns(t *testing.T) {
 		})
 	}
 }
+
+func TestDBPrivilegesGrantOption(t *testing.T) {
+	t.Parallel()
+	mixed := []model.Privilege{
+		{Grantee: app, Object: dbObj("app"), Name: "SELECT", GrantOption: true},
+		{Grantee: app, Object: dbObj("app"), Name: "INSERT"},
+	}
+	plain := []model.Privilege{
+		{Grantee: app, Object: dbObj("app"), Name: "SELECT"},
+		{Grantee: app, Object: dbObj("app"), Name: "INSERT"},
+	}
+	tests := []struct {
+		name      string
+		declared  []model.Privilege
+		want      []string
+		row       dbGrant
+		wantWarns int
+	}{
+		{
+			name:      "mixed declaration converges once the level has the option",
+			declared:  mixed,
+			row:       dbGrant{grantee: app, db: "app", privs: []string{"SELECT", "INSERT"}, grantOption: true},
+			wantWarns: 1,
+		},
+		{
+			name:      "mixed declaration grants the option once",
+			declared:  mixed,
+			row:       dbGrant{grantee: app, db: "app", privs: []string{"SELECT", "INSERT"}},
+			want:      []string{"GRANT SELECT ON `app`.* TO 'app'@'%' WITH GRANT OPTION"},
+			wantWarns: 1,
+		},
+		{
+			name:     "undeclared option is revoked",
+			declared: plain,
+			row:      dbGrant{grantee: app, db: "app", privs: []string{"SELECT", "INSERT"}, grantOption: true},
+			want:     []string{"REVOKE GRANT OPTION ON `app`.* FROM 'app'@'%'"},
+		},
+		{
+			name: "option left after removing all privileges is revoked with them",
+			row:  dbGrant{grantee: app, db: "app", privs: []string{"CREATE", "DROP"}, grantOption: true},
+			want: []string{"REVOKE CREATE, DROP, GRANT OPTION ON `app`.* FROM 'app'@'%'"},
+		},
+		{
+			name: "option without privileges is revoked",
+			row:  dbGrant{grantee: app, db: "app", grantOption: true},
+			want: []string{"REVOKE GRANT OPTION ON `app`.* FROM 'app'@'%'"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{
+				Engine:     model.EngineMySQL,
+				Roles:      []model.Role{{ID: app}},
+				Databases:  []model.Database{{Name: "app"}},
+				Privileges: tt.declared,
+			}
+			privs, warns := Dialect{}.dbPrivileges([]dbGrant{tt.row}, desired)
+			cur := &model.Current{
+				CurrentUser: model.RoleID{Name: "root", Host: "%"},
+				Roles:       []model.RoleState{{ID: app, Login: true}},
+				Databases:   []model.Database{{Name: "app"}},
+				Privileges:  privs,
+				Warnings:    warns,
+			}
+			got, gotWarns := planSQL(t, desired, cur, Dialect{})
+			if d := cmp.Diff(tt.want, got); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			if len(gotWarns) != tt.wantWarns {
+				t.Errorf("warnings = %q, want %d", gotWarns, tt.wantWarns)
+			}
+		})
+	}
+}
