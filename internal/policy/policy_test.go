@@ -262,6 +262,27 @@ func TestVerify(t *testing.T) {
 			want:  []string{`database "d\x00"`, `schema "s\x7f"`},
 		},
 		{
+			name: "revoke granted by an unmanaged grantor",
+			stmts: []plan.Statement{plan.New("", plan.KindRevokeMembership,
+				plan.Target{Object: plan.ObjectRole, Role: pg("base"), Grantee: pg("app"), Grantor: pg("evil\n")}, plan.Keyword("REVOKE x"))},
+			want: []string{`names grantor "evil\n" in GRANTED BY`},
+		},
+		{
+			name: "owner with an unmanaged name",
+			stmts: []plan.Statement{plan.New("", plan.KindAlterDatabase,
+				plan.ObjectTarget(model.Object{Type: model.ObjectDatabase, Database: "app"}).WithOwner("o\x1b"), plan.Keyword("ALTER DATABASE x"))},
+			want: []string{`makes role "o\x1b" an owner`},
+		},
+		{
+			name:    "mysql default role with an unmanaged name",
+			current: &model.Current{CurrentUser: model.RoleID{Name: "root", Host: "%"}},
+			desired: &model.Desired{Engine: model.EngineMySQL},
+			system:  mysql.Dialect{},
+			stmts: []plan.Statement{plan.New("", plan.KindSetDefaultRole, plan.RoleTarget(model.RoleID{Name: "u", Host: "%"}), plan.Keyword("SET DEFAULT ROLE x")).
+				WithDefaultRoles([]model.RoleID{{Name: "r\n", Host: "%"}})},
+			want: []string{`names role "r\n"@"%"`},
+		},
+		{
 			name:    "mysql account with an unmanaged host",
 			current: &model.Current{CurrentUser: model.RoleID{Name: "root", Host: "%"}},
 			desired: &model.Desired{Engine: model.EngineMySQL},

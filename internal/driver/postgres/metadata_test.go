@@ -95,18 +95,28 @@ func TestStatementMetadata(t *testing.T) {
 			want:  []meta{{kind: plan.KindRevokeMembership, target: member.WithOption(true)}},
 		},
 		{name: "revoke membership", stmts: first(d.RevokeMembership(r, g)), want: []meta{{kind: plan.KindRevokeMembership, target: member}}},
-		{name: "create database", stmts: d.CreateDatabase(model.Database{Name: "app", Owner: "r"}), want: []meta{{kind: plan.KindCreateDatabase, target: dbT}}},
+		{
+			name:  "revoke membership granted by another role",
+			stmts: []plan.Statement{revokeMembership("r", "g", false, "h", true)},
+			want:  []meta{{kind: plan.KindRevokeMembership, target: plan.Target{Object: plan.ObjectRole, Role: g, Grantee: r, Grantor: pg("h")}}},
+		},
+		{
+			name:  "grant membership granted by another role",
+			stmts: []plan.Statement{grantMembership("r", "g", model.MembershipOptions{Admin: &yes}, "h")},
+			want:  []meta{{kind: plan.KindGrantMembership, target: plan.Target{Object: plan.ObjectRole, Role: g, Grantee: r, Grantor: pg("h"), Option: true}}},
+		},
+		{name: "create database", stmts: d.CreateDatabase(model.Database{Name: "app", Owner: "r"}), want: []meta{{kind: plan.KindCreateDatabase, target: dbT.WithOwner("r")}}},
 		{
 			name:  "alter database",
 			stmts: first(d.AlterDatabase(model.Database{Name: "app", Owner: "r"}, model.Database{Name: "app", Owner: "o"})),
-			want:  []meta{{kind: plan.KindAlterDatabase, target: dbT}},
+			want:  []meta{{kind: plan.KindAlterDatabase, target: dbT.WithOwner("r")}},
 		},
 		{name: "drop database", stmts: d.DropDatabase("app"), want: []meta{{kind: plan.KindDropDatabase, target: dbT}}},
 		{name: "create schema", stmts: d.CreateSchema(sch), want: []meta{{kind: plan.KindCreateSchema, target: schT}}},
 		{
 			name:  "alter schema",
 			stmts: d.AlterSchema(model.Schema{Database: "app", Name: "s", Owner: "r"}, sch),
-			want:  []meta{{kind: plan.KindAlterSchema, target: schT}},
+			want:  []meta{{kind: plan.KindAlterSchema, target: schT.WithOwner("r")}},
 		},
 		{name: "drop schema", stmts: d.DropSchema(sch), want: []meta{{kind: plan.KindDropSchema, target: schT}}},
 		{

@@ -48,14 +48,21 @@ const (
 //   - Privileges: Object is ObjectDatabase or ObjectSchema, Database,
 //     Schema and Pattern (a MySQL database pattern) name it, and Grantee
 //     is the role the privileges are granted to or revoked from.
-//   - Databases and schemas: Object, Database and Schema name them.
+//   - Databases and schemas: Object, Database and Schema name them, and
+//     Owner is the role a CREATE or ALTER makes their owner.
+//
+// Grantor is the role named by GRANTED BY, if any. Every role name a
+// statement renders is in its Target, AsRole or DefaultRoles, so that a
+// check of the metadata sees all of them.
 type Target struct {
 	Role     model.RoleID
 	Grantee  model.RoleID
+	Grantor  model.RoleID
 	Object   ObjectKind
 	Database string
 	Schema   string
 	Pattern  string
+	Owner    string
 	// Option is set when a grant gives the grant option or ADMIN OPTION,
 	// and when a revoke removes only that option.
 	Option bool
@@ -84,6 +91,12 @@ func ObjectTarget(obj model.Object) Target {
 	if obj.Type == model.ObjectSchema {
 		t.Object, t.Schema = ObjectSchema, obj.Schema
 	}
+	return t
+}
+
+// WithOwner returns t with Owner set to owner.
+func (t Target) WithOwner(owner string) Target {
+	t.Owner = owner
 	return t
 }
 

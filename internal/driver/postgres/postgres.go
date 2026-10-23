@@ -602,15 +602,15 @@ func newMembership(member, role string, opts model.MembershipOptions) plan.State
 		// before PostgreSQL 16.
 		opts.Admin = nil
 	}
-	return grantMembership(member, role, opts, nil)
+	return grantMembership(member, role, opts, "")
 }
 
 // grantMembership renders GRANT role TO member with the declared
-// options, followed by grantedBy (a GRANTED BY clause or nil). ADMIN
+// options, followed by GRANTED BY grantor unless grantor is "". ADMIN
 // alone uses WITH ADMIN OPTION, which every version accepts; INHERIT and
 // SET need the PostgreSQL 16 option list.
-func grantMembership(member, role string, opts model.MembershipOptions, grantedBy plan.Fragment) plan.Statement {
-	target := plan.MembershipTarget(model.RoleID{Name: member}, model.RoleID{Name: role}).WithOption(opts.Admin != nil && *opts.Admin)
+func grantMembership(member, role string, opts model.MembershipOptions, grantor string) plan.Statement {
+	target := membershipTarget(member, role, grantor).WithOption(opts.Admin != nil && *opts.Admin)
 	parts := plan.Seq{plan.Keyword("GRANT "), Ident(role), plan.Keyword(" TO "), Ident(member)}
 	switch {
 	case opts.Inherit == nil && opts.Set == nil:
@@ -629,9 +629,7 @@ func grantMembership(member, role string, opts model.MembershipOptions, grantedB
 		}
 		parts = append(parts, plan.Keyword(" WITH "), plan.Join(", ", list...))
 	}
-	if grantedBy != nil {
-		parts = append(parts, grantedBy)
-	}
+	parts = append(parts, grantedBy(grantor)...)
 	change := plan.RoleChange{
 		DisablesInherit: opts.Inherit != nil && !*opts.Inherit,
 		DisablesSet:     opts.Set != nil && !*opts.Set,
@@ -639,16 +637,40 @@ func grantMembership(member, role string, opts model.MembershipOptions, grantedB
 	return plan.New("", plan.KindGrantMembership, target, parts...).WithRoleChange(change)
 }
 
-// revokeMembership renders REVOKE [ADMIN OPTION FOR] role FROM member
-// followed by the fragments in tail, such as GRANTED BY and CASCADE.
-func revokeMembership(member, role string, adminOnly bool, tail ...plan.Fragment) plan.Statement {
-	target := plan.MembershipTarget(model.RoleID{Name: member}, model.RoleID{Name: role}).WithOption(adminOnly)
+// revokeMembership renders REVOKE [ADMIN OPTION FOR] role FROM member,
+// followed by GRANTED BY grantor unless grantor is "", and CASCADE when
+// cascade is set.
+func revokeMembership(member, role string, adminOnly bool, grantor string, cascade bool) plan.Statement {
+	target := membershipTarget(member, role, grantor).WithOption(adminOnly)
 	parts := plan.Seq{plan.Keyword("REVOKE ")}
 	if adminOnly {
 		parts = append(parts, plan.Keyword("ADMIN OPTION FOR "))
 	}
 	parts = append(parts, Ident(role), plan.Keyword(" FROM "), Ident(member))
-	return plan.New("", plan.KindRevokeMembership, target, append(parts, tail...)...)
+	parts = append(parts, grantedBy(grantor)...)
+	if cascade {
+		parts = append(parts, plan.Keyword(" CASCADE"))
+	}
+	return plan.New("", plan.KindRevokeMembership, target, parts...)
+}
+
+// membershipTarget is the Target of a grant or revoke of role to member
+// whose GRANTED BY names grantor ("" for none).
+func membershipTarget(member, role, grantor string) plan.Target {
+	t := plan.MembershipTarget(model.RoleID{Name: member}, model.RoleID{Name: role})
+	if grantor != "" {
+		t.Grantor = model.RoleID{Name: grantor}
+	}
+	return t
+}
+
+// grantedBy renders GRANTED BY grantor, or nothing for "". Only the
+// membership builders call it, so that the grantor is in their Target.
+func grantedBy(grantor string) plan.Seq {
+	if grantor == "" {
+		return nil
+	}
+	return plan.Seq{plan.Keyword(" GRANTED BY "), Ident(grantor)}
 }
 
 // AlterMembership implements diff.Dialect. Without inspected grants, the
@@ -656,21 +678,21 @@ func revokeMembership(member, role string, adminOnly bool, tail ...plan.Fragment
 func (Dialect) AlterMembership(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string) {
 	var out []plan.Statement
 	if want.Admin != nil && !*want.Admin && have.Admin {
-		out = append(out, revokeMembership(member.Name, role.Name, true))
+		out = append(out, revokeMembership(member.Name, role.Name, true, "", false))
 	}
 	grant := model.MembershipOptions{Inherit: want.Inherit, Set: want.Set}
 	if want.Admin != nil && *want.Admin && !have.Admin {
 		grant.Admin = want.Admin
 	}
 	if grant != (model.MembershipOptions{}) {
-		out = append(out, grantMembership(member.Name, role.Name, grant, nil))
+		out = append(out, grantMembership(member.Name, role.Name, grant, ""))
 	}
 	return out, nil
 }
 
 // RevokeMembership implements diff.Dialect.
 func (Dialect) RevokeMembership(member, role model.RoleID) ([]plan.Statement, []string) {
-	return []plan.Statement{revokeMembership(member.Name, role.Name, false)}, nil
+	return []plan.Statement{revokeMembership(member.Name, role.Name, false, "", false)}, nil
 }
 
 // CreateDatabase implements diff.Dialect.
@@ -691,7 +713,7 @@ func (Dialect) CreateDatabase(db model.Database) []plan.Statement {
 	if db.Encoding != "" || db.LcCollate != "" || db.LcCtype != "" {
 		parts = append(parts, plan.Keyword(" TEMPLATE template0"))
 	}
-	return []plan.Statement{plan.New("", plan.KindCreateDatabase, databaseTarget(db.Name), parts...)}
+	return []plan.Statement{plan.New("", plan.KindCreateDatabase, databaseTarget(db.Name).WithOwner(db.Owner), parts...)}
 }
 
 func databaseTarget(name string) plan.Target {
@@ -765,7 +787,7 @@ func (Dialect) AlterDatabase(db, cur model.Database) ([]plan.Statement, []string
 	immutable("lc_collate", db.LcCollate, cur.LcCollate, sameLocale)
 	immutable("lc_ctype", db.LcCtype, cur.LcCtype, sameLocale)
 	if db.Owner != "" && db.Owner != cur.Owner {
-		return []plan.Statement{plan.New("", plan.KindAlterDatabase, databaseTarget(db.Name),
+		return []plan.Statement{plan.New("", plan.KindAlterDatabase, databaseTarget(db.Name).WithOwner(db.Owner),
 			plan.Keyword("ALTER DATABASE "), Ident(db.Name), plan.Keyword(" OWNER TO "), Ident(db.Owner))}, warns
 	}
 	return nil, warns
@@ -782,7 +804,7 @@ func (Dialect) CreateSchema(s model.Schema) []plan.Statement {
 	if s.Owner != "" {
 		parts = append(parts, plan.Keyword(" AUTHORIZATION "), Ident(s.Owner))
 	}
-	return []plan.Statement{plan.New(s.Database, plan.KindCreateSchema, schemaTarget(s), parts...)}
+	return []plan.Statement{plan.New(s.Database, plan.KindCreateSchema, schemaTarget(s).WithOwner(s.Owner), parts...)}
 }
 
 // AlterSchema implements diff.Dialect.
@@ -790,7 +812,7 @@ func (Dialect) AlterSchema(s, cur model.Schema) []plan.Statement {
 	if s.Owner == "" || s.Owner == cur.Owner {
 		return nil
 	}
-	return []plan.Statement{plan.New(s.Database, plan.KindAlterSchema, schemaTarget(s),
+	return []plan.Statement{plan.New(s.Database, plan.KindAlterSchema, schemaTarget(s).WithOwner(s.Owner),
 		plan.Keyword("ALTER SCHEMA "), Ident(s.Name), plan.Keyword(" OWNER TO "), Ident(s.Owner))}
 }
 

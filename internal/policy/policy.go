@@ -134,17 +134,26 @@ func (c *checker) check(s plan.Statement) []string {
 	return nil
 }
 
-// unmanagedNames reports the names in the target of s, and the role it
-// runs as, that dbfence never manages (model.CheckName): such objects are
-// left out of the inspected state, so no statement may name them.
+// unmanagedNames reports the names in the target of s (including the
+// GRANTED BY grantor and the owner it sets), its default roles and the
+// role it runs as that dbfence never manages (model.CheckName): such
+// objects are left out of the inspected state, so no statement may name
+// them.
 func (c *checker) unmanagedNames(s plan.Statement) []string {
 	t := s.Target()
 	e := c.desired.Engine
 	var out []string
-	for _, id := range []model.RoleID{t.Role, t.Grantee} {
+	roles := append([]model.RoleID{t.Role, t.Grantee}, s.DefaultRoles()...)
+	for _, id := range roles {
 		if why := model.CheckRoleID(e, id); why != "" {
 			out = append(out, fmt.Sprintf("names role %q, which dbfence does not manage: %s", id, why))
 		}
+	}
+	if why := model.CheckRoleID(e, t.Grantor); why != "" {
+		out = append(out, fmt.Sprintf("names grantor %q in GRANTED BY, which dbfence does not manage: %s", t.Grantor, why))
+	}
+	if why := model.CheckName(e, model.NameRole, t.Owner); why != "" {
+		out = append(out, fmt.Sprintf("makes role %q an owner, which dbfence does not manage: its name %s", t.Owner, why))
 	}
 	if why := model.CheckName(e, model.NameRole, s.AsRole); why != "" {
 		out = append(out, fmt.Sprintf("runs as role %q, which dbfence does not manage: its name %s", s.AsRole, why))
