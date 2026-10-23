@@ -50,6 +50,93 @@ func TestStateRevokeNeedsSetRole(t *testing.T) {
 	}
 }
 
+// TestDropRoleRevokesOwnerMemberships checks that pruning a role that
+// granted privileges while having the owner's privileges revokes that
+// membership before DROP OWNED, and that grants kept from the owner are
+// not granted again.
+func TestDropRoleRevokesOwnerMemberships(t *testing.T) {
+	t.Parallel()
+	ps := model.Object{Type: model.ObjectSchema, Database: "pdb", Schema: "ps"}
+	acl := []aclEntry{
+		{obj: ps, grantee: "own", grantor: "own", priv: "USAGE"},
+		{obj: ps, grantee: "reader", grantor: "own", priv: "USAGE"},
+		{obj: ps, grantee: "lead", grantor: "own", priv: "USAGE", grantable: true},
+		{obj: ps, grantee: "reader", grantor: "lead", priv: "USAGE"},
+		{obj: ps, grantee: "other", grantor: "lead", priv: "USAGE"},
+	}
+	desired := &model.Desired{
+		Roles: []model.Role{{ID: pg("own")}, {ID: pg("reader")}, {ID: pg("other")}},
+		Privileges: []model.Privilege{
+			{Grantee: pg("reader"), Object: ps, Name: "USAGE"},
+			{Grantee: pg("other"), Object: ps, Name: "USAGE"},
+		},
+	}
+	note := `-- revoked first: through it "lead" has the privileges of the owner of objects it granted privileges on, so DROP OWNED would not revoke those grants` + "\n"
+	tail := "pdb: REASSIGN OWNED BY \"lead\" TO CURRENT_USER\npdb: DROP OWNED BY \"lead\"\nDROP ROLE \"lead\"\n" +
+		"pdb: -- CASCADE: grants made by \"lead\" are revoked with it; declared ones are granted again\nGRANT USAGE ON SCHEMA \"ps\" TO \"other\""
+	tests := []struct {
+		name    string
+		want    string
+		members []memberEntry
+		version int
+	}{
+		{
+			name: "direct membership in the owner", version: 170000,
+			members: []memberEntry{{role: "own", member: "lead", grantor: "postgres", inherit: true}},
+			want:    note + `REVOKE "own" FROM "lead" GRANTED BY "postgres"` + "\n" + tail,
+		},
+		{
+			name: "membership through another role", version: 170000,
+			members: []memberEntry{
+				{role: "mid", member: "lead", grantor: "postgres", inherit: true},
+				{role: "own", member: "mid", grantor: "postgres", inherit: true},
+				{role: "unrelated", member: "lead", grantor: "postgres", inherit: true},
+			},
+			want: note + `REVOKE "mid" FROM "lead" GRANTED BY "postgres"` + "\n" + tail,
+		},
+		{
+			name: "membership without INHERIT", version: 170000,
+			members: []memberEntry{{role: "own", member: "lead", grantor: "postgres"}},
+			want:    tail,
+		},
+		{
+			name: "before 16", version: 150000,
+			members: []memberEntry{{role: "own", member: "lead", grantor: "postgres", inherit: true}},
+			want:    note + `REVOKE "own" FROM "lead"` + "\n" + tail,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Driver{st: &state{
+				desired: desired, user: "postgres", superuser: true, version: tt.version, acl: acl, members: tt.members,
+				owners:      map[model.Object]string{ps: "own", {Type: model.ObjectDatabase, Database: "pdb"}: "own"},
+				connectable: map[string]bool{"pdb": true},
+			}}
+			if got := sqlOf(d.DropRole(pg("lead"), []string{"pdb"})); got != tt.want {
+				t.Errorf("got\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPruneWarningsOwnerMembership(t *testing.T) {
+	t.Parallel()
+	ps := model.Object{Type: model.ObjectSchema, Database: "pdb", Schema: "ps"}
+	st := &state{
+		desired: &model.Desired{}, user: "adm", version: 170000,
+		roles:   map[string]roleAccess{"lead": {use: true}, "own": {use: true}},
+		owners:  map[model.Object]string{ps: "own"},
+		acl:     []aclEntry{{obj: ps, grantee: "reader", grantor: "lead", priv: "USAGE"}},
+		members: []memberEntry{{role: "own", member: "lead", grantor: "postgres", inherit: true}},
+	}
+	cur := &model.Current{Roles: []model.RoleState{{ID: pg("lead")}, {ID: pg("own")}}}
+	want := `role "lead" granted privileges on objects whose owner's privileges it has through its membership in "own", which "adm" may not revoke, so dropping it with --prune will fail at DROP ROLE`
+	if got := strings.Join(st.pruneWarnings(cur), "\n"); got != want {
+		t.Errorf("warnings =\n%s\nwant\n%s", got, want)
+	}
+}
+
 func sqlOf(stmts []plan.Statement) string {
 	out := make([]string, len(stmts))
 	for i, s := range stmts {

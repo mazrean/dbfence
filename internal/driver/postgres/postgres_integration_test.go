@@ -551,6 +551,10 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("pruning a grantor that has the owner's privileges", func(t *testing.T) {
+		testPruneGrantorWithOwnerPrivileges(t, s)
+	})
+
 	t.Run("non-superuser owner needs INHERIT for schemas and grants", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE oi_admin LOGIN CREATEROLE CREATEDB PASSWORD 'pw'")
 		d := s.open(t, "oi_admin")
@@ -756,11 +760,42 @@ func TestIntegration(t *testing.T) {
 	})
 }
 
+// testPruneGrantorWithOwnerPrivileges prunes a role that granted a
+// privilege from its own grant option while it also had the privileges
+// of the object owner. DROP OWNED alone leaves that grant behind.
+func testPruneGrantorWithOwnerPrivileges(t *testing.T, s *server) {
+	t.Helper()
+	s.exec(t, "CREATE ROLE po_own", "CREATE ROLE po_reader", "CREATE ROLE po_lead", "CREATE DATABASE po_db OWNER po_own", "GRANT po_own TO po_lead")
+	s.exec(t, `\c po_db`, "CREATE SCHEMA ps AUTHORIZATION po_own", "GRANT USAGE ON SCHEMA ps TO po_reader",
+		"GRANT USAGE ON SCHEMA ps TO po_lead WITH GRANT OPTION", "SET ROLE po_lead; GRANT USAGE ON SCHEMA ps TO po_reader; RESET ROLE")
+	d := s.open(t, "postgres")
+	schema := model.Object{Type: model.ObjectSchema, Database: "po_db", Schema: "ps"}
+	desired := &model.Desired{
+		Engine:     model.EnginePostgres,
+		Roles:      []model.Role{{ID: pg("po_own")}, {ID: pg("po_reader")}},
+		Databases:  []model.Database{{Name: "po_db", Owner: "po_own"}},
+		Schemas:    []model.Schema{{Database: "po_db", Name: "ps", Owner: "po_own"}},
+		Privileges: []model.Privilege{{Grantee: pg("po_reader"), Object: schema, Name: "USAGE"}},
+		Ignore:     model.Ignore{Roles: []string{"[^p].*|p[^o].*|po[^_].*"}, Databases: []string{"[^p].*|p[^o].*|po[^_].*"}, Schemas: []string{"public"}},
+	}
+	out := converge(t, d, desired, diff.Options{Prune: true})
+	if !strings.Contains(out, `REVOKE "po_own" FROM "po_lead"`) || !strings.Contains(out, `DROP ROLE "po_lead"`) {
+		t.Errorf("plan:\n%s", out)
+	}
+	if strings.Contains(out, `GRANT USAGE ON SCHEMA "ps" TO "po_reader"`) {
+		t.Errorf("plan grants again what po_reader keeps from the owner:\n%s", out)
+	}
+}
+
 // TestIntegrationPostgres15 covers behaviour that differs before
 // PostgreSQL 16: memberships carry no options and need no GRANTED BY.
 func TestIntegrationPostgres15(t *testing.T) {
 	t.Parallel()
 	s := startServerTag(t, "15")
+
+	t.Run("pruning a grantor that has the owner's privileges", func(t *testing.T) {
+		testPruneGrantorWithOwnerPrivileges(t, s)
+	})
 
 	t.Run("owner warning suggests a plain GRANT", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE o15_admin LOGIN CREATEROLE CREATEDB PASSWORD 'pw'", "CREATE ROLE o15_ext")

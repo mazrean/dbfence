@@ -19,7 +19,8 @@ import (
 // are skipped. DROP OWNED revokes what the role holds with CASCADE, which
 // also removes the grants it made to other roles from its grant option
 // and, from PostgreSQL 16 on, the memberships it granted; the declared
-// ones are granted again.
+// ones are granted again. Memberships that give the role the privileges
+// of an owner it granted on are revoked first (see ownerMemberships).
 func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement {
 	if d.st == nil {
 		return d.Dialect.DropRole(id, databases)
@@ -35,7 +36,75 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 		// No DROP OWNED runs; DROP ROLE fails on the dependencies.
 		return out
 	}
+	out = append(d.st.revokeOwnerMemberships(id.Name), out...)
 	return append(out, d.st.regrantAfterDrop(id.Name, databases, reachable)...)
+}
+
+// ownerMemberships returns the memberships of role through which it has
+// the privileges of the owner of an object on which it granted privileges
+// to others. While role holds them, revoking its grant option does not
+// cascade to those grants (it keeps the option through the owner), so
+// DROP OWNED leaves them behind and DROP ROLE fails on them.
+func (st *state) ownerMemberships(role string) []memberEntry {
+	var owners []string
+	for _, e := range st.acl {
+		if o := st.owners[e.obj]; e.grantor == role && e.grantee != role && o != "" && o != role && !slices.Contains(owners, o) {
+			owners = append(owners, o)
+		}
+	}
+	var out []memberEntry
+	for _, m := range st.members {
+		if m.member == role && m.inherit && slices.ContainsFunc(owners, func(o string) bool { return m.role == o || st.inherits(m.role, o) }) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// inherits reports whether member has the privileges of role through
+// memberships with INHERIT.
+func (st *state) inherits(member, role string) bool {
+	seen := []string{member}
+	for queue := []string{member}; len(queue) > 0; queue = queue[1:] {
+		for _, e := range st.members {
+			if e.member != queue[0] || !e.inherit || slices.Contains(seen, e.role) {
+				continue
+			}
+			if e.role == role {
+				return true
+			}
+			seen = append(seen, e.role)
+			queue = append(queue, e.role)
+		}
+	}
+	return false
+}
+
+// revokeOwnerMemberships revokes the ownerMemberships of the pruned role
+// before DROP OWNED, so that DROP OWNED revokes the grants it made. The
+// memberships it granted from them go too (CASCADE, PostgreSQL 16+);
+// regrantAfterDrop grants the declared ones again. Memberships the
+// connected user may not revoke are skipped; pruneWarnings names them.
+func (st *state) revokeOwnerMemberships(role string) []plan.Statement {
+	var out []plan.Statement
+	var done []string
+	for _, e := range st.ownerMemberships(role) {
+		if !st.canManageMembership(e.role, e.grantor) || (st.version < pg16 && slices.Contains(done, e.role)) {
+			continue
+		}
+		done = append(done, e.role)
+		q := "REVOKE " + Ident(e.role) + " FROM " + Ident(role)
+		if st.version >= pg16 && e.grantor != "" {
+			q += " GRANTED BY " + Ident(e.grantor)
+		}
+		if st.version >= pg16 && len(st.memberDependents(role, e.role)) > 0 {
+			q += " CASCADE"
+		}
+		note := fmt.Sprintf("-- revoked first: through it %s has the privileges of the owner of objects it granted privileges on, so DROP OWNED would not revoke those grants\n",
+			Ident(role))
+		out = append(out, plan.SQL("", note+q))
+	}
+	return out
 }
 
 // regrantAfterDrop grants again the declared privileges and memberships
@@ -72,7 +141,7 @@ func (st *state) regrantAfterDrop(role string, surviving, reachable []string) []
 	var out []plan.Statement
 	for _, obj := range objs {
 		ps := slices.Sorted(slices.Values(privs[obj]))
-		out = append(out, st.regrantPrivileges(obj, st.aclDependents(obj, role, ps), ps)...)
+		out = append(out, st.regrantPrivileges(obj, role, st.aclDependents(obj, role, ps), ps)...)
 	}
 	var granted []string
 	for _, e := range st.members {
@@ -406,7 +475,7 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 			q = cascadeNote("privileges on "+objectLabel(obj), grantee, dependents) + q
 		}
 		out = append(out, plan.SQL(db, q))
-		regrants = append(regrants, st.regrantPrivileges(obj, dependents, ps)...)
+		regrants = append(regrants, st.regrantPrivileges(obj, grantee, dependents, ps)...)
 	}
 	return append(out, regrants...), warns
 }
@@ -443,8 +512,17 @@ func (st *state) aclDependents(obj model.Object, grantee string, privs []string)
 }
 
 // regrantPrivileges grants the declared privileges among privs on obj to
-// roles, which lose them through CASCADE.
-func (st *state) regrantPrivileges(obj model.Object, roles, privs []string) []plan.Statement {
+// roles, which lose the grants made, directly or through them, by
+// grantor through CASCADE. A privilege a role still holds from another
+// grantor that keeps it is not granted again.
+func (st *state) regrantPrivileges(obj model.Object, grantor string, roles, privs []string) []plan.Statement {
+	removed := append([]string{grantor}, roles...)
+	keeps := func(r string, p model.Privilege) bool {
+		return slices.ContainsFunc(st.acl, func(e aclEntry) bool {
+			return e.obj == obj && e.grantee == r && e.priv == p.Name && (e.grantable || !p.GrantOption) &&
+				!slices.Contains(removed, e.grantor) && (e.grantor == st.owners[obj] || !st.losesGrantOption(e.grantor, obj, p.Name))
+		})
+	}
 	var out []plan.Statement
 	for _, r := range roles {
 		if r == st.owners[obj] {
@@ -452,7 +530,7 @@ func (st *state) regrantPrivileges(obj model.Object, roles, privs []string) []pl
 		}
 		var plain, withOption []string
 		for _, p := range st.desired.Privileges {
-			if p.Grantee.Name != r || p.Object != obj || !slices.Contains(privs, p.Name) {
+			if p.Grantee.Name != r || p.Object != obj || !slices.Contains(privs, p.Name) || keeps(r, p) {
 				continue
 			}
 			if p.GrantOption {

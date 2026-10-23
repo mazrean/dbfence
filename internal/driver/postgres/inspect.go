@@ -318,7 +318,27 @@ func (st *state) pruneWarnings(cur *model.Current) []string {
 		warns = append(warns, fmt.Sprintf("role %q: %q does not have its privileges, so dropping it with --prune will fail at REASSIGN OWNED; run GRANT %s TO %s first",
 			name, st.user, Ident(name), Ident(st.user)))
 	}
+	for _, r := range cur.Roles {
+		name := r.ID.Name
+		if !st.prunable(name, ignore) {
+			continue
+		}
+		for _, e := range st.ownerMemberships(name) {
+			if !st.canManageMembership(e.role, e.grantor) {
+				warns = append(warns, fmt.Sprintf("role %q granted privileges on objects whose owner's privileges it has through its membership in %q, which %q may not revoke, so dropping it with --prune will fail at DROP ROLE",
+					name, e.role, st.user))
+			}
+		}
+	}
 	return warns
+}
+
+// prunable reports whether --prune may drop the inspected role name: it
+// is not the connected user, a system role, declared or ignored.
+func (st *state) prunable(name string, ignore []*regexp.Regexp) bool {
+	return name != st.user && !(Dialect{}).IsSystemRole(model.RoleID{Name: name}) &&
+		!slices.ContainsFunc(st.desired.Roles, func(d model.Role) bool { return d.ID.Name == name }) &&
+		!slices.ContainsFunc(ignore, func(re *regexp.Regexp) bool { return re.MatchString(name) })
 }
 
 // unreachableDependencyWarnings warns about unmanaged roles that own
