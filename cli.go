@@ -44,7 +44,7 @@ func (f diffFlags) options(file string) app.Options {
 type planCmd struct {
 	configFlags
 	diffFlags
-	DetailedExitcode bool `help:"Exit with 2 when there are changes."`
+	DetailedExitcode bool `help:"Exit with 2 when there are changes. Warnings alone (unmanaged objects without --prune, passwords not compared) exit with 0."`
 }
 
 func (c *planCmd) Run(ctx context.Context, a *app.App) error {
