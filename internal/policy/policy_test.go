@@ -63,6 +63,12 @@ func reassign(id model.RoleID, db string) plan.Statement {
 	return plan.New(db, plan.KindReassign, t, plan.Keyword("REASSIGN OWNED BY x TO CURRENT_USER"))
 }
 
+func dropOwned(id model.RoleID, db string) plan.Statement {
+	t := plan.RoleTarget(id)
+	t.Database = db
+	return plan.New(db, plan.KindDropOwned, t, plan.Keyword("DROP OWNED BY x"))
+}
+
 func dropDatabase(name string) plan.Statement {
 	return plan.New("", plan.KindDropDatabase, plan.ObjectTarget(model.Object{Type: model.ObjectDatabase, Database: name}), plan.Keyword("DROP DATABASE x"))
 }
@@ -97,7 +103,8 @@ func TestVerify(t *testing.T) {
 		{
 			name: "safe pruning plan",
 			stmts: []plan.Statement{
-				reassign(pg("stray"), "postgres"), reassign(pg("stray"), "app"), dropRole(pg("stray")),
+				reassign(pg("stray"), "postgres"), dropOwned(pg("stray"), "postgres"),
+				reassign(pg("stray"), "app"), dropOwned(pg("stray"), "app"), dropRole(pg("stray")),
 				dropDatabase("stray_db"), dropSchema("app", "old"),
 				alterRole(pg("admin"), plan.RoleChange{SetsPassword: true}),
 				revokeMembership(pg("app"), pg("ops"), false),
@@ -109,8 +116,8 @@ func TestVerify(t *testing.T) {
 		{name: "reassign of the connected user", stmts: []plan.Statement{reassign(pg("admin"), "app")}, want: []string{`drops the connected user "admin"`}},
 		{
 			name:  "drop owned of a built-in role",
-			stmts: []plan.Statement{plan.New("app", plan.KindDropOwned, plan.Target{Object: plan.ObjectRole, Role: pg("pg_monitor"), Database: "app"}, plan.Keyword("DROP OWNED BY x"))},
-			want:  []string{`built-in role "pg_monitor"`},
+			stmts: []plan.Statement{reassign(pg("pg_monitor"), "app"), dropOwned(pg("pg_monitor"), "app")},
+			want:  []string{`built-in role "pg_monitor"`, `built-in role "pg_monitor"`},
 		},
 		{name: "ignored role", stmts: []plan.Statement{dropRole(pg("legacy_x"))}, want: []string{`ignored role "legacy_x"`}},
 		{name: "declared role", stmts: []plan.Statement{dropRole(pg("app"))}, want: []string{`declared role "app"`, "references"}},
@@ -134,6 +141,30 @@ func TestVerify(t *testing.T) {
 			}(),
 			stmts: []plan.Statement{dropRole(pg("stray"))},
 			want:  []string{"role list is unreadable"},
+		},
+		{name: "drop owned without reassign", stmts: []plan.Statement{dropOwned(pg("stray"), "app")}, want: []string{`no REASSIGN OWNED of the role runs there first`}},
+		{
+			name:  "drop owned before reassign",
+			stmts: []plan.Statement{dropOwned(pg("stray"), "app"), reassign(pg("stray"), "app")},
+			want:  []string{`owns in database "app": no REASSIGN OWNED`},
+		},
+		{
+			name:  "drop owned after reassign in another database",
+			stmts: []plan.Statement{reassign(pg("stray"), "postgres"), dropOwned(pg("stray"), "app")},
+			want:  []string{`owns in database "app": no REASSIGN OWNED`},
+		},
+		{
+			name:  "drop owned after reassign of another role",
+			stmts: []plan.Statement{reassign(pg("app"), "app"), dropOwned(pg("stray"), "app")},
+			want:  []string{"declared role", "references", `role "stray" owns in database "app"`},
+		},
+		{
+			name: "drop owned on another database than its target",
+			stmts: []plan.Statement{
+				reassign(pg("stray"), "app"),
+				plan.New("postgres", plan.KindDropOwned, plan.Target{Object: plan.ObjectRole, Role: pg("stray"), Database: "app"}, plan.Keyword("DROP OWNED BY x")),
+			},
+			want: []string{`runs on database "postgres", but its target is in database "app"`},
 		},
 		{name: "reassign in an ignored database", stmts: []plan.Statement{reassign(pg("stray"), "legacy_db")}, want: []string{`ignored database "legacy_db"`}},
 		{name: "reassign in a dropped database", stmts: []plan.Statement{dropDatabase("gone"), reassign(pg("stray"), "gone")}, want: []string{"which the plan drops"}},

@@ -42,6 +42,9 @@ func TestVerifyDialectStatements(t *testing.T) {
 	setDefaults := func(c *model.Current, id model.RoleID, roles ...model.RoleID) []plan.Statement {
 		return myd.SetDefaultRoles(model.Role{ID: id, MemberOf: roles}, roleState(c, id))
 	}
+	withoutReassign := func(stmts []plan.Statement) []plan.Statement {
+		return slices.DeleteFunc(stmts, func(s plan.Statement) bool { return s.Kind() == plan.KindReassign })
+	}
 	unknownDefaults := myCurrent()
 	unknownDefaults.Roles[0].DefaultRoles, unknownDefaults.Roles[0].DefaultRolesUnknown = nil, true
 	tests := []struct {
@@ -81,6 +84,13 @@ func TestVerifyDialectStatements(t *testing.T) {
 			stmts:   setDefaults(myCurrent(), my("dbfence"), my("dba_role"), my("app_role")),
 			want:    []string{"current default roles are unknown"},
 		},
+		{
+			name:  "drop owned without reassign owned",
+			pg:    true,
+			stmts: withoutReassign(pgd.DropRole(pg("stray"), []string{"app"})),
+			want:  []string{`drops the objects role "stray" owns in database "app"`},
+		},
+		{name: "drop role", pg: true, stmts: pgd.DropRole(pg("stray"), []string{"app", "postgres"})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

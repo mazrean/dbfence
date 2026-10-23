@@ -55,7 +55,7 @@ func Verify(p *plan.Plan, cur *model.Current, desired *model.Desired, opts Optio
 	if err != nil {
 		return []Violation{{Reason: fmt.Sprintf("cannot verify the plan: %v", err)}}
 	}
-	c := &checker{cur: cur, desired: desired, opts: opts, ignore: ig}
+	c := &checker{cur: cur, desired: desired, opts: opts, ignore: ig, reassigned: map[plan.Target]bool{}}
 	c.dropped = c.droppedDatabases(p)
 	c.relied = c.reliedOn()
 	c.referenced = c.referencedRoles()
@@ -76,6 +76,9 @@ type checker struct {
 	desired    *model.Desired
 	relied     map[model.RoleID]bool
 	referenced map[model.RoleID]bool
+	// reassigned holds the roles and databases of the REASSIGN OWNED
+	// statements checked so far.
+	reassigned map[plan.Target]bool
 	dropped    []string
 	ignore     ignorer
 }
@@ -89,7 +92,7 @@ func (c *checker) check(s plan.Statement) []string {
 		if s.Kind() != plan.KindDropRole {
 			reasons = append(reasons, c.ownedIn(t.Database)...)
 		}
-		return reasons
+		return append(reasons, c.reassignedFirst(s)...)
 	case plan.KindDropDatabase:
 		return append(c.prunes(), c.dropDatabase(t.Database)...)
 	case plan.KindDropSchema:
@@ -142,6 +145,28 @@ func (c *checker) unmanagedNames(s plan.Statement) []string {
 		}
 	}
 	return out
+}
+
+// reassignedFirst records a REASSIGN OWNED and checks that a DROP OWNED
+// comes after the REASSIGN OWNED of the same role in the same database:
+// without it, DROP OWNED drops the objects the role owns there.
+// Both must run on the database their target names.
+func (c *checker) reassignedFirst(s plan.Statement) []string {
+	t := s.Target()
+	if s.Kind() == plan.KindDropRole {
+		return nil
+	}
+	if s.Database != t.Database {
+		return []string{fmt.Sprintf("runs on database %q, but its target is in database %q", s.Database, t.Database)}
+	}
+	key := plan.Target{Role: t.Role, Database: t.Database}
+	switch {
+	case s.Kind() == plan.KindReassign:
+		c.reassigned[key] = true
+	case !c.reassigned[key]:
+		return []string{fmt.Sprintf("drops the objects role %q owns in database %q: no REASSIGN OWNED of the role runs there first", t.Role, t.Database)}
+	}
+	return nil
 }
 
 // prunes reports a drop planned without --prune.
