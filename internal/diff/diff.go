@@ -704,12 +704,83 @@ func (df *differ) privileges() {
 		stmts, warns := df.d.RevokeGrantOption(g.grantee, g.obj, privs)
 		df.addWarned(phaseRevoke, plan.ActionRevoke, "grant option for "+res(g, privs, "from"), stmts, warns)
 	}
+	keep := df.keepConnect(grants)
 	for _, g := range sortedGroups(revokes) {
-		privs := sortedPrivs(revokes[g])
+		privs := keep(g, sortedPrivs(revokes[g]))
+		if len(privs) == 0 {
+			continue
+		}
 		stmts, warns := df.d.Revoke(g.grantee, g.obj, privs)
 		df.addWarned(phaseRevoke, plan.ActionRevoke, res(g, privs, "from"), stmts, warns)
 		df.warnHeldByPublic(g, privs)
 	}
+}
+
+// keepConnect returns a filter for the privileges revoked from a group,
+// applied in plan order, that keeps CONNECT on the database dbfence is
+// connected to (PostgreSQL) when the connected user, not a superuser,
+// would no longer hold it: it could not connect again. It holds CONNECT
+// through PUBLIC, itself or a role whose privileges it has.
+func (df *differ) keepConnect(grants map[grantGroup][]string) func(grantGroup, []string) []string {
+	db := model.Object{Type: model.ObjectDatabase, Database: df.current.CurrentDatabase}
+	self, _ := df.currentRole(df.current.CurrentUser)
+	if df.desired.Engine != model.EnginePostgres || df.current.CurrentDatabase == "" || self.Superuser {
+		return func(_ grantGroup, privs []string) []string { return privs }
+	}
+	holders := map[model.RoleID]bool{}
+	for _, p := range df.current.Privileges {
+		if p = df.afterOwnerChange(p); p.Object == db && p.Name == "CONNECT" {
+			holders[p.Grantee] = true
+		}
+	}
+	for g, privs := range grants {
+		if g.obj == db && slices.Contains(privs, "CONNECT") {
+			holders[g.grantee] = true
+		}
+	}
+	via := df.inheritedRoles()
+	connects := func() bool {
+		for g := range holders {
+			if via[g] {
+				return true
+			}
+		}
+		return false
+	}
+	return func(g grantGroup, privs []string) []string {
+		if g.obj != db || !slices.Contains(privs, "CONNECT") || !holders[g.grantee] {
+			return privs
+		}
+		delete(holders, g.grantee)
+		if connects() {
+			return privs
+		}
+		holders[g.grantee] = true
+		df.warn("not revoking CONNECT on database %q from %q: the connected user %q connects to it through it, and could not connect again",
+			db.Database, df.show(g.grantee), df.show(df.current.CurrentUser))
+		return slices.DeleteFunc(slices.Clone(privs), func(p string) bool { return p == "CONNECT" })
+	}
+}
+
+// inheritedRoles returns PUBLIC, the connected user and the roles it has
+// the privileges of: reached through memberships with INHERIT whose
+// member has the INHERIT attribute (needed before PostgreSQL 16).
+func (df *differ) inheritedRoles() map[model.RoleID]bool {
+	id := df.current.CurrentUser
+	out := map[model.RoleID]bool{model.PublicRole: true, id: true}
+	for queue := []model.RoleID{id}; len(queue) > 0; queue = queue[1:] {
+		r, ok := df.currentRole(queue[0])
+		if !ok || !r.Inherit {
+			continue
+		}
+		for _, m := range r.MemberOf {
+			if r.MemberOptions[m].Inherit && !out[m] {
+				out[m] = true
+				queue = append(queue, m)
+			}
+		}
+	}
+	return out
 }
 
 // createdPublicPrivileges returns the privileges PUBLIC will hold on the

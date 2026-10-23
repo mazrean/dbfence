@@ -1,7 +1,7 @@
 // Package policy checks a finished plan against the protections dbfence
 // promises, independently of the diff logic that produced it. It reads
 // only statement metadata (Kind, Target, RoleChange, DefaultRoles,
-// AsRole), never SQL text, and does no I/O.
+// Privileges, AsRole), never SQL text, and does no I/O.
 package policy
 
 import (
@@ -66,6 +66,7 @@ func Verify(p *plan.Plan, cur *model.Current, desired *model.Desired, opts Optio
 	}
 	c.relied = c.reachable()
 	c.referenced = c.referencedRoles()
+	c.connect, c.via = c.connectHolders(), c.inheritedRoles()
 	var out []Violation
 	for _, ch := range p.Changes {
 		for _, s := range ch.Statements {
@@ -87,7 +88,13 @@ type checker struct {
 	// statements checked so far.
 	reassigned map[plan.Target]bool
 	// edges are the memberships after the statements checked so far.
-	edges   map[membership]bool
+	edges map[membership]bool
+	// connect holds the grantees of CONNECT on the connected database
+	// after the statements checked so far (PostgreSQL).
+	connect map[model.RoleID]bool
+	// via are PUBLIC, the connected user and the roles whose privileges
+	// it has through memberships with INHERIT.
+	via     map[model.RoleID]bool
 	dropped []string
 	ignore  ignorer
 }
@@ -129,8 +136,17 @@ func (c *checker) check(s plan.Statement) []string {
 		if t.Role == c.cur.CurrentUser {
 			return c.narrowsDefaultRoles(s.DefaultRoles())
 		}
-	case plan.KindOther, plan.KindGrant, plan.KindRevoke,
-		plan.KindCreateDatabase, plan.KindAlterDatabase, plan.KindCreateSchema, plan.KindAlterSchema:
+	case plan.KindGrant:
+		if c.connectOn(s) {
+			c.connect[t.Grantee] = true
+		}
+	case plan.KindRevoke:
+		if !t.Option && c.connectOn(s) {
+			return c.revokeConnect(t.Grantee)
+		}
+	case plan.KindAlterDatabase:
+		c.ownerChange(t)
+	case plan.KindOther, plan.KindCreateDatabase, plan.KindCreateSchema, plan.KindAlterSchema:
 		// Nothing they do can drop a protected object or lock the
 		// connected user out.
 	}
@@ -392,6 +408,95 @@ func (c *checker) noInheritOnChain(role model.RoleID, ch plan.RoleChange) []stri
 		return nil
 	}
 	return []string{fmt.Sprintf("sets NOINHERIT on %q, through which the connected user %q has its roles", role, c.cur.CurrentUser)}
+}
+
+// connectOn reports whether s grants or revokes CONNECT on the database
+// dbfence is connected to (PostgreSQL).
+func (c *checker) connectOn(s plan.Statement) bool {
+	t := s.Target()
+	return c.desired.Engine == model.EnginePostgres && c.cur.CurrentDatabase != "" &&
+		t.Object == plan.ObjectDatabase && t.Database == c.cur.CurrentDatabase && slices.Contains(s.Privileges(), "CONNECT")
+}
+
+// connectHolders returns the grantees of CONNECT on the connected
+// database (PostgreSQL). Its owner is one of them unless its privileges
+// were revoked.
+func (c *checker) connectHolders() map[model.RoleID]bool {
+	out := map[model.RoleID]bool{}
+	for _, p := range c.cur.Privileges {
+		if p.Object == (model.Object{Type: model.ObjectDatabase, Database: c.cur.CurrentDatabase}) && p.Name == "CONNECT" {
+			out[p.Grantee] = true
+		}
+	}
+	return out
+}
+
+// inheritedRoles returns PUBLIC, the connected user and the roles it has
+// the privileges of: reached through memberships with INHERIT whose
+// member has the INHERIT attribute (needed before PostgreSQL 16).
+func (c *checker) inheritedRoles() map[model.RoleID]bool {
+	id := c.cur.CurrentUser
+	out := map[model.RoleID]bool{model.PublicRole: true, id: true}
+	for queue := []model.RoleID{id}; len(queue) > 0; queue = queue[1:] {
+		i := slices.IndexFunc(c.cur.Roles, func(r model.RoleState) bool { return r.ID == queue[0] })
+		if i < 0 || !c.cur.Roles[i].Inherit {
+			continue
+		}
+		r := c.cur.Roles[i]
+		for _, m := range r.MemberOf {
+			if r.MemberOptions[m].Inherit && !out[m] {
+				out[m] = true
+				queue = append(queue, m)
+			}
+		}
+	}
+	return out
+}
+
+// canConnect reports whether the connected user may still connect to the
+// database it is connected to.
+func (c *checker) canConnect() bool {
+	if c.superuser() {
+		return true
+	}
+	for g := range c.connect {
+		if c.via[g] {
+			return true
+		}
+	}
+	return false
+}
+
+// revokeConnect records the revoke of CONNECT on the connected database
+// from grantee and checks that the connected user can still connect to
+// it: dbfence connects to it on every run. When privileges are
+// unreadable, the connected user is taken to connect through grantee.
+func (c *checker) revokeConnect(grantee model.RoleID) []string {
+	before := c.cur.Unreadable.Privileges || c.canConnect()
+	delete(c.connect, grantee)
+	if !before || c.canConnect() {
+		return nil
+	}
+	return []string{fmt.Sprintf("revokes CONNECT on the database %q dbfence is connected to from %q, through which the connected user %q connects to it",
+		c.cur.CurrentDatabase, grantee, c.cur.CurrentUser)}
+}
+
+// ownerChange records an ALTER DATABASE ... OWNER TO of the connected
+// database: PostgreSQL moves the privileges of the old owner to the new
+// one.
+func (c *checker) ownerChange(t plan.Target) {
+	if c.desired.Engine != model.EnginePostgres || t.Database != c.cur.CurrentDatabase || t.Owner == "" {
+		return
+	}
+	i := slices.IndexFunc(c.cur.Databases, func(d model.Database) bool { return d.Name == t.Database })
+	if i < 0 {
+		return
+	}
+	from, to := model.RoleID{Name: c.cur.Databases[i].Owner}, model.RoleID{Name: t.Owner}
+	if from != to && c.connect[from] {
+		delete(c.connect, from)
+		c.connect[to] = true
+	}
 }
 
 func (c *checker) superuser() bool {

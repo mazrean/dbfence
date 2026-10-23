@@ -53,8 +53,23 @@ func TestVerifyDialectStatements(t *testing.T) {
 	chained := pgCurrent()
 	chained.Roles[0].MemberOptions = map[model.RoleID]model.MembershipState{pg("ops"): {Inherit: true, Set: true}}
 	chained.Roles[1].MemberOptions = map[model.RoleID]model.MembershipState{pg("base"): {Inherit: true, Set: true}}
+	// The connected user is no superuser; CONNECT on the database it is
+	// connected to is held by holders.
+	postgresDB := model.Object{Type: model.ObjectDatabase, Database: "postgres"}
+	connecting := func(holders ...model.RoleID) *model.Current {
+		c := pgCurrent()
+		for _, h := range holders {
+			c.Privileges = append(c.Privileges, model.Privilege{Grantee: h, Object: postgresDB, Name: "CONNECT"})
+		}
+		return c
+	}
+	// admin inherits from ops, and ops from base, which holds CONNECT.
+	inheritsConnect := connecting(pg("base"))
+	inheritsConnect.Roles[0].Inherit, inheritsConnect.Roles[1].Inherit = true, true
+	inheritsConnect.Roles[0].MemberOptions = map[model.RoleID]model.MembershipState{pg("ops"): {Inherit: true}}
+	inheritsConnect.Roles[1].MemberOptions = map[model.RoleID]model.MembershipState{pg("base"): {Inherit: true}}
 	unknownDefaults := myCurrent()
-	unknownDefaults.Roles[0].DefaultRoles,unknownDefaults.Roles[0].DefaultRolesUnknown = nil, true
+	unknownDefaults.Roles[0].DefaultRoles, unknownDefaults.Roles[0].DefaultRolesUnknown = nil, true
 	tests := []struct {
 		current *model.Current
 		desired *model.Desired
@@ -191,6 +206,73 @@ func TestVerifyDialectStatements(t *testing.T) {
 			pg:      true,
 			current: chained,
 			stmts:   first(pgd.AlterRole(model.Role{ID: pg("base"), Inherit: &no}, model.RoleState{ID: pg("base"), Inherit: true}, false)),
+		},
+		{
+			name:    "revoke CONNECT on the connected database from PUBLIC",
+			pg:      true,
+			current: connecting(model.PublicRole),
+			stmts:   first(pgd.Revoke(model.PublicRole, postgresDB, []string{"CONNECT", "TEMPORARY"})),
+			want:    []string{`revokes CONNECT on the database "postgres" dbfence is connected to from PUBLIC, through which the connected user "admin" connects to it`},
+		},
+		{
+			name:    "revoke CONNECT on the connected database from the connected user",
+			pg:      true,
+			current: connecting(pg("admin")),
+			stmts:   first(pgd.Revoke(pg("admin"), postgresDB, []string{"CONNECT"})),
+			want:    []string{`revokes CONNECT on the database "postgres" dbfence is connected to from "admin"`},
+		},
+		{
+			name:    "revoke CONNECT on the connected database from a role the connected user inherits from",
+			pg:      true,
+			current: inheritsConnect,
+			stmts:   first(pgd.Revoke(pg("base"), postgresDB, []string{"CONNECT"})),
+			want:    []string{`revokes CONNECT on the database "postgres" dbfence is connected to from "base"`},
+		},
+		{
+			name: "revoke CONNECT on the connected database while privileges are unreadable",
+			pg:   true,
+			current: func() *model.Current {
+				c := pgCurrent()
+				c.Unreadable.Privileges = true
+				return c
+			}(),
+			stmts: first(pgd.Revoke(model.PublicRole, postgresDB, []string{"CONNECT"})),
+			want:  []string{`revokes CONNECT on the database "postgres" dbfence is connected to from PUBLIC`},
+		},
+		{
+			name:    "revoke CONNECT on the connected database after granting it to the connected user",
+			pg:      true,
+			current: connecting(model.PublicRole),
+			stmts: slices.Concat(pgd.Grant(pg("admin"), postgresDB, []string{"CONNECT"}, false),
+				first(pgd.Revoke(model.PublicRole, postgresDB, []string{"CONNECT"}))),
+		},
+		{
+			name:    "revoke CONNECT on the connected database from PUBLIC while the connected user has it",
+			pg:      true,
+			current: connecting(model.PublicRole, pg("admin")),
+			stmts:   first(pgd.Revoke(model.PublicRole, postgresDB, []string{"CONNECT"})),
+		},
+		{
+			name:    "revoke TEMPORARY on the connected database from PUBLIC",
+			pg:      true,
+			current: connecting(model.PublicRole),
+			stmts:   first(pgd.Revoke(model.PublicRole, postgresDB, []string{"TEMPORARY"})),
+		},
+		{
+			name:    "revoke CONNECT on another database from PUBLIC",
+			pg:      true,
+			current: connecting(model.PublicRole),
+			stmts:   first(pgd.Revoke(model.PublicRole, model.Object{Type: model.ObjectDatabase, Database: "app"}, []string{"CONNECT"})),
+		},
+		{
+			name: "revoke CONNECT on the connected database from PUBLIC with a superuser",
+			pg:   true,
+			current: func() *model.Current {
+				c := connecting(model.PublicRole)
+				c.Roles[0].Superuser = true
+				return c
+			}(),
+			stmts: first(pgd.Revoke(model.PublicRole, postgresDB, []string{"CONNECT"})),
 		},
 		{name: "drop role", pg: true, stmts: pgd.DropRole(pg("stray"), []string{"app", "postgres"})},
 	}
