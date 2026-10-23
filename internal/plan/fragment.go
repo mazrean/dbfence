@@ -22,7 +22,12 @@ type keyword string
 // Keyword is SQL text written as a constant in the source, such as
 // "CREATE ROLE " or " WITH GRANT OPTION". Untyped constants convert to it
 // implicitly; the sqlfragment lint rule rejects an explicit conversion of
-// anything that is not a constant.
+// anything that is not a constant. Because a decoder (json.Unmarshal,
+// fmt.Sscan), a generic function or reflect can fill a Keyword from data
+// without a conversion, outside this package and tests the rule also
+// rejects pointers to values that contain a Keyword, generics defined
+// elsewhere instantiated with such types, and imports of reflect, unsafe
+// and encoding/gob.
 type Keyword keyword
 
 func (k Keyword) render(sb *strings.Builder, _ bool) { sb.WriteString(string(k)) }
