@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclparse"
+	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
@@ -94,6 +95,12 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Relative tfstate paths resolve against the configuration directory.
+	base := path
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		base = filepath.Dir(path)
+	}
+	fns = funcs.ResolvePathsFrom(fns, base)
 	parser := hclparse.NewParser()
 	var bodies []*hcl.File
 	var diags hcl.Diagnostics

@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -113,6 +116,36 @@ func (r *Registry) Functions() map[string]function.Function {
 	}
 	maps.Copy(fns, stdlibFunctions())
 	return fns
+}
+
+// ResolvePathsFrom returns fns with tfstate resolving a relative local
+// path against dir (the configuration directory) instead of the working
+// directory. URLs and absolute paths are left alone.
+func ResolvePathsFrom(fns map[string]function.Function, dir string) map[string]function.Function {
+	fn, ok := fns["tfstate"]
+	if !ok {
+		return fns
+	}
+	out := maps.Clone(fns)
+	out["tfstate"] = function.New(&function.Spec{
+		Description: fn.Description(),
+		Params:      fn.Params(),
+		VarParam:    fn.VarParam(),
+		Type:        fn.ReturnTypeForValues,
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			args = slices.Clone(args)
+			loc := args[0].AsString()
+			if u, err := url.Parse(loc); err == nil && u.Scheme == "" && !filepath.IsAbs(loc) {
+				abs, err := filepath.Abs(filepath.Join(dir, loc))
+				if err != nil {
+					return cty.NilVal, function.NewArgError(0, fmt.Errorf("resolve %q: %w", loc, err))
+				}
+				args[0] = cty.StringVal(abs)
+			}
+			return fn.Call(args)
+		},
+	})
+	return out
 }
 
 func stdlibFunctions() map[string]function.Function {

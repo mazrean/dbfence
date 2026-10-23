@@ -2,6 +2,7 @@ package funcs
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -186,6 +187,51 @@ func TestJSONKey(t *testing.T) {
 			}
 			if got.AsString() != tt.want {
 				t.Errorf("got %q, want %q", got.AsString(), tt.want)
+			}
+		})
+	}
+}
+
+func TestResolvePathsFrom(t *testing.T) {
+	t.Parallel()
+	abs, err := filepath.Abs("testdata/terraform.tfstate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		dir     string
+		expr    string
+		want    cty.Value
+		wantErr string
+	}{
+		{"relative to dir", "testdata", `tfstate("terraform.tfstate", "output.db_host")`, cty.StringVal("db.internal"), ""},
+		{"dot dir", ".", `tfstate("testdata/terraform.tfstate", "output.db_host")`, cty.StringVal("db.internal"), ""},
+		{"absolute path kept", "elsewhere", `tfstate("` + abs + `", "output.db_host")`, cty.StringVal("db.internal"), ""},
+		{"error shows resolved path", "testdata", `tfstate("none.tfstate", "output.db_host")`, cty.NilVal, filepath.Join(filepath.Dir(abs), "none.tfstate")},
+		{"url not rewritten", "testdata", `tfstate("file:///nonexistent/terraform.tfstate", "output.db_host")`, cty.NilVal, "/nonexistent/terraform.tfstate"},
+		{"other functions kept", "testdata", `upper("a")`, cty.StringVal("A"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r, _ := newTestRegistry(t)
+			e, diags := hclsyntax.ParseExpression([]byte(tt.expr), "test.hcl", hcl.InitialPos)
+			if diags.HasErrors() {
+				t.Fatal(diags)
+			}
+			got, diags := e.Value(&hcl.EvalContext{Functions: ResolvePathsFrom(r.Functions(), tt.dir)})
+			if tt.wantErr != "" {
+				if !diags.HasErrors() || !strings.Contains(diags.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", diags, tt.wantErr)
+				}
+				return
+			}
+			if diags.HasErrors() {
+				t.Fatal(diags)
+			}
+			if !got.RawEquals(tt.want) {
+				t.Errorf("got %#v, want %#v", got, tt.want)
 			}
 		})
 	}
