@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	gomysql "github.com/go-sql-driver/mysql"
@@ -26,24 +27,31 @@ type Driver struct {
 
 // Open connects to dsn (go-sql-driver/mysql format).
 func Open(ctx context.Context, dsn string) (*Driver, error) {
-	if _, err := gomysql.ParseDSN(dsn); err != nil {
-		return nil, fmt.Errorf("parse mysql dsn: %w", err)
-	}
-	db, err := sql.Open("mysql", dsn)
+	cfg, err := parseDSN(dsn)
 	if err != nil {
 		return nil, err
 	}
+	conn, err := gomysql.NewConnector(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("mysql connector: %w", err)
+	}
+	db := sql.OpenDB(conn)
 	// A single connection keeps session state such as sql_mode stable.
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("connect to mysql: %w", err)
 	}
-	var mode string
+	var mode, charset string
 	var lowerCaseNames int
-	if err := db.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode, @@lower_case_table_names").Scan(&mode, &lowerCaseNames); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode, @@SESSION.character_set_client, @@lower_case_table_names").
+		Scan(&mode, &charset, &lowerCaseNames); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("read sql_mode: %w", err)
+		return nil, fmt.Errorf("read session settings: %w", err)
+	}
+	if err := checkCharset(charset); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	d := &Driver{db: db}
 	d.NoBackslashEscapes = strings.Contains(mode, "NO_BACKSLASH_ESCAPES")
@@ -59,6 +67,37 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 		d.PartialRevokes = partial
 	}
 	return d, nil
+}
+
+// defaultTimeout bounds dialing when the DSN sets no timeout.
+const defaultTimeout = 10 * time.Second
+
+// parseDSN parses a go-sql-driver/mysql DSN and applies defaults.
+func parseDSN(dsn string) (*gomysql.Config, error) {
+	const hint = "expected a go-sql-driver/mysql DSN such as user:password@tcp(host:3306)/; URLs are not supported"
+	if strings.HasPrefix(strings.ToLower(dsn), "mysql://") {
+		return nil, errors.New("parse mysql dsn: " + hint)
+	}
+	cfg, err := gomysql.ParseDSN(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse mysql dsn (%s): %w", hint, err)
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = defaultTimeout
+	}
+	return cfg, nil
+}
+
+// unsafeCharsets are client character sets with multibyte characters
+// whose trailing byte can be 0x5C (backslash). Backslash escaping of
+// literals is not safe with them.
+var unsafeCharsets = []string{"big5", "cp932", "gb18030", "gbk", "sjis"}
+
+func checkCharset(charset string) error {
+	if slices.Contains(unsafeCharsets, strings.ToLower(charset)) {
+		return fmt.Errorf("connection character set %s is not supported because it breaks string escaping; use charset=utf8mb4 in the DSN", charset)
+	}
+	return nil
 }
 
 // Exec implements driver.Driver.
