@@ -440,6 +440,9 @@ func (d Dialect) dbPrivileges(rows []dbGrant, desired *model.Desired) ([]model.P
 	for _, g := range rows {
 		obj := d.dbObject(g.db)
 		obj.Database = d.declaredName(obj.Database, desired)
+		if stale, ok := d.staleEscapedRow(g.db, desired); ok {
+			obj = stale
+		}
 		if obj.Pattern != "" && !slices.ContainsFunc(desired.Databases, func(db model.Database) bool { return db.Name == obj.Database }) &&
 			slices.ContainsFunc(desired.Roles, func(r model.Role) bool { return r.ID == g.grantee }) {
 			for _, db := range desired.Databases {
@@ -559,6 +562,23 @@ func (d Dialect) dbObject(raw string) model.Object {
 		obj.Pattern = raw
 	}
 	return obj
+}
+
+// staleEscapedRow recognizes a row written with escaped wildcards while
+// partial_revokes was off, such as my\_app for database my_app. With
+// partial_revokes on, MySQL reads Db literally, so the row no longer
+// covers the declared database. It is reported with the raw text as
+// Pattern, so that diff revokes it (REVOKE ... ON `my\_app`.* removes
+// the row) and grants on the literal name instead.
+func (d Dialect) staleEscapedRow(raw string, desired *model.Desired) (model.Object, bool) {
+	if !d.PartialRevokes || !strings.Contains(raw, `\`) {
+		return model.Object{}, false
+	}
+	name := d.declaredName(Dialect{}.dbObject(raw).Database, desired)
+	if !slices.ContainsFunc(desired.Databases, func(db model.Database) bool { return db.Name == name }) {
+		return model.Object{}, false
+	}
+	return model.Object{Type: model.ObjectDatabase, Database: name, Pattern: raw}, true
 }
 
 // matchPattern reports whether name matches the database pattern p, in

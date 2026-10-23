@@ -124,7 +124,19 @@ func TestDBPrivilegesPatterns(t *testing.T) {
 		rows      []dbGrant
 		want      []string
 		wantWarns []string
+		d         Dialect
 	}{
+		{
+			name: "stale escaped row under partial_revokes is replaced",
+			d:    Dialect{PartialRevokes: true},
+			rows: []dbGrant{{grantee: app, db: `my\_app`, privs: []string{"SELECT"}}},
+			want: []string{"GRANT SELECT ON `my_app`.* TO 'app'@'%'", "REVOKE SELECT ON `my\\_app`.* FROM 'app'@'%'"},
+		},
+		{
+			name: "literal row under partial_revokes is converged",
+			d:    Dialect{PartialRevokes: true},
+			rows: []dbGrant{{grantee: app, db: "my_app", privs: []string{"SELECT"}}},
+		},
 		{
 			name: "escaped grant is converged",
 			rows: []dbGrant{{grantee: app, db: `my\_app`, privs: []string{"SELECT"}}},
@@ -147,7 +159,7 @@ func TestDBPrivilegesPatterns(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			privs, warns := Dialect{}.dbPrivileges(tt.rows, desired)
+			privs, warns := tt.d.dbPrivileges(tt.rows, desired)
 			cur := &model.Current{
 				CurrentUser: model.RoleID{Name: "root", Host: "%"},
 				Roles:       []model.RoleState{{ID: app, Login: true}},
@@ -155,7 +167,7 @@ func TestDBPrivilegesPatterns(t *testing.T) {
 				Privileges:  privs,
 				Warnings:    warns,
 			}
-			got, gotWarns := planSQL(t, desired, cur, Dialect{})
+			got, gotWarns := planSQL(t, desired, cur, tt.d)
 			if d := cmp.Diff(tt.want, got); d != "" {
 				t.Errorf("statements (-want +got):\n%s", d)
 			}
