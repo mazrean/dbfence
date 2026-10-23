@@ -106,16 +106,18 @@ func onceClient[T any](f func(context.Context) (T, error)) func(context.Context)
 	}
 }
 
-// Functions returns the function table including the cty stdlib.
+// Functions returns the function table including the cty stdlib. Results
+// of the secret sources are marked Sensitive, and no function reports
+// details of an error about a Sensitive argument.
 func (r *Registry) Functions() map[string]function.Function {
 	fns := map[string]function.Function{
-		"env":                r.envFunc(),
-		"aws_secretsmanager": r.awsFunc(),
-		"gcp_secretmanager":  r.gcpFunc(),
-		"tfstate":            r.tfstateFunc(),
+		"env":                markSensitive(r.envFunc()),
+		"aws_secretsmanager": markSensitive(r.awsFunc()),
+		"gcp_secretmanager":  markSensitive(r.gcpFunc()),
+		"tfstate":            markSensitive(r.tfstateFunc()),
 	}
 	maps.Copy(fns, stdlibFunctions())
-	return fns
+	return guardAll(fns)
 }
 
 // ResolvePathsFrom returns fns with tfstate resolving a relative local
@@ -134,13 +136,15 @@ func ResolvePathsFrom(fns map[string]function.Function, dir string) map[string]f
 		Type:        fn.ReturnTypeForValues,
 		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
 			args = slices.Clone(args)
-			loc := args[0].AsString()
+			// fn is guarded, so args may be marked.
+			v, marks := args[0].Unmark()
+			loc := v.AsString()
 			if u, err := url.Parse(loc); err == nil && u.Scheme == "" && !filepath.IsAbs(loc) {
 				abs, err := filepath.Abs(filepath.Join(dir, loc))
 				if err != nil {
 					return cty.NilVal, function.NewArgError(0, fmt.Errorf("resolve %q: %w", loc, err))
 				}
-				args[0] = cty.StringVal(abs)
+				args[0] = cty.StringVal(abs).WithMarks(marks)
 			}
 			return fn.Call(args)
 		},
@@ -163,7 +167,7 @@ func stdlibFunctions() map[string]function.Function {
 		"format":       stdlib.FormatFunc,
 		"formatlist":   stdlib.FormatListFunc,
 		"join":         stdlib.JoinFunc,
-		"jsondecode":   withFixedError(stdlib.JSONDecodeFunc, "the given string is not valid JSON", true),
+		"jsondecode":   stdlib.JSONDecodeFunc,
 		"jsonencode":   stdlib.JSONEncodeFunc,
 		"keys":         stdlib.KeysFunc,
 		"length":       stdlib.LengthFunc,
@@ -176,7 +180,7 @@ func stdlibFunctions() map[string]function.Function {
 		"substr":       stdlib.SubstrFunc,
 		"tolist":       stdlib.MakeToFunc(cty.List(cty.DynamicPseudoType)),
 		"tomap":        stdlib.MakeToFunc(cty.Map(cty.DynamicPseudoType)),
-		"tonumber":     withFixedError(stdlib.MakeToFunc(cty.Number), "cannot convert value to number; given string must be a decimal representation of a number", false),
+		"tonumber":     stdlib.MakeToFunc(cty.Number),
 		"toset":        stdlib.MakeToFunc(cty.Set(cty.DynamicPseudoType)),
 		"tostring":     stdlib.MakeToFunc(cty.String),
 		"trimspace":    stdlib.TrimSpaceFunc,

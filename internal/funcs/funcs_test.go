@@ -33,6 +33,8 @@ func eval(t *testing.T, r *Registry, expr string) (cty.Value, error) {
 	if diags.HasErrors() {
 		return cty.NilVal, diags
 	}
+	// Marks are checked by TestSensitiveMarks.
+	v, _ = v.UnmarkDeep()
 	return v, nil
 }
 
@@ -83,10 +85,10 @@ func TestFunctions(t *testing.T) {
 		{"base64 invalid utf-8", `base64decode("/w==")`, cty.NilVal, "not valid UTF-8"},
 		{"gcp invalid utf-8", `gcp_secretmanager("projects/p/secrets/binary")`, cty.NilVal, `"projects/p/secrets/binary/versions/latest" is not valid UTF-8`},
 		{"tonumber", `tonumber("12")`, cty.NumberIntVal(12), ""},
-		{"tonumber invalid", `tonumber("x")`, cty.NilVal, "cannot convert value to number"},
+		{"tonumber invalid", `tonumber("x")`, cty.NilVal, `cannot convert "x" to number`},
 		{"tonumber object", `tonumber({a = 1})`, cty.NilVal, "cannot convert object to number"},
 		{"jsondecode", `jsondecode("{\"a\":1}").a`, cty.NumberIntVal(1), ""},
-		{"jsondecode invalid", `jsondecode("{x")`, cty.NilVal, "not valid JSON"},
+		{"jsondecode invalid", `jsondecode("{x")`, cty.NilVal, "invalid character 'x'"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -233,8 +235,61 @@ func TestResolvePathsFrom(t *testing.T) {
 			if diags.HasErrors() {
 				t.Fatal(diags)
 			}
-			if !got.RawEquals(tt.want) {
+			if strings.Contains(tt.expr, "tfstate") && !got.HasMark(Sensitive) {
+				t.Errorf("tfstate result %#v is not marked sensitive", got)
+			}
+			if got, _ = got.Unmark(); !got.RawEquals(tt.want) {
 				t.Errorf("got %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSensitiveMarks checks that values from secret sources, and values
+// computed from them, are marked, and that errors about them are hidden
+// while errors about plain values keep their detail.
+func TestSensitiveMarks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		expr      string
+		wantErr   string
+		denyErr   string
+		sensitive bool
+	}{
+		{name: "literal", expr: `"x"`},
+		{name: "env", expr: `env("SET")`, sensitive: true},
+		{name: "env default", expr: `env("UNSET", "d")`, sensitive: true},
+		{name: "gcp", expr: `gcp_secretmanager("projects/p/secrets/s")`, sensitive: true},
+		{name: "through a function", expr: `upper(env("SET"))`, sensitive: true},
+		{name: "through a template", expr: `"pre-${env("SET")}"`, sensitive: true},
+		{name: "through jsondecode and attribute access", expr: `jsondecode("{\"a\": \"${env("SET")}\"}").a`, sensitive: true},
+		{name: "through a variadic function", expr: `format("%s:%s", "u", env("SET"))`, sensitive: true},
+		{name: "plain function stays plain", expr: `upper("x")`},
+		{name: "error about a secret is hidden", expr: `tonumber(env("SET"))`, wantErr: secretErrorMessage, denyErr: `"value"`},
+		{name: "error in a variadic function about a secret is hidden", expr: `format("%d", env("SET"))`, wantErr: secretErrorMessage, denyErr: `"value"`},
+		{name: "error about a plain value is detailed", expr: `tonumber("value")`, wantErr: `cannot convert "value" to number`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r, _ := newTestRegistry(t)
+			e, diags := hclsyntax.ParseExpression([]byte(tt.expr), "test.hcl", hcl.InitialPos)
+			if diags.HasErrors() {
+				t.Fatal(diags)
+			}
+			v, diags := e.Value(&hcl.EvalContext{Functions: r.Functions()})
+			if tt.wantErr != "" {
+				if !diags.HasErrors() || !strings.Contains(diags.Error(), tt.wantErr) || (tt.denyErr != "" && strings.Contains(diags.Error(), tt.denyErr)) {
+					t.Fatalf("err = %v, want %q without %q", diags, tt.wantErr, tt.denyErr)
+				}
+				return
+			}
+			if diags.HasErrors() {
+				t.Fatal(diags)
+			}
+			if got := v.ContainsMarked(); got != tt.sensitive {
+				t.Errorf("%s marked = %v, want %v (%#v)", tt.expr, got, tt.sensitive, v)
 			}
 		})
 	}

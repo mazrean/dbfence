@@ -121,7 +121,7 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 	if diags.HasErrors() {
 		return nil, diagError(parser, diags)
 	}
-	cfg, diags := decode(hcl.MergeFiles(bodies), fns)
+	cfg, diags := decode(unmarkedBody{hcl.MergeFiles(bodies)}, fns)
 	if diags.HasErrors() {
 		return nil, diagError(parser, diags)
 	}
