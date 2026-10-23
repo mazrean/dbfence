@@ -29,6 +29,19 @@ run = "go test ./..."
 description = "Run all tests with the race detector and coverage"
 run = "go test -race -coverprofile=coverage.out -covermode=atomic ./..."
 
+[tasks."test:fuzz"]
+description = "Run each Go fuzz target for a short time"
+run = [
+  "go test -run='^$' -fuzz='^FuzzCompileIgnorePattern$' -fuzztime=30s ./internal/model",
+  "go test -run='^$' -fuzz='^FuzzLoad$' -fuzztime=30s ./internal/config",
+  "go test -run='^$' -fuzz='^FuzzMatchPostgres$' -fuzztime=30s ./internal/password",
+  "go test -run='^$' -fuzz='^FuzzMatchMySQL$' -fuzztime=30s ./internal/password",
+  "go test -run='^$' -fuzz='^FuzzMatchPattern$' -fuzztime=30s ./internal/driver/mysql",
+  "go test -run='^$' -fuzz='^FuzzDialectSingleStatement$' -fuzztime=30s ./internal/driver/mysql",
+  "go test -run='^$' -fuzz='^FuzzDialectSingleStatement$' -fuzztime=30s ./internal/driver/postgres",
+  "go test -run='^$' -fuzz='^FuzzInspectedACL$' -fuzztime=30s ./internal/driver/postgres",
+]
+
 [tasks.lint]
 description = "Run the project linter"
 run = "go tool lint ./..."
