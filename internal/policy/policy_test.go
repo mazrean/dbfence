@@ -1,0 +1,269 @@
+package policy_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/mazrean/dbfence/internal/driver/mysql"
+	"github.com/mazrean/dbfence/internal/driver/postgres"
+	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/plan"
+	"github.com/mazrean/dbfence/internal/policy"
+)
+
+func pg(name string) model.RoleID { return model.RoleID{Name: name} }
+
+func pgCurrent() *model.Current {
+	return &model.Current{
+		CurrentUser:     pg("admin"),
+		CurrentDatabase: "postgres",
+		Roles: []model.RoleState{
+			{ID: pg("admin"), Login: true, MemberOf: []model.RoleID{pg("ops")}},
+			{ID: pg("ops"), MemberOf: []model.RoleID{pg("base")}},
+			{ID: pg("base")},
+			{ID: pg("app")},
+			{ID: pg("owner")},
+			{ID: pg("stray")},
+			{ID: pg("legacy_x")},
+			{ID: pg("pg_monitor")},
+			{ID: pg("keeper")},
+			{ID: pg("schema_keeper")},
+			{ID: pg("other_keeper")},
+		},
+		Databases: []model.Database{
+			{Name: "postgres"}, {Name: "app"}, {Name: "stray_db"}, {Name: "gone"},
+			{Name: "legacy_db", Owner: "keeper"}, {Name: "template1"},
+		},
+		Schemas: []model.Schema{
+			{Database: "app", Name: "public"}, {Database: "app", Name: "core"},
+			{Database: "app", Name: "old"}, {Database: "app", Name: "legacy_s", Owner: "schema_keeper"},
+		},
+		OtherSchemas: []model.Schema{{Database: "stray_db", Name: "legacy_o", Owner: "other_keeper"}},
+	}
+}
+
+func pgDesired() *model.Desired {
+	return &model.Desired{
+		Engine:     model.EnginePostgres,
+		Roles:      []model.Role{{ID: pg("app"), MemberOf: []model.RoleID{pg("base")}}},
+		Databases:  []model.Database{{Name: "app", Owner: "owner"}},
+		Schemas:    []model.Schema{{Database: "app", Name: "core"}},
+		Privileges: []model.Privilege{{Grantee: pg("app"), Object: model.Object{Type: model.ObjectDatabase, Database: "app"}, Name: "CONNECT"}},
+		Ignore:     model.Ignore{Roles: []string{"legacy_.*"}, Databases: []string{"legacy_.*"}, Schemas: []string{"legacy_.*"}},
+	}
+}
+
+func dropRole(id model.RoleID) plan.Statement {
+	return plan.New("", plan.KindDropRole, plan.RoleTarget(id), plan.Keyword("DROP ROLE x"))
+}
+
+func reassign(id model.RoleID, db string) plan.Statement {
+	t := plan.RoleTarget(id)
+	t.Database = db
+	return plan.New(db, plan.KindReassign, t, plan.Keyword("REASSIGN OWNED BY x TO CURRENT_USER"))
+}
+
+func dropDatabase(name string) plan.Statement {
+	return plan.New("", plan.KindDropDatabase, plan.ObjectTarget(model.Object{Type: model.ObjectDatabase, Database: name}), plan.Keyword("DROP DATABASE x"))
+}
+
+func dropSchema(db, name string) plan.Statement {
+	return plan.New(db, plan.KindDropSchema, plan.ObjectTarget(model.Object{Type: model.ObjectSchema, Database: db, Schema: name}), plan.Keyword("DROP SCHEMA x"))
+}
+
+func alterRole(id model.RoleID, c plan.RoleChange) plan.Statement {
+	return plan.New("", plan.KindAlterRole, plan.RoleTarget(id), plan.Keyword("ALTER ROLE x")).WithRoleChange(c)
+}
+
+func revokeMembership(member, role model.RoleID, adminOnly bool) plan.Statement {
+	return plan.New("", plan.KindRevokeMembership, plan.MembershipTarget(member, role).WithOption(adminOnly), plan.Keyword("REVOKE x FROM y"))
+}
+
+func zero() *int { n := 0; return &n }
+
+func TestVerify(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		current *model.Current
+		desired *model.Desired
+		system  policy.System
+		name    string
+		// want lists a substring of each violation, in order; none means
+		// the plan passes.
+		want    []string
+		stmts   []plan.Statement
+		noPrune bool
+	}{
+		{
+			name: "safe pruning plan",
+			stmts: []plan.Statement{
+				reassign(pg("stray"), "postgres"), reassign(pg("stray"), "app"), dropRole(pg("stray")),
+				dropDatabase("stray_db"), dropSchema("app", "old"),
+				alterRole(pg("admin"), plan.RoleChange{SetsPassword: true}),
+				revokeMembership(pg("app"), pg("ops"), false),
+			},
+		},
+		{name: "drop without prune", noPrune: true, stmts: []plan.Statement{dropRole(pg("stray"))}, want: []string{"without --prune"}},
+		{name: "schema drop without prune", noPrune: true, stmts: []plan.Statement{dropSchema("app", "old")}, want: []string{"without --prune"}},
+		{name: "connected user", stmts: []plan.Statement{dropRole(pg("admin"))}, want: []string{`drops the connected user "admin"`}},
+		{name: "reassign of the connected user", stmts: []plan.Statement{reassign(pg("admin"), "app")}, want: []string{`drops the connected user "admin"`}},
+		{
+			name:  "drop owned of a built-in role",
+			stmts: []plan.Statement{plan.New("app", plan.KindDropOwned, plan.Target{Object: plan.ObjectRole, Role: pg("pg_monitor"), Database: "app"}, plan.Keyword("DROP OWNED BY x"))},
+			want:  []string{`built-in role "pg_monitor"`},
+		},
+		{name: "ignored role", stmts: []plan.Statement{dropRole(pg("legacy_x"))}, want: []string{`ignored role "legacy_x"`}},
+		{name: "declared role", stmts: []plan.Statement{dropRole(pg("app"))}, want: []string{`declared role "app"`, "references"}},
+		{name: "referenced owner", stmts: []plan.Statement{dropRole(pg("owner"))}, want: []string{`"owner", which the configuration references`}},
+		{name: "referenced member_of", stmts: []plan.Statement{dropRole(pg("base"))}, want: []string{"references", "granted to the connected user"}},
+		{name: "granted to the connected user", stmts: []plan.Statement{dropRole(pg("ops"))}, want: []string{`"ops", which is granted to the connected user`}},
+		{name: "missing role", stmts: []plan.Statement{dropRole(pg("ghost"))}, want: []string{"does not exist"}},
+		{name: "owner of an ignored database", stmts: []plan.Statement{dropRole(pg("keeper"))}, want: []string{`ignored database "legacy_db"`}},
+		{name: "owner of an ignored schema", stmts: []plan.Statement{dropRole(pg("schema_keeper"))}, want: []string{`ignored schema "legacy_s"`}},
+		{name: "owner of an ignored schema elsewhere", stmts: []plan.Statement{dropRole(pg("other_keeper"))}, want: []string{`ignored schema "legacy_o" in database "stray_db"`}},
+		{
+			name:  "owner of an ignored schema in a dropped database",
+			stmts: []plan.Statement{dropDatabase("stray_db"), dropRole(pg("other_keeper"))},
+		},
+		{
+			name: "roles unreadable",
+			current: func() *model.Current {
+				c := pgCurrent()
+				c.Unreadable.Roles = true
+				return c
+			}(),
+			stmts: []plan.Statement{dropRole(pg("stray"))},
+			want:  []string{"role list is unreadable"},
+		},
+		{name: "reassign in an ignored database", stmts: []plan.Statement{reassign(pg("stray"), "legacy_db")}, want: []string{`ignored database "legacy_db"`}},
+		{name: "reassign in a dropped database", stmts: []plan.Statement{dropDatabase("gone"), reassign(pg("stray"), "gone")}, want: []string{"which the plan drops"}},
+		{name: "reassign in a missing database", stmts: []plan.Statement{reassign(pg("stray"), "nowhere")}, want: []string{"does not exist"}},
+		{name: "connected database", stmts: []plan.Statement{dropDatabase("postgres")}, want: []string{`connected to`, `built-in database "postgres"`}},
+		{name: "built-in database", stmts: []plan.Statement{dropDatabase("template1")}, want: []string{`built-in database "template1"`}},
+		{name: "ignored database", stmts: []plan.Statement{dropDatabase("legacy_db")}, want: []string{`ignored database "legacy_db"`}},
+		{name: "declared database", stmts: []plan.Statement{dropDatabase("app")}, want: []string{`declared database "app"`}},
+		{name: "missing database", stmts: []plan.Statement{dropDatabase("nowhere")}, want: []string{"does not exist"}},
+		{name: "built-in schema", stmts: []plan.Statement{dropSchema("app", "public")}, want: []string{`built-in schema "public"`}},
+		{name: "ignored schema", stmts: []plan.Statement{dropSchema("app", "legacy_s")}, want: []string{`ignored schema "legacy_s"`}},
+		{name: "declared schema", stmts: []plan.Statement{dropSchema("app", "core")}, want: []string{`declared schema "core"`}},
+		{name: "missing schema", stmts: []plan.Statement{dropSchema("app", "nowhere")}, want: []string{"does not exist"}},
+		{
+			name: "ignored schema by database",
+			desired: func() *model.Desired {
+				d := pgDesired()
+				d.Ignore.Schemas = []string{`app\.old`}
+				return d
+			}(),
+			stmts: []plan.Statement{dropSchema("app", "old")},
+			want:  []string{`ignored schema "old"`},
+		},
+		{name: "nologin", stmts: []plan.Statement{alterRole(pg("admin"), plan.RoleChange{DisablesLogin: true})}, want: []string{"disables login"}},
+		{name: "nosuperuser", stmts: []plan.Statement{alterRole(pg("admin"), plan.RoleChange{RemovesSuperuser: true})}, want: []string{"removes superuser"}},
+		{name: "account lock", stmts: []plan.Statement{alterRole(pg("admin"), plan.RoleChange{LocksAccount: true})}, want: []string{"locks the account"}},
+		{
+			name:  "lock on create",
+			stmts: []plan.Statement{plan.New("", plan.KindCreateRole, plan.RoleTarget(pg("admin")), plan.Keyword("CREATE ROLE x")).WithRoleChange(plan.RoleChange{LocksAccount: true})},
+			want:  []string{"locks the account"},
+		},
+		{name: "connection limit 0", stmts: []plan.Statement{alterRole(pg("admin"), plan.RoleChange{ConnectionLimit: zero()})}, want: []string{"connection limit 0"}},
+		{
+			name: "connection limit 0 on a superuser",
+			current: func() *model.Current {
+				c := pgCurrent()
+				c.Roles[0].Superuser = true
+				return c
+			}(),
+			stmts: []plan.Statement{alterRole(pg("admin"), plan.RoleChange{ConnectionLimit: zero()})},
+		},
+		{name: "lock out of another role", stmts: []plan.Statement{alterRole(pg("app"), plan.RoleChange{DisablesLogin: true, ConnectionLimit: zero()})}},
+		{name: "membership of the connected user", stmts: []plan.Statement{revokeMembership(pg("admin"), pg("ops"), false)}, want: []string{`connected user "admin" in "ops"`}},
+		{name: "admin option of the connected user", stmts: []plan.Statement{revokeMembership(pg("admin"), pg("ops"), true)}, want: []string{"ADMIN OPTION"}},
+		{name: "membership in the connected user", stmts: []plan.Statement{revokeMembership(pg("app"), pg("admin"), false)}},
+		{
+			name:    "invalid ignore pattern",
+			desired: &model.Desired{Engine: model.EnginePostgres, Ignore: model.Ignore{Roles: []string{"("}}},
+			want:    []string{"cannot verify the plan"},
+		},
+		{
+			name:    "mysql account ignored by name@host",
+			current: &model.Current{CurrentUser: model.RoleID{Name: "root", Host: "%"}, Roles: []model.RoleState{{ID: model.RoleID{Name: "svc", Host: "10.0.0.1"}}}},
+			desired: &model.Desired{Engine: model.EngineMySQL, Ignore: model.Ignore{Roles: []string{`svc@10\..*`}}},
+			system:  mysql.Dialect{},
+			stmts:   []plan.Statement{dropRole(model.RoleID{Name: "svc", Host: "10.0.0.1"})},
+			want:    []string{`ignored role "svc"@"10.0.0.1"`},
+		},
+		{
+			name:    "mysql account with an empty host ignored by name@",
+			current: &model.Current{CurrentUser: model.RoleID{Name: "root", Host: "%"}, Roles: []model.RoleState{{ID: model.RoleID{Name: "svc"}}}},
+			desired: &model.Desired{Engine: model.EngineMySQL, Ignore: model.Ignore{Roles: []string{`svc@`}}},
+			system:  mysql.Dialect{},
+			stmts:   []plan.Statement{dropRole(model.RoleID{Name: "svc"})},
+			want:    []string{`ignored role "svc"`},
+		},
+		{
+			name:    "mysql connected account",
+			current: &model.Current{CurrentUser: model.RoleID{Name: "dba", Host: "%"}, Roles: []model.RoleState{{ID: model.RoleID{Name: "dba", Host: "%"}}}},
+			desired: &model.Desired{Engine: model.EngineMySQL},
+			system:  mysql.Dialect{},
+			stmts:   []plan.Statement{dropRole(model.RoleID{Name: "dba", Host: "%"})},
+			want:    []string{"connected user"},
+		},
+		{
+			name:    "mysql system database",
+			current: &model.Current{CurrentUser: model.RoleID{Name: "root", Host: "%"}, Databases: []model.Database{{Name: "sys"}}},
+			desired: &model.Desired{Engine: model.EngineMySQL},
+			system:  mysql.Dialect{},
+			stmts:   []plan.Statement{dropDatabase("sys")},
+			want:    []string{`built-in database "sys"`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cur, desired, system := tt.current, tt.desired, tt.system
+			if cur == nil {
+				cur = pgCurrent()
+			}
+			if desired == nil {
+				desired = pgDesired()
+			}
+			if system == nil {
+				system = postgres.Dialect{}
+			}
+			p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionDrop, Resource: "test", Statements: tt.stmts}}}
+			got := policy.Verify(p, cur, desired, policy.Options{System: system, Prune: !tt.noPrune})
+			if len(got) != len(tt.want) {
+				t.Fatalf("violations = %v, want %d matching %q", got, len(tt.want), tt.want)
+			}
+			for i, w := range tt.want {
+				if s := got[i].String(); !strings.Contains(s, w) {
+					t.Errorf("violation %d = %q, want substring %q", i, s, w)
+				}
+			}
+		})
+	}
+}
+
+func TestViolationString(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		want string
+		v    policy.Violation
+	}{
+		{
+			name: "statement",
+			v:    policy.Violation{Resource: `user "admin"`, Kind: plan.KindDropRole, Reason: `drops the connected user "admin"`},
+			want: `drops the connected user "admin" (drop-role statement of user "admin")`,
+		},
+		{name: "plan", v: policy.Violation{Reason: "cannot verify the plan"}, want: "cannot verify the plan"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.v.String(); got != tt.want {
+				t.Errorf("String() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

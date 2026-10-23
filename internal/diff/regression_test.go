@@ -50,7 +50,7 @@ func TestComputeOrder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(tt.desired, tt.current, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, tt.desired, tt.current, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -144,7 +144,7 @@ func TestComputeCurrentUser(t *testing.T) {
 			}
 			d := &model.Desired{Engine: engine, Roles: []model.Role{tt.role}}
 			cur := &model.Current{CurrentUser: tt.state.ID, Roles: []model.RoleState{tt.state, {ID: pgID("x")}}}
-			p, err := diff.Compute(d, cur, tt.dialect, diff.Options{})
+			p, err := compute(t, d, cur, tt.dialect, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +211,7 @@ func TestComputeTemplateSchema(t *testing.T) {
 				Roles:       []model.RoleState{{ID: pgID("admin"), Login: true}},
 				Databases:   []model.Database{{Name: "postgres", Owner: "admin"}},
 			}
-			p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, d, cur, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -374,7 +374,7 @@ func TestComputePruneProtection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(tt.desired, tt.current, tt.dialect, diff.Options{Prune: !tt.noPrune})
+			p, err := compute(t, tt.desired, tt.current, tt.dialect, diff.Options{Prune: !tt.noPrune})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -474,7 +474,7 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 			if !tt.unreadable.Roles {
 				cur.Roles = []model.RoleState{tt.current, {ID: role("dbarole")}, {ID: role("extra")}}
 			}
-			p, err := diff.Compute(desired, cur, mysql.Dialect{}, diff.Options{})
+			p, err := compute(t, desired, cur, mysql.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -552,7 +552,7 @@ func TestComputePruneOtherSchemaOwners(t *testing.T) {
 				InspectedDatabases: []string{"app"},
 				OtherSchemas:       tt.other,
 			}
-			p, err := diff.Compute(desired, current, postgres.Dialect{}, diff.Options{Prune: true})
+			p, err := compute(t, desired, current, postgres.Dialect{}, diff.Options{Prune: true})
 			if err != nil {
 				t.Fatal(err)
 			}

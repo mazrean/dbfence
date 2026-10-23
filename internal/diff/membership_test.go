@@ -73,7 +73,7 @@ func TestComputeMembershipOptions(t *testing.T) {
 				cur.CurrentUser = pgID("u")
 			}
 			cur.Unreadable.Memberships = tt.unreadable
-			p, err := diff.Compute(&model.Desired{Engine: model.EnginePostgres, Roles: []model.Role{role, {ID: pgID("g")}}}, cur, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, &model.Desired{Engine: model.EnginePostgres, Roles: []model.Role{role, {ID: pgID("g")}}}, cur, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}

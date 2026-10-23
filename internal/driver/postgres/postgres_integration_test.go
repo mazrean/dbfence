@@ -134,7 +134,7 @@ func planFor(t *testing.T, d *Driver, desired *model.Desired, opts diff.Options)
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	p, err := diff.Compute(desired, cur, d, opts)
+	p, err := compute(t, desired, cur, d, opts)
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}
@@ -161,7 +161,7 @@ func converge(t *testing.T, d *Driver, desired *model.Desired, opts diff.Options
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	p, err := diff.Compute(desired, cur, d, opts)
+	p, err := compute(t, desired, cur, d, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestIntegration(t *testing.T) {
 			if cur.CurrentDatabase != "postgres" {
 				t.Errorf("CurrentDatabase = %q", cur.CurrentDatabase)
 			}
-			p, err := diff.Compute(desired, cur, d, diff.Options{})
+			p, err := compute(t, desired, cur, d, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -267,7 +267,7 @@ func TestIntegration(t *testing.T) {
 			// Pruning a role does not run statements on databases that
 			// cannot be connected to.
 			if user == "postgres" {
-				p, err := diff.Compute(desired, cur, d, diff.Options{Prune: true})
+				p, err := compute(t, desired, cur, d, diff.Options{Prune: true})
 				if err != nil {
 					t.Fatal(err)
 				}
