@@ -350,6 +350,12 @@ func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Ro
 		}
 		r.Login = nil
 	}
+	if r.ConnectionLimit != nil && *r.ConnectionLimit == 0 && !cur.Superuser {
+		// Superusers are exempt from the limit; anyone else could not
+		// connect again.
+		df.warn("not setting connection limit 0 on the connected user %q: it would lock dbfence out", r.ID)
+		r.ConnectionLimit = nil
+	}
 	if r.Superuser != nil && !*r.Superuser && cur.Superuser {
 		df.warn("not removing superuser from the connected user %q: dbfence may rely on it", r.ID)
 		r.Superuser = nil
