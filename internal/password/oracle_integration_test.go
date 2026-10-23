@@ -34,6 +34,7 @@ var corpusPieces = []string{
 	"\u00AD", "\u200B", "\u034F", "\uFEFF", "\u00A0", "\u3000", "\u2003",
 	"\u05D0", "\u05D01\u05D1", "\u0627\u0644",
 	"\u0001", "\u007F", "\uE000", "\U0001F511", "\u0221",
+	"\u1D2C", "\u03F9", "\u0340", "\u0341",
 }
 
 // corpus returns n deterministic passwords built from corpusPieces.
