@@ -31,8 +31,9 @@ type Output struct {
 }
 
 // NewOutput wraps the process standard output and error, and sends the
-// messages that go-sql-driver/mysql logs to the error stream: they may
-// quote text the server sent.
+// messages that go-sql-driver/mysql and the cloud SDKs log to the error
+// stream: they may quote text the server sent, and would otherwise go
+// to os.Stderr unredacted.
 func NewOutput() *Output {
 	o := &Output{
 		Out: secret.NewWriter(os.Stdout, secret.Default()),
@@ -40,6 +41,7 @@ func NewOutput() *Output {
 	}
 	// It fails only for a nil writer.
 	_ = mysql.SetLogOutput(o.Err)
+	funcs.SetLogOutput(o.Err)
 	return o
 }
 

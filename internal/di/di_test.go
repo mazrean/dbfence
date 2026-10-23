@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mazrean/dbfence/internal/driver/mysql"
+	"github.com/mazrean/dbfence/internal/secret"
 )
 
 // mysqlHandshake is a MySQL protocol 10 handshake asking for an
@@ -77,5 +79,36 @@ func TestOutputCarriesMySQLLog(t *testing.T) {
 	}
 	if !strings.Contains(got, `[mysql] `) || !strings.Contains(got, `\x1b]0;owned`) {
 		t.Errorf("stderr = %q, want the driver's message escaped", got)
+	}
+}
+
+// TestOutputCarriesSDKLogs checks that NewOutput routes the standard log
+// package (used by the HCP Terraform client) through the error stream
+// and turns off the GCP SDK's default logger, which writes to os.Stderr.
+func TestOutputCarriesSDKLogs(t *testing.T) {
+	if os.Getenv("DBFENCE_DI_CHILD") == "1" {
+		o := NewOutput()
+		secret.Register("Sd9LogSecret")
+		log.Print("tfe \x1b[2J Sd9LogSecret")
+		if v := os.Getenv("GOOGLE_SDK_GO_LOGGING_LEVEL"); v != "" {
+			t.Errorf("GOOGLE_SDK_GO_LOGGING_LEVEL = %q after NewOutput, want it unset", v)
+		}
+		_ = o.Err.Flush()
+		return
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestOutputCarriesSDKLogs$")
+	cmd.Env = append(os.Environ(), "DBFENCE_DI_CHILD=1", "GOOGLE_SDK_GO_LOGGING_LEVEL=debug")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = io.Discard
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("child: %v\n%s", err, stderr.String())
+	}
+	got := stderr.String()
+	if strings.Contains(got, "\x1b") || strings.Contains(got, "Sd9LogSecret") {
+		t.Errorf("stderr = %q, want the message escaped and redacted", got)
+	}
+	if !strings.Contains(got, `tfe \x1b[2J `+secret.Placeholder) {
+		t.Errorf("stderr = %q, want the log message", got)
 	}
 }
