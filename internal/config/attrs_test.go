@@ -17,6 +17,20 @@ func TestLoadAttributeValues(t *testing.T) {
 			count: 1,
 		},
 		{
+			name:  "pg md5-looking password",
+			src:   pgConn + "user \"a\" {\n  password = \"md5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n}\n",
+			want:  []string{"Password looks like a verifier", `user "a" at`},
+			deny:  []string{"md5aaaa"},
+			count: 1,
+		},
+		{
+			name:  "pg scram-looking password",
+			src:   pgConn + "user \"a\" {\n  password = \"SCRAM-SHA-256$4096:c2FsdA==$a:b\"\n}\n",
+			want:  []string{"Password looks like a verifier"},
+			deny:  []string{"c2FsdA"},
+			count: 1,
+		},
+		{
 			name:  "NUL in password is reported without the value",
 			src:   myConn + "user \"a\" { password = \"secretA\\u0000tailsecret\" }\n",
 			want:  []string{"must not contain NUL characters"},

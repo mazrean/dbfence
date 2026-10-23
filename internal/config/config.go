@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/password"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 	"github.com/zclconf/go-cty/cty/function"
@@ -911,6 +912,8 @@ func checkPassword(r resource, typ string, pw *string, engine model.Engine) hcl.
 		return fail("Invalid password", "password must not contain NUL characters.")
 	case *pw == "" && engine == model.EnginePostgres:
 		return fail("Empty password", "an empty password is not valid on PostgreSQL (it clears the password); omit password to leave it unmanaged.")
+	case engine == model.EnginePostgres && password.PostgresVerifierKind(*pw) != password.VerifierUnknown:
+		return fail("Password looks like a verifier", `PostgreSQL stores a password of the form "md5" + 32 characters or "SCRAM-SHA-256$..." as an already hashed verifier, so the role could not log in with it; choose another password.`)
 	}
 	return nil
 }

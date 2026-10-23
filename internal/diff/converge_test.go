@@ -22,8 +22,8 @@ import (
 // materializes the owner's privileges and ALTER ... OWNER TO moves the
 // old owner's ACL entries to the new owner.
 type simDialect struct {
-	ops []func(*model.Current) error
 	postgres.Dialect
+	ops []func(*model.Current) error
 }
 
 func (d *simDialect) op(f func(*model.Current) error) []plan.Statement {
