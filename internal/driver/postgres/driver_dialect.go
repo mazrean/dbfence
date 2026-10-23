@@ -104,6 +104,15 @@ func (d *Driver) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs
 	return d.st.revoke(grantee.Name, obj, privs, true)
 }
 
+// DefaultPublicPrivileges implements diff.PublicDefaulter for the
+// inspected server version.
+func (d *Driver) DefaultPublicPrivileges(obj model.Object) []string {
+	if d.st == nil {
+		return d.Dialect.DefaultPublicPrivileges(obj)
+	}
+	return defaultPublicPrivileges(obj, d.st.version)
+}
+
 // RevokeMembership implements diff.Dialect. From PostgreSQL 16 on a
 // membership has one grant per grantor, and REVOKE only removes the
 // grant named by GRANTED BY.
@@ -118,7 +127,7 @@ func (d *Driver) RevokeMembership(member, role model.RoleID) []plan.Statement {
 func cascadeNote(what string, dependents []string) string {
 	quoted := make([]string, len(dependents))
 	for i, r := range dependents {
-		quoted[i] = Ident(r)
+		quoted[i] = Grantee(r)
 	}
 	return "-- CASCADE: " + what + " granted on by the grantee to " + strings.Join(quoted, ", ") +
 		" are revoked too; declared ones are granted again\n"
@@ -175,7 +184,7 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 		if optionOnly {
 			q += "GRANT OPTION FOR "
 		}
-		q += strings.Join(ps, ", ") + " ON " + target + " FROM " + Ident(grantee)
+		q += strings.Join(ps, ", ") + " ON " + target + " FROM " + Grantee(grantee)
 		if len(dependents) > 0 {
 			q += " CASCADE"
 		}

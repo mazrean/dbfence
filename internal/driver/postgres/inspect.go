@@ -323,11 +323,15 @@ func (d *Driver) inspectDatabaseACL(ctx context.Context, cur *model.Current, st 
 	listed := func(name string) bool {
 		return slices.ContainsFunc(cur.Databases, func(db model.Database) bool { return db.Name == name })
 	}
-	return query(ctx, d.db, `SELECT d.datname, r.rolname, g.rolname, a.privilege_type, a.is_grantable
+	// A NULL ACL means the defaults, which include CONNECT and TEMPORARY
+	// for PUBLIC (grantee 0, reported as model.PublicRole).
+	return query(ctx, d.db, `SELECT d.datname, CASE WHEN a.grantee = 0 THEN 'public' ELSE r.rolname END,
+			g.rolname, a.privilege_type, a.is_grantable
 		FROM pg_database d
-		CROSS JOIN LATERAL aclexplode(d.datacl) a
-		JOIN pg_roles r ON r.oid = a.grantee
+		CROSS JOIN LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
+		LEFT JOIN pg_roles r ON r.oid = a.grantee
 		JOIN pg_roles g ON g.oid = a.grantor
+		WHERE a.grantee = 0 OR r.oid IS NOT NULL
 		ORDER BY 1, 2, 4, 3`,
 		func(rows *sql.Rows) error {
 			e := aclEntry{obj: model.Object{Type: model.ObjectDatabase}}
@@ -387,12 +391,14 @@ func (d *Driver) inspectSchemas(ctx context.Context, cur *model.Current, st *sta
 		}); err != nil {
 		return false, err
 	}
-	return true, query(ctx, c, `SELECT n.nspname, r.rolname, g.rolname, a.privilege_type, a.is_grantable
+	return true, query(ctx, c, `SELECT n.nspname, CASE WHEN a.grantee = 0 THEN 'public' ELSE r.rolname END,
+			g.rolname, a.privilege_type, a.is_grantable
 		FROM pg_namespace n
-		CROSS JOIN LATERAL aclexplode(n.nspacl) a
-		JOIN pg_roles r ON r.oid = a.grantee
+		CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
+		LEFT JOIN pg_roles r ON r.oid = a.grantee
 		JOIN pg_roles g ON g.oid = a.grantor
 		WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
+			AND (a.grantee = 0 OR r.oid IS NOT NULL)
 		ORDER BY 1, 2, 4, 3`,
 		func(rows *sql.Rows) error {
 			e := aclEntry{obj: model.Object{Type: model.ObjectSchema, Database: database}}

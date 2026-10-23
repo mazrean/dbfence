@@ -18,6 +18,9 @@ func TestRoleIDFormat(t *testing.T) {
 		{id: model.RoleID{Name: "app", Host: "%"}, q: `"app"@"%"`, s: "app@%"},
 		{id: model.RoleID{Name: "team@ops", Host: "%"}, q: `"team@ops"@"%"`, s: "team@ops@%"},
 		{id: model.RoleID{Name: `o'b\r`, Host: "10.0.%"}, q: `"o'b\\r"@"10.0.%"`, s: `o'b\r@10.0.%`},
+		{id: model.PublicRole, q: "PUBLIC", s: "PUBLIC"},
+		{id: model.RoleID{Name: "PUBLIC"}, q: `"PUBLIC"`, s: "PUBLIC"},
+		{id: model.RoleID{Name: "public", Host: "%"}, q: `"public"@"%"`, s: "public@%"},
 	}
 	for _, tt := range tests {
 		if got := fmt.Sprintf("%q", tt.id); got != tt.q {
@@ -25,6 +28,25 @@ func TestRoleIDFormat(t *testing.T) {
 		}
 		if got := fmt.Sprintf("%s|%v", tt.id, tt.id); got != tt.s+"|"+tt.s {
 			t.Errorf("%%s of %#v = %s, want %s", tt.id.Name, got, tt.s)
+		}
+	}
+}
+
+func TestRoleIDIsPublic(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		id   model.RoleID
+		want bool
+	}{
+		{id: model.PublicRole, want: true},
+		{id: model.RoleID{Name: "public"}, want: true},
+		{id: model.RoleID{Name: "PUBLIC"}},
+		{id: model.RoleID{Name: "public", Host: "%"}},
+		{id: model.RoleID{Name: "app"}},
+	}
+	for _, tt := range tests {
+		if got := tt.id.IsPublic(); got != tt.want {
+			t.Errorf("%#v.IsPublic() = %t, want %t", tt.id, got, tt.want)
 		}
 	}
 }

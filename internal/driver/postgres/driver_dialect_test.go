@@ -95,6 +95,36 @@ func TestStateRevoke(t *testing.T) {
 			want: `app: REVOKE USAGE ON SCHEMA "api" FROM "x"`,
 		},
 		{
+			name:    "PUBLIC is rendered unquoted",
+			acl:     []aclEntry{entry(db, "public", "owner", "CONNECT", false), entry(db, "public", "owner", "TEMPORARY", false)},
+			obj:     db,
+			grantee: "public", privs: []string{"CONNECT", "TEMPORARY"},
+			want: `REVOKE CONNECT, TEMPORARY ON DATABASE "app" FROM PUBLIC`,
+		},
+		{
+			name: "PUBLIC grant by another grantor",
+			acl: []aclEntry{
+				entry(schema, "ro", "owner", "USAGE", true),
+				entry(schema, "public", "ro", "USAGE", false),
+			},
+			obj:     schema,
+			grantee: "public", privs: []string{"USAGE"},
+			want: `app: SET ROLE "ro"; REVOKE USAGE ON SCHEMA "api" FROM PUBLIC; RESET ROLE`,
+		},
+		{
+			name: "PUBLIC as a dependent of a cascade is granted again",
+			acl: []aclEntry{
+				entry(schema, "ro", "owner", "USAGE", true),
+				entry(schema, "public", "ro", "USAGE", false),
+			},
+			desired: []model.Privilege{{Grantee: model.PublicRole, Object: schema, Name: "USAGE"}},
+			obj:     schema,
+			grantee: "ro", privs: []string{"USAGE"}, optionOnly: true,
+			want: "app: -- CASCADE: privileges granted on by the grantee to PUBLIC are revoked too; declared ones are granted again\n" +
+				`REVOKE GRANT OPTION FOR USAGE ON SCHEMA "api" FROM "ro" CASCADE` + "\n" +
+				`app: GRANT USAGE ON SCHEMA "api" TO PUBLIC`,
+		},
+		{
 			name:    "unknown grantor falls back to a plain revoke",
 			obj:     db,
 			grantee: "b", privs: []string{"CREATE", "TEMPORARY"},
@@ -341,5 +371,52 @@ func TestDriverWithoutInspectBehavesLikeDialect(t *testing.T) {
 	d.st = &state{version: 150000, members: []memberEntry{{role: "g", member: "u", grantor: "x"}}}
 	if got := sqlOf(d.RevokeMembership(pg("u"), pg("g"))); got != `REVOKE "g" FROM "u"` {
 		t.Errorf("RevokeMembership on 15 = %s", got)
+	}
+}
+
+func TestPublicRendering(t *testing.T) {
+	t.Parallel()
+	db := model.Object{Type: model.ObjectDatabase, Database: "app"}
+	tests := []struct {
+		name string
+		want string
+		got  []plan.Statement
+	}{
+		{name: "grant", got: Dialect{}.Grant(model.PublicRole, db, []string{"CONNECT"}, false), want: `GRANT CONNECT ON DATABASE "app" TO PUBLIC`},
+		{name: "revoke", got: Dialect{}.Revoke(model.PublicRole, db, []string{"CONNECT"}), want: `REVOKE CONNECT ON DATABASE "app" FROM PUBLIC`},
+		{name: "role named PUBLIC is quoted", got: Dialect{}.Grant(pg("PUBLIC"), db, []string{"CONNECT"}, false), want: `GRANT CONNECT ON DATABASE "app" TO "PUBLIC"`},
+	}
+	for _, tt := range tests {
+		if got := sqlOf(tt.got); got != tt.want {
+			t.Errorf("%s: got %s, want %s", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestDefaultPublicPrivileges(t *testing.T) {
+	t.Parallel()
+	db := model.Object{Type: model.ObjectDatabase, Database: "app"}
+	public := model.Object{Type: model.ObjectSchema, Database: "app", Schema: "public"}
+	api := model.Object{Type: model.ObjectSchema, Database: "app", Schema: "api"}
+	tests := []struct {
+		name    string
+		want    string
+		obj     model.Object
+		version int
+	}{
+		{name: "database", obj: db, version: 170000, want: "CONNECT,TEMPORARY"},
+		{name: "database before 15", obj: db, version: 140000, want: "CONNECT,TEMPORARY"},
+		{name: "public schema", obj: public, version: 150000, want: "USAGE"},
+		{name: "public schema before 15", obj: public, version: 140011, want: "CREATE,USAGE"},
+		{name: "other schema", obj: api, version: 170000},
+	}
+	for _, tt := range tests {
+		d := &Driver{st: &state{version: tt.version}}
+		if got := strings.Join(d.DefaultPublicPrivileges(tt.obj), ","); got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+	}
+	if got := strings.Join(Dialect{}.DefaultPublicPrivileges(public), ","); got != "USAGE" {
+		t.Errorf("Dialect: got %q, want USAGE", got)
 	}
 }

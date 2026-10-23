@@ -25,7 +25,18 @@ type RoleID struct {
 	Host string
 }
 
+// PublicRole is PostgreSQL's PUBLIC pseudo-role, which every role is
+// implicitly a member of. Its name is reserved by PostgreSQL, so no real
+// role can collide with it.
+var PublicRole = RoleID{Name: "public"}
+
+// IsPublic reports whether id is the PUBLIC pseudo-role.
+func (id RoleID) IsPublic() bool { return id == PublicRole }
+
 func (id RoleID) String() string {
+	if id.IsPublic() {
+		return "PUBLIC"
+	}
 	if id.Host == "" {
 		return id.Name
 	}
@@ -34,9 +45,9 @@ func (id RoleID) String() string {
 
 // Format implements fmt.Formatter. %q quotes the name and the host
 // separately ("name"@"host") so that names containing '@' stay
-// unambiguous; other verbs print String.
+// unambiguous; other verbs, and PUBLIC, print String.
 func (id RoleID) Format(f fmt.State, verb rune) {
-	if verb != 'q' {
+	if verb != 'q' || id.IsPublic() {
 		_, _ = f.Write([]byte(id.String()))
 		return
 	}

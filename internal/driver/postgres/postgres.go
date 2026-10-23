@@ -213,6 +213,15 @@ type Dialect struct{}
 // Ident quotes an identifier.
 func Ident(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
+// Grantee renders the grantee of a GRANT or REVOKE: the PUBLIC
+// pseudo-role (model.PublicRole) unquoted, any other role as Ident.
+func Grantee(name string) string {
+	if (model.RoleID{Name: name}).IsPublic() {
+		return "PUBLIC"
+	}
+	return Ident(name)
+}
+
 // Literal quotes a string literal. A string containing a backslash is
 // rendered as an escape string, so it means the same whatever the value
 // of standard_conforming_strings.
@@ -525,10 +534,33 @@ func onObject(obj model.Object) (database, target string) {
 	return "", "DATABASE " + Ident(obj.Database)
 }
 
+// pg15 is the server_version_num from which the public schema of a new
+// database grants only USAGE to PUBLIC.
+const pg15 = 150000
+
+// DefaultPublicPrivileges implements diff.PublicDefaulter for PostgreSQL
+// 15 and later: a new database grants CONNECT and TEMPORARY to PUBLIC,
+// and its public schema, copied from template1, grants USAGE.
+func (Dialect) DefaultPublicPrivileges(obj model.Object) []string {
+	return defaultPublicPrivileges(obj, pg15)
+}
+
+func defaultPublicPrivileges(obj model.Object, version int) []string {
+	switch {
+	case obj.Type == model.ObjectDatabase:
+		return []string{"CONNECT", "TEMPORARY"}
+	case obj.Schema != "public":
+		return nil
+	case version < pg15:
+		return []string{"CREATE", "USAGE"}
+	}
+	return []string{"USAGE"}
+}
+
 // Grant implements diff.Dialect.
 func (Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, grantOption bool) []plan.Statement {
 	db, target := onObject(obj)
-	q := "GRANT " + strings.Join(privs, ", ") + " ON " + target + " TO " + Ident(grantee.Name)
+	q := "GRANT " + strings.Join(privs, ", ") + " ON " + target + " TO " + Grantee(grantee.Name)
 	if grantOption {
 		q += " WITH GRANT OPTION"
 	}
@@ -538,11 +570,11 @@ func (Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, gra
 // Revoke implements diff.Dialect.
 func (Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
 	db, target := onObject(obj)
-	return []plan.Statement{plan.SQL(db, "REVOKE "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Ident(grantee.Name))}
+	return []plan.Statement{plan.SQL(db, "REVOKE "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Grantee(grantee.Name))}
 }
 
 // RevokeGrantOption implements diff.Dialect.
 func (Dialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
 	db, target := onObject(obj)
-	return []plan.Statement{plan.SQL(db, "REVOKE GRANT OPTION FOR "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Ident(grantee.Name))}
+	return []plan.Statement{plan.SQL(db, "REVOKE GRANT OPTION FOR "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Grantee(grantee.Name))}
 }
