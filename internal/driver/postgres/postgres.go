@@ -486,6 +486,8 @@ func roleOptions(r model.Role, cur model.RoleState, onlyChanged bool) ([]plan.Fr
 			change.DisablesLogin = true
 		case o.no == "NOSUPERUSER":
 			change.RemovesSuperuser = true
+		case o.no == "NOINHERIT":
+			change.DisablesInherit = true
 		}
 	}
 	if r.ConnectionLimit != nil && (!onlyChanged || *r.ConnectionLimit != cur.ConnectionLimit) {
@@ -630,7 +632,11 @@ func grantMembership(member, role string, opts model.MembershipOptions, grantedB
 	if grantedBy != nil {
 		parts = append(parts, grantedBy)
 	}
-	return plan.New("", plan.KindGrantMembership, target, parts...)
+	change := plan.RoleChange{
+		DisablesInherit: opts.Inherit != nil && !*opts.Inherit,
+		DisablesSet:     opts.Set != nil && !*opts.Set,
+	}
+	return plan.New("", plan.KindGrantMembership, target, parts...).WithRoleChange(change)
 }
 
 // revokeMembership renders REVOKE [ADMIN OPTION FOR] role FROM member

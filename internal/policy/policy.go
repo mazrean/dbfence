@@ -112,6 +112,9 @@ func (c *checker) check(s plan.Statement) []string {
 		}
 	case plan.KindGrantMembership:
 		c.edges[membership{t.Grantee, t.Role}] = true
+		if t.Grantee == c.cur.CurrentUser {
+			return c.narrowsMembership(t.Role, s.RoleChange())
+		}
 	case plan.KindRevokeMembership:
 		if t.Grantee == c.cur.CurrentUser {
 			return []string{fmt.Sprintf("revokes a membership or ADMIN OPTION of the connected user %q in %q", t.Grantee, t.Role)}
@@ -294,6 +297,9 @@ func (c *checker) lockOut(ch plan.RoleChange) []string {
 	if ch.LocksAccount {
 		out = append(out, fmt.Sprintf("locks the account of the connected user %q", id))
 	}
+	if ch.DisablesInherit {
+		out = append(out, fmt.Sprintf("sets NOINHERIT on the connected user %q", id))
+	}
 	if ch.RemovesSuperuser {
 		out = append(out, fmt.Sprintf("removes superuser from the connected user %q", id))
 	}
@@ -323,6 +329,33 @@ func (c *checker) narrowsDefaultRoles(set []model.RoleID) []string {
 		if !slices.Contains(set, r) {
 			out = append(out, fmt.Sprintf("removes %q from the default roles of the connected user %q", r, id))
 		}
+	}
+	return out
+}
+
+// narrowsMembership checks a GRANT of role to the connected user: it may
+// not turn off INHERIT or SET on a membership the connected user has, or
+// may have when memberships are unreadable, since it would lose the
+// privileges of role or the right to SET ROLE to it.
+func (c *checker) narrowsMembership(role model.RoleID, ch plan.RoleChange) []string {
+	if !ch.DisablesInherit && !ch.DisablesSet {
+		return nil
+	}
+	id := c.cur.CurrentUser
+	i := slices.IndexFunc(c.cur.Roles, func(r model.RoleState) bool { return r.ID == id })
+	var have model.MembershipState
+	switch {
+	case i < 0 || c.cur.Unreadable.Roles || c.cur.Unreadable.Memberships:
+		have = model.MembershipState{Inherit: true, Set: true}
+	case slices.Contains(c.cur.Roles[i].MemberOf, role):
+		have = c.cur.Roles[i].MemberOptions[role]
+	}
+	var out []string
+	if ch.DisablesInherit && have.Inherit {
+		out = append(out, fmt.Sprintf("sets INHERIT FALSE on the membership of the connected user %q in %q", id, role))
+	}
+	if ch.DisablesSet && have.Set {
+		out = append(out, fmt.Sprintf("sets SET FALSE on the membership of the connected user %q in %q", id, role))
 	}
 	return out
 }

@@ -93,9 +93,9 @@ func (t Target) WithOption(on bool) Target {
 	return t
 }
 
-// RoleChange is what a CREATE or ALTER of a role sets that a plan check
-// needs: changes that can lock the connected user out or take away its
-// powers.
+// RoleChange is what a CREATE or ALTER of a role, or a GRANT of a
+// membership, sets that a plan check needs: changes that can lock the
+// connected user out or take away its powers.
 type RoleChange struct {
 	// ConnectionLimit is the connection limit set, if any.
 	ConnectionLimit *int
@@ -105,6 +105,11 @@ type RoleChange struct {
 	RemovesSuperuser bool
 	// LocksAccount is set by MySQL ACCOUNT LOCK.
 	LocksAccount bool
+	// DisablesInherit is set by PostgreSQL NOINHERIT and by a membership
+	// GRANT with INHERIT FALSE.
+	DisablesInherit bool
+	// DisablesSet is set by a PostgreSQL membership GRANT with SET FALSE.
+	DisablesSet bool
 	// SetsPassword is set when the statement sets or clears the password
 	// or changes the authentication plugin.
 	SetsPassword bool

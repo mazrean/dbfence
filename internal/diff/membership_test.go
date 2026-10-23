@@ -52,9 +52,27 @@ func TestComputeMembershipOptions(t *testing.T) {
 		},
 		{
 			name: "connected user keeps admin", member: true, connected: true, have: state(true, true, true),
-			opts:  &model.MembershipOptions{Admin: &no, Inherit: &no},
-			want:  []string{`GRANT "g" TO "u" WITH INHERIT FALSE`},
-			warns: []string{`not revoking ADMIN OPTION on "g" from the connected user "u": dbfence may rely on it`},
+			opts: &model.MembershipOptions{Admin: &no, Inherit: &no, Set: &no},
+			warns: []string{
+				`not revoking ADMIN OPTION on "g" from the connected user "u": dbfence may rely on it`,
+				`not setting inherit = false on the membership of the connected user "u" in "g": dbfence may rely on its privileges`,
+				`not setting set = false on the membership of the connected user "u" in "g": dbfence may rely on SET ROLE to it`,
+			},
+		},
+		{
+			name: "connected user keeps options it does not have", member: true, connected: true, have: state(false, false, true),
+			opts:  &model.MembershipOptions{Inherit: &no, Set: &no},
+			warns: []string{`not setting set = false on the membership of the connected user "u" in "g": dbfence may rely on SET ROLE to it`},
+		},
+		{
+			name: "new membership of the connected user", connected: true,
+			opts: &model.MembershipOptions{Inherit: &no, Set: &no},
+			want: []string{`GRANT "g" TO "u" WITH INHERIT FALSE, SET FALSE`},
+		},
+		{
+			name: "unknown membership of the connected user", member: true, connected: true, unreadable: true,
+			opts: &model.MembershipOptions{Inherit: &no, Set: &no},
+			want: []string{`GRANT "g" TO "u"`},
 		},
 	}
 	for _, tt := range tests {

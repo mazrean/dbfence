@@ -370,7 +370,9 @@ func (df *differ) membershipOptions(member, role model.RoleID, want model.Member
 }
 
 // protectCurrentUser drops the attribute changes of r that would lock
-// the connected user out or strip its superuser status or ADMIN OPTION.
+// the connected user out or strip its superuser status, its INHERIT
+// attribute, or the ADMIN OPTION, INHERIT or SET option of its
+// memberships.
 func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Role {
 	if r.Login != nil && !*r.Login {
 		if cur.Login || cur.AttributesUnknown {
@@ -388,11 +390,40 @@ func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Ro
 		df.warn("not removing superuser from the connected user %q: dbfence may rely on it", r.ID)
 		r.Superuser = nil
 	}
+	if r.Inherit != nil && !*r.Inherit {
+		// From PostgreSQL 16 on the attribute also turns off INHERIT on
+		// the existing memberships (see the driver's AlterRole).
+		if _, exists := df.currentRole(r.ID); cur.Inherit || !exists || slices.ContainsFunc(cur.MemberOf, func(m model.RoleID) bool { return cur.MemberOptions[m].Inherit }) {
+			df.warn("not setting NOINHERIT on the connected user %q: it would lose the privileges of its roles, which dbfence may rely on", r.ID)
+		}
+		r.Inherit = nil
+	}
+	// A membership that may exist keeps INHERIT and SET when it has them.
+	u := df.current.Unreadable
+	_, exists := df.currentRole(r.ID)
+	unknown := u.Roles || u.Memberships || !exists
 	opts := maps.Clone(r.MemberOptions)
 	for _, m := range r.MemberOf {
-		if o := opts[m]; o.Admin != nil && !*o.Admin && cur.MemberOptions[m].Admin {
+		o := opts[m]
+		have := cur.MemberOptions[m]
+		if unknown {
+			have = model.MembershipState{Admin: have.Admin, Inherit: true, Set: true}
+		} else if !slices.Contains(cur.MemberOf, m) {
+			have = model.MembershipState{}
+		}
+		if o.Admin != nil && !*o.Admin && cur.MemberOptions[m].Admin {
 			df.warn("not revoking ADMIN OPTION on %q from the connected user %q: dbfence may rely on it", m, r.ID)
 			o.Admin = nil
+		}
+		if o.Inherit != nil && !*o.Inherit && have.Inherit {
+			df.warn("not setting inherit = false on the membership of the connected user %q in %q: dbfence may rely on its privileges", r.ID, m)
+			o.Inherit = nil
+		}
+		if o.Set != nil && !*o.Set && have.Set {
+			df.warn("not setting set = false on the membership of the connected user %q in %q: dbfence may rely on SET ROLE to it", r.ID, m)
+			o.Set = nil
+		}
+		if o != opts[m] {
 			opts[m] = o
 		}
 	}

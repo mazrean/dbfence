@@ -77,7 +77,17 @@ func TestStatementMetadata(t *testing.T) {
 		{
 			name:  "grant membership with admin",
 			stmts: first(d.GrantMembership(r, g, model.MembershipOptions{Admin: &yes, Inherit: &no})),
-			want:  []meta{{kind: plan.KindGrantMembership, target: member.WithOption(true)}},
+			want:  []meta{{kind: plan.KindGrantMembership, target: member.WithOption(true), change: plan.RoleChange{DisablesInherit: true}}},
+		},
+		{
+			name:  "grant membership with set false",
+			stmts: first(d.AlterMembership(r, g, model.MembershipOptions{Inherit: &yes, Set: &no}, model.MembershipState{Set: true})),
+			want:  []meta{{kind: plan.KindGrantMembership, target: member, change: plan.RoleChange{DisablesSet: true}}},
+		},
+		{
+			name:  "alter role: noinherit",
+			stmts: first(d.AlterRole(model.Role{ID: r, Inherit: &no}, model.RoleState{ID: r, Inherit: true}, false)),
+			want:  []meta{{kind: plan.KindAlterRole, target: roleT, change: plan.RoleChange{DisablesInherit: true}}},
 		},
 		{
 			name:  "revoke admin option",

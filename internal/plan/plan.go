@@ -51,7 +51,8 @@ func (s Statement) Kind() Kind { return s.kind }
 // Target returns the object s acts on.
 func (s Statement) Target() Target { return s.target }
 
-// RoleChange returns what s sets on the role it creates or alters.
+// RoleChange returns what s sets on the role it creates or alters, or on
+// the membership it grants.
 func (s Statement) RoleChange() RoleChange { return s.role }
 
 // WithRoleChange returns s with the role attributes it sets.
