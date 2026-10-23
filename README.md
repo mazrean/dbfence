@@ -56,7 +56,7 @@ REVOKE CONNECT, TEMPORARY ON DATABASE "app" FROM PUBLIC;
 -- Plan: 5 to create, 0 to change, 4 to grant, 1 to revoke, 0 to drop (10 statements).
 ```
 
-- Each change starts with `-- [create|update|grant|revoke|drop] <resource>`. Statements that must run in another database are preceded by `-- (on database "x")`.
+- Each change starts with `-- [create|update|grant|revoke|drop] <resource>`. Statements that must run in another database are preceded by `-- (on database "x")`. A PostgreSQL revoke of another grantor's grant runs as that grantor and is preceded by `-- (as role "g")` (or `-- (on database "x", as role "g")`); `apply` runs it in a transaction of its own under `SET LOCAL ROLE`, so a failure leaves the session's role unchanged.
 - Unmanaged roles are reported as `unmanaged user "x"` when they can log in, and `unmanaged role "x"` otherwise.
 - A PostgreSQL revoke that cascades is preceded by `-- CASCADE: privileges on <object> that "<grantor>" granted to ... are revoked too; declared ones are granted again` (or `memberships in "<role>" that ...`). Such explanatory comment lines are only printed; they are not part of the SQL sent to the server.
 - When something is dropped, the summary is followed by `-- DESTRUCTIVE: this plan drops N objects: ...`.
@@ -122,7 +122,9 @@ ignore {                                               # unmanaged objects to ne
 }
 ```
 
-A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:3306)/`. The `mysql://` URL form is not supported. A DSN that cannot be parsed is reported as `invalid DSN` without quoting any part of it, because the driver splits it at the last `/`: a password that contains `/` needs the `/` before the database name, as in `admin:a/b@tcp(db.internal:3306)/`. The network must be `tcp`, `tcp4`, `tcp6` or `unix`.
+A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:3306)/`. The `mysql://` URL form is not supported. A DSN that cannot be parsed is reported as `invalid DSN` without quoting any part of it, because the driver splits it at the last `/`: a password that contains `/` needs the `/` before the database name, as in `admin:a/b@tcp(db.internal:3306)/`. The network must be `tcp`, `tcp4`, `tcp6` or `unix`. `multiStatements` and `allowAllFiles` are always turned off, whatever the DSN says.
+
+Every SQL statement is sent on its own, so the server rejects a query that holds a second statement: PostgreSQL statements use the extended query protocol, and MySQL connections do not allow multiple statements.
 
 ### Blocks
 

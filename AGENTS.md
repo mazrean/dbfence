@@ -45,6 +45,7 @@ tools/lint/          repo linter module
 
 - Wrap errors with `fmt.Errorf("context: %w", err)`; never include secret values in errors or logs.
 - Identifiers are quoted and literals escaped only through the engine Dialect; passwords go into SQL only as `plan.Secret`.
+- One `plan.Statement` is exactly one SQL command, sent alone (`;` never chains statements); to run as another role set `AsRole`, never prepend `SET ROLE`.
 - `diff` and `plan` do no I/O; engine-specific code only in `internal/driver/<engine>` and `internal/password`.
 - Table-driven tests next to code; integration tests skip under `testing.Short()` or without Docker (fail if `CI` is set).
 
