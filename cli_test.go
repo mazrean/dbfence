@@ -23,6 +23,10 @@ func TestRun(t *testing.T) {
 	if err := os.WriteFile(unknownAttr, []byte(strings.Replace(src, "role \"r\" {}", "role \"r\" {\n  bogus = true\n}", 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	escAttr := filepath.Join(dir, "esc.hcl")
+	if err := os.WriteFile(escAttr, []byte(strings.Replace(src, "role \"r\" {}", "role \"r\" {\n  bogus = true # \x1b[2K\n}", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name       string
 		wantOut    string
@@ -39,6 +43,7 @@ func TestRun(t *testing.T) {
 		{name: "apply unknown flag", args: []string{"apply", "--detailed-exitcode"}, wantCode: exitError, wantOut: "", wantErrOut: "unknown flag --detailed-exitcode"},
 		{name: "validate ok", args: []string{"validate", "-f", valid}, wantCode: exitOK, wantOut: "The configuration is valid (postgres: 0 databases, 1 role, 0 schemas, 0 privileges).\n", wantErrOut: ""},
 		{name: "validate unknown attribute renders the diagnostic unindented", args: []string{"validate", "-f", unknownAttr}, wantCode: exitError, wantOut: "", wantErrOut: "dbfence: error: Unsupported argument\n\n  on " + unknownAttr + " line 6, in role \"r\":\n   6:   bogus = true\n\nAn argument named \"bogus\" is not expected here.\n"},
+		{name: "error escapes control characters but keeps lines", args: []string{"validate", "-f", escAttr}, wantCode: exitError, wantOut: "", wantErrOut: "   6:   bogus = true # \\x1b[2K\n"},
 		{name: "validate missing file", args: []string{"validate", "-f", filepath.Join(dir, "none.hcl")}, wantCode: exitError, wantOut: "", wantErrOut: "not found (set -f/--file or DBFENCE_FILE)"},
 	}
 	for _, tt := range tests {
@@ -55,6 +60,9 @@ func TestRun(t *testing.T) {
 			}
 			if tt.wantOut == "" && stdout.Len() > 0 {
 				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			if strings.ContainsAny(stderr.String(), "\x1b\r") {
+				t.Errorf("stderr = %q, contains raw control characters", stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tt.wantErrOut) {
 				t.Errorf("stderr = %q, want substring %q", stderr.String(), tt.wantErrOut)

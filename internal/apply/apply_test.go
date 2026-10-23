@@ -254,3 +254,21 @@ func TestRunWithholdsErrorsOfSecretStatements(t *testing.T) {
 		})
 	}
 }
+
+func TestRunEscapesControlCharacters(t *testing.T) {
+	t.Parallel()
+	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionDrop, Resource: "r", Statements: []plan.Statement{
+		plan.SQL("", "DROP ROLE \"x\x1b[2K\r\n-- ok\"").WithNote("note \x1b[8m"),
+	}}}}
+	var out strings.Builder
+	r := &recorder{}
+	if err := Run(t.Context(), r, p, &out, false); err != nil {
+		t.Fatal(err)
+	}
+	if want := "-- note \\x1b[8m\n[1/1] DROP ROLE \"x\\x1b[2K\\r\\n-- ok\"\n"; out.String() != want {
+		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+	if want := "|DROP ROLE \"x\x1b[2K\r\n-- ok\""; len(r.ran) != 1 || r.ran[0] != want {
+		t.Errorf("ran = %q, want %q", r.ran, want)
+	}
+}

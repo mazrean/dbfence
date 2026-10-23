@@ -125,3 +125,35 @@ func TestNotesAreNotExecuted(t *testing.T) {
 		})
 	}
 }
+
+// Role names read from the server reach plan output and warnings escaped.
+func TestRenderEscapesServerNames(t *testing.T) {
+	t.Parallel()
+	st := &state{desired: &model.Desired{}, roles: map[string]roleAccess{}, user: "dbfence"}
+	p := &plan.Plan{
+		Warnings: st.pruneWarnings(&model.Current{Roles: []model.RoleState{{ID: pg("x\nDROP DATABASE \"prod\"")}}}),
+		Changes: []plan.Change{{Action: plan.ActionDrop, Resource: "safe",
+			Statements: Dialect{}.DropRole(pg("x\x1b[2K\r\n-- No changes."), nil)}},
+	}
+	tests := []struct {
+		write func(*strings.Builder) error
+		name  string
+	}{
+		{name: "Render", write: func(sb *strings.Builder) error { return p.Render(sb, false) }},
+		{name: "WriteWarnings", write: func(sb *strings.Builder) error { return p.WriteWarnings(sb) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var sb strings.Builder
+			if err := tt.write(&sb); err != nil {
+				t.Fatal(err)
+			}
+			for l := range strings.SplitSeq(sb.String(), "\n") {
+				if strings.ContainsAny(l, "\x1b\r") || strings.HasPrefix(l, "DROP DATABASE") || strings.HasPrefix(l, "-- No changes") {
+					t.Errorf("line %q comes from a role name", l)
+				}
+			}
+		})
+	}
+}

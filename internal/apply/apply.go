@@ -51,7 +51,7 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 			// their own lines before the progress line.
 			var sb strings.Builder
 			for _, note := range s.Notes() {
-				fmt.Fprintf(&sb, "-- %s\n", note)
+				fmt.Fprintf(&sb, "-- %s\n", plan.Escape(note))
 			}
 			fmt.Fprintf(&sb, "[%d/%d] %s%s\n", n, total, onDatabase(s.Database, "", " "), s.Display(showSecrets))
 			if _, err := io.WriteString(w, sb.String()); err != nil {

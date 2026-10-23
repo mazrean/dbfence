@@ -111,6 +111,79 @@ func TestWriteWarnings(t *testing.T) {
 	}
 }
 
+// Names read from the server may contain control characters; output
+// shows them escaped so they cannot redraw the terminal or forge lines.
+func TestOutputEscapesControlCharacters(t *testing.T) {
+	t.Parallel()
+	const evil = "x\x1b[2K\r\n-- No changes.\u202e\x07"
+	const shown = `x\x1b[2K\r\n-- No changes.\u202e\a`
+	p := &Plan{
+		Warnings: []string{"role " + evil},
+		Changes: []Change{{Action: ActionDrop, Resource: "role " + evil, Statements: []Statement{
+			SQL("", `DROP ROLE "`+evil+`" PASSWORD `, Secret("'"+evil+"'")).WithNote("note " + evil),
+		}}},
+	}
+	tests := []struct {
+		write func(*strings.Builder) error
+		name  string
+		want  []string
+	}{
+		{
+			name:  "Render",
+			write: func(sb *strings.Builder) error { return p.Render(sb, true) },
+			want: []string{
+				"-- warning: role " + shown + "\n",
+				"-- [drop] role " + shown + "\n",
+				"-- note " + shown + "\n",
+				`DROP ROLE "` + shown + `" PASSWORD '` + shown + "';\n",
+				"-- DESTRUCTIVE: this plan drops 1 object: role " + shown + "\n",
+			},
+		},
+		{
+			name:  "WriteWarnings",
+			write: func(sb *strings.Builder) error { return p.WriteWarnings(sb) },
+			want:  []string{"warning: role " + shown + "\n"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var sb strings.Builder
+			if err := tt.write(&sb); err != nil {
+				t.Fatal(err)
+			}
+			out := sb.String()
+			if strings.ContainsAny(out, "\x1b\r\a\u202e") || strings.Contains(out, "\n-- No changes") {
+				t.Errorf("output contains raw control characters: %q", out)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("output = %q, want substring %q", out, w)
+				}
+			}
+		})
+	}
+}
+
+func TestEscape(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in, want, wantLines string
+	}{
+		{in: "plain \"text\" ü", want: "plain \"text\" ü", wantLines: "plain \"text\" ü"},
+		{in: "a\nb\tc", want: `a\nb\tc`, wantLines: "a\nb\tc"},
+		{in: "\x1b[2K\r\x00\x7f\u0085\u202e", want: `\x1b[2K\r\x00\x7f\u0085\u202e`, wantLines: `\x1b[2K\r\x00\x7f\u0085\u202e`},
+	}
+	for _, tt := range tests {
+		if got := Escape(tt.in); got != tt.want {
+			t.Errorf("Escape(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+		if got := EscapeLines(tt.in); got != tt.wantLines {
+			t.Errorf("EscapeLines(%q) = %q, want %q", tt.in, got, tt.wantLines)
+		}
+	}
+}
+
 func TestCount(t *testing.T) {
 	t.Parallel()
 	for n, want := range map[int]string{0: "0 statements", 1: "1 statement", 2: "2 statements"} {

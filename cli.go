@@ -10,6 +10,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/mazrean/dbfence/internal/app"
+	"github.com/mazrean/dbfence/internal/plan"
 )
 
 // Exit codes.
@@ -147,8 +148,10 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Write
 		return exitChanges
 	default:
 		// Written directly: kong's Errorf indents every line after the
-		// first, which garbles multi-line HCL diagnostics.
-		_, _ = fmt.Fprintf(stderr, "dbfence: error: %v\n", err)
+		// first, which garbles multi-line HCL diagnostics. Server errors
+		// and diagnostics may quote names or source text with control
+		// characters, which are escaped.
+		_, _ = fmt.Fprintf(stderr, "dbfence: error: %s\n", plan.EscapeLines(err.Error()))
 		return exitError
 	}
 }

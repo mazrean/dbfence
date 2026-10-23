@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Secret is a SQL fragment that must be redacted in output.
@@ -46,8 +48,9 @@ func (s Statement) Notes() []string { return slices.Clone(s.notes) }
 // SQL returns the executable text.
 func (s Statement) SQL() string { return s.render(true) }
 
-// Display returns the text with secrets redacted unless showSecrets is set.
-func (s Statement) Display(showSecrets bool) string { return s.render(showSecrets) }
+// Display returns the text for output: secrets are redacted unless
+// showSecrets is set, and control characters are escaped (see Escape).
+func (s Statement) Display(showSecrets bool) string { return Escape(s.render(showSecrets)) }
 
 func (s Statement) render(showSecrets bool) string {
 	var sb strings.Builder
@@ -114,7 +117,7 @@ func (p *Plan) Statements() []Statement {
 func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 	var sb strings.Builder
 	for _, warn := range p.Warnings {
-		fmt.Fprintf(&sb, "-- warning: %s\n", warn)
+		fmt.Fprintf(&sb, "-- warning: %s\n", Escape(warn))
 	}
 	if len(p.Warnings) > 0 {
 		sb.WriteString("\n")
@@ -130,13 +133,13 @@ func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 			Count(len(p.Warnings), "warning"))
 	}
 	for _, c := range p.Changes {
-		fmt.Fprintf(&sb, "-- [%s] %s\n", c.Action, c.Resource)
+		fmt.Fprintf(&sb, "-- [%s] %s\n", c.Action, Escape(c.Resource))
 		for _, s := range c.Statements {
 			if s.Database != "" {
 				fmt.Fprintf(&sb, "-- (on database %q)\n", s.Database)
 			}
 			for _, n := range s.notes {
-				fmt.Fprintf(&sb, "-- %s\n", n)
+				fmt.Fprintf(&sb, "-- %s\n", Escape(n))
 			}
 			sb.WriteString(s.Display(showSecrets))
 			sb.WriteString(";\n")
@@ -157,7 +160,7 @@ func (p *Plan) summary(sb *strings.Builder) {
 	for _, c := range p.Changes {
 		counts[c.Action]++
 		if c.Action == ActionDrop {
-			drops = append(drops, c.Resource)
+			drops = append(drops, Escape(c.Resource))
 		}
 	}
 	parts := []string{fmt.Sprintf("%d to create", counts[ActionCreate]), fmt.Sprintf("%d to change", counts[ActionUpdate])}
@@ -178,7 +181,7 @@ func (p *Plan) summary(sb *strings.Builder) {
 func (p *Plan) WriteWarnings(w io.Writer) error {
 	var sb strings.Builder
 	for _, warn := range p.Warnings {
-		fmt.Fprintf(&sb, "warning: %s\n", warn)
+		fmt.Fprintf(&sb, "warning: %s\n", Escape(warn))
 	}
 	_, err := io.WriteString(w, sb.String())
 	return err
@@ -191,4 +194,36 @@ func Count(n int, noun string) string {
 		return "1 " + noun
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// Escape returns s with control characters, including line breaks, and
+// bidirectional formatting characters written as Go escapes (\x1b, \n,
+// \u202e). Names read from the server may contain them; escaped, they
+// cannot redraw the terminal or forge lines of output.
+func Escape(s string) string { return escape(s, false) }
+
+// EscapeLines is Escape that keeps line breaks and tabs, for multi-line
+// messages such as configuration diagnostics.
+func EscapeLines(s string) string { return escape(s, true) }
+
+func escape(s string, keepLines bool) string {
+	unsafe := func(r rune) bool {
+		if keepLines && (r == '\n' || r == '\t') {
+			return false
+		}
+		return unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r)
+	}
+	if !strings.ContainsFunc(s, unsafe) {
+		return s
+	}
+	var sb strings.Builder
+	for _, r := range s {
+		if !unsafe(r) {
+			sb.WriteRune(r)
+			continue
+		}
+		q := strconv.QuoteRune(r)
+		sb.WriteString(q[1 : len(q)-1])
+	}
+	return sb.String()
 }

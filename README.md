@@ -62,6 +62,7 @@ REVOKE CONNECT, TEMPORARY ON DATABASE "app" FROM PUBLIC;
 - When something is dropped, the summary is followed by `-- DESTRUCTIVE: this plan drops N objects: ...`.
 - An empty plan prints `-- No changes. The server matches the configuration.`, or, when there are warnings, `-- No changes to apply. See the N warnings above ...`.
 - Warnings are also written to stderr as `warning: ...`, so they stay visible when stdout is redirected.
+- Control characters in names read from the server, such as escape sequences or line breaks, are printed as Go escapes (`\x1b`, `\n`) in the plan, warnings, `apply` progress and errors. The SQL sent to the server is unchanged.
 
 `apply` prints the same plan, asks for `yes` (anything else, or a closed stdin, cancels with exit 1), and prints `[k/N] <statement>` for each statement (its comment lines first). Statements run one by one, without a transaction, and apply stops at the first error. The error says how many statements were applied; run `plan` again to see what is left. An interrupted apply stops before the next statement, and the error ends with the cause, such as `interrupt signal received`.
 
