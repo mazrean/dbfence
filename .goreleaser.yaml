@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: dbfence
+    main: .
+    binary: dbfence
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # The version comes from the build info stamped by the Go toolchain
+    # (see version.go), so no -X ldflag is needed.
+    ldflags:
+      - -s -w
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+homebrew_casks:
+  - name: dbfence
+    repository:
+      owner: mazrean
+      name: homebrew-tap
+    homepage: https://github.com/mazrean/dbfence
+    description: Declarative management of databases, roles, schemas and privileges for MySQL and PostgreSQL.
+    license: MIT
