@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -339,5 +340,68 @@ func TestCreateRolePassword(t *testing.T) {
 		if got := stmts[0].SQL(); !strings.HasPrefix(got, tt.wantPrefix) || (tt.password != "" && strings.Contains(got, tt.password)) {
 			t.Errorf("%s: SQL = %s", tt.name, got)
 		}
+	}
+}
+
+func TestDedupLines(t *testing.T) {
+	t.Parallel()
+	base := errors.New("failed:\n\th: timeout\n\th: timeout")
+	tests := []struct {
+		err  error
+		name string
+		want string
+	}{
+		{name: "single line", err: errors.New("refused"), want: "refused"},
+		{name: "repeated attempt", err: base, want: "failed:\n\th: timeout"},
+		{
+			name: "fallback attempt with no time left",
+			err:  errors.New("failed:\n\th:1 (h): tls error: timeout: context deadline exceeded\n\th:1 (h): dial error: timeout: context deadline exceeded"),
+			want: "failed:\n\th:1 (h): tls error: timeout: context deadline exceeded",
+		},
+		{
+			name: "timeouts of different hosts",
+			err:  errors.New("failed:\n\ta:1 (a): dial error: timeout: context deadline exceeded\n\tb:1 (b): dial error: timeout: context deadline exceeded"),
+			want: "failed:\n\ta:1 (a): dial error: timeout: context deadline exceeded\n\tb:1 (b): dial error: timeout: context deadline exceeded",
+		},
+		{name: "distinct attempts", err: errors.New("failed:\n\ta: x\n\tb: y"), want: "failed:\n\ta: x\n\tb: y"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := dedupLines(tt.err)
+			if got.Error() != tt.want {
+				t.Errorf("dedupLines() = %q, want %q", got, tt.want)
+			}
+			if !errors.Is(got, tt.err) {
+				t.Errorf("dedupLines() does not wrap %v", tt.err)
+			}
+		})
+	}
+}
+
+// TestOpenTimeoutReportedOnce checks that a server that never answers
+// is reported once, although sslmode=prefer makes two attempts.
+func TestOpenTimeoutReportedOnce(t *testing.T) {
+	t.Parallel()
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			c, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+	_, err = Open(t.Context(), "postgres://u:pw@"+ln.Addr().String()+"/postgres?sslmode=prefer&connect_timeout=1")
+	if err == nil {
+		t.Fatal("Open() succeeded")
+	}
+	if n := strings.Count(err.Error(), ln.Addr().String()+" ("); n != 1 {
+		t.Errorf("Open() error names the host %d times: %v", n, err)
 	}
 }

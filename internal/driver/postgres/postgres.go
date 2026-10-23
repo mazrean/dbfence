@@ -53,9 +53,42 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 	d.db = stdlib.OpenDB(*cfg)
 	if err := d.db.PingContext(ctx); err != nil {
 		_ = d.db.Close()
-		return nil, fmt.Errorf("connect to postgres: %w", err)
+		return nil, fmt.Errorf("connect to postgres: %w", dedupLines(err))
 	}
 	return d, nil
+}
+
+// dedupLinesError drops repeated timeouts from the text of a connect
+// error. pgx lists one line per attempt, and with sslmode=prefer the TLS
+// and plain attempts to a host share one connect_timeout: once the first
+// times out, the second fails at once with the same timeout.
+type dedupLinesError struct{ err error }
+
+func (e *dedupLinesError) Error() string {
+	const timeout = "context deadline exceeded"
+	var out, timedOut []string
+	for l := range strings.SplitSeq(e.err.Error(), "\n") {
+		host, _, _ := strings.Cut(l, "): ")
+		switch {
+		case slices.Contains(out, l):
+			continue
+		case strings.HasSuffix(l, timeout) && slices.Contains(timedOut, host):
+			continue
+		case strings.HasSuffix(l, timeout):
+			timedOut = append(timedOut, host)
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
+func (e *dedupLinesError) Unwrap() error { return e.err }
+
+func dedupLines(err error) error {
+	if !strings.Contains(err.Error(), "\n") {
+		return err
+	}
+	return &dedupLinesError{err: err}
 }
 
 // noticeLog collects the server notices of the running statement.
@@ -151,7 +184,7 @@ func (d *Driver) conn(ctx context.Context, database string) (*sql.DB, error) {
 	c.SetMaxOpenConns(1)
 	if err := c.PingContext(ctx); err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("connect to database %q: %w", database, err)
+		return nil, fmt.Errorf("connect to database %q: %w", database, dedupLines(err))
 	}
 	d.conns[database] = c
 	return c, nil
