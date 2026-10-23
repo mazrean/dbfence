@@ -29,7 +29,7 @@ dbfence apply    -f dbfence.hcl          # print the SQL, ask for "yes", then ex
 | `-f`, `--file` (`$DBFENCE_FILE`) | all | A configuration file, or a directory of `*.hcl` files (default `dbfence.hcl`; an empty value also means the default) |
 | `--prune` | plan, apply | Drop databases, schemas and roles that are not declared (without it they only produce warnings) |
 | `--force-password` | plan, apply | Set declared passwords even if they cannot be verified or already match. The plan then always contains a password statement for every role that declares one |
-| `--show-secrets` | plan, apply | Print passwords instead of `'<redacted>'`, and turn off the output redaction of known secrets (see [Output and exit codes](#output-and-exit-codes)) |
+| `--show-secrets` | plan, apply | Turn off all redaction: print passwords instead of `'<redacted>'`, and print known secrets in every message on stdout and stderr, errors included (see [Output and exit codes](#output-and-exit-codes)) |
 | `--detailed-exitcode` | plan | Exit with 2 when there are changes. Warnings alone exit with 0 |
 | `--auto-approve` | apply | Skip the confirmation prompt |
 | `--version` | — | Print the version |

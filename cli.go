@@ -51,7 +51,7 @@ func (f configFlags) path() (string, error) {
 type diffFlags struct {
 	Prune         bool `help:"Drop databases, schemas and roles that are not declared."`
 	ForcePassword bool `help:"Set declared passwords even if they cannot be verified or already match."`
-	ShowSecrets   bool `help:"Print passwords in SQL output instead of '<redacted>'."`
+	ShowSecrets   bool `help:"Turn off all redaction: print passwords in SQL instead of '<redacted>', and known secrets in every message on stdout and stderr."`
 }
 
 func (f diffFlags) options(file configFlags) (app.Options, error) {
@@ -146,7 +146,8 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr *secret.
 		parser.FatalIfErrorf(err)
 		return exitError
 	}
-	// --show-secrets prints passwords, so the sink must not redact them.
+	// --show-secrets turns off all redaction: the SQL prints passwords and
+	// the sink no longer redacts known secrets from any output.
 	show := c.Plan.ShowSecrets || c.Apply.ShowSecrets
 	stdout.ShowSecrets(show)
 	stderr.ShowSecrets(show)
