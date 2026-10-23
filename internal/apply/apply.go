@@ -54,7 +54,7 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 				return err
 			}
 			if err := ex.Exec(ctx, s.Database, s.SQL()); err != nil {
-				return failure(ctx, c, s, n, total, err)
+				return failure(ctx, c, s, n, total, err, showSecrets)
 			}
 		}
 	}
@@ -62,10 +62,14 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 }
 
 // failure describes the failed statement n of total. Server errors may
-// quote the statement, so the error text is redacted and not wrapped.
-func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int, err error) error {
+// quote the statement, so the error text is not wrapped, and for a
+// statement with a secret it is withheld from the first quote on.
+func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int, err error, showSecrets bool) error {
 	at := fmt.Sprintf("statement %d/%d%s", n, total, onDatabase(s.Database, " ", ""))
-	msg := s.Redact(err.Error())
+	msg := err.Error()
+	if s.HasSecret() && !showSecrets {
+		msg = withholdQuoted(msg)
+	}
 	if ctx.Err() != nil || !isRejected(err) {
 		// The server may still complete the statement: drivers cancel by
 		// closing the connection or by sending a cancel request, and a
@@ -88,6 +92,32 @@ func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int,
 	}
 	return fmt.Errorf("%s %s: %s failed: %s (%d of %s applied; run plan to see the remaining changes)",
 		c.Action, c.Resource, at, msg, n-1, plan.Count(total, "statement"))
+}
+
+// withheldNote ends a message whose quoted parts were withheld.
+const withheldNote = " [the rest of the message is withheld because the statement contains a password; rerun with --show-secrets to see it]"
+
+// withholdQuoted cuts each line of a server message at its first single or
+// double quote. Servers quote parts of the failed statement in their
+// messages (MySQL: near '...'; PostgreSQL: at or near "..."), escaped,
+// unescaped or truncated in ways that matching the secret against the
+// text cannot follow. Cutting at the first quote does not depend on the
+// secret or its quoting, so nothing quoted can get through, while
+// messages without quotes, such as password policy rejections, are kept.
+func withholdQuoted(msg string) string {
+	lines := strings.Split(msg, "\n")
+	withheld := false
+	for i, l := range lines {
+		if j := strings.IndexAny(l, `'"`); j >= 0 {
+			lines[i] = l[:j] + "<withheld>"
+			withheld = true
+		}
+	}
+	out := strings.Join(lines, "\n")
+	if withheld {
+		out += withheldNote
+	}
+	return out
 }
 
 // splitComments splits the leading "--" comment lines off text. comments

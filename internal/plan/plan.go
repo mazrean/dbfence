@@ -54,114 +54,12 @@ func (s Statement) render(showSecrets bool) string {
 	return sb.String()
 }
 
-// minRedactPrefix is the shortest truncated secret prefix that Redact
-// removes; shorter fragments are too likely to match unrelated text.
-const minRedactPrefix = 4
-
-// Redact removes the secrets of s from text, so that server error messages
-// quoting the statement do not leak them. Only literal contexts are
-// considered: a secret, or a prefix of at least minRedactPrefix bytes of
-// it, that starts right after a single quote and ends at a single quote or
-// at the end of text. This covers the full literal, its unescaped value
-// inside quotes, and fragments truncated by the server (MySQL cuts the
-// "near '...'" part of syntax errors at 80 characters), without rewriting
-// unrelated text that merely contains a short password.
-func (s Statement) Redact(text string) string {
-	var values []string
-	for _, p := range s.parts {
-		if sec, ok := p.(Secret); ok {
-			values = append(values, secretValues(string(sec))...)
-		}
-	}
-	return redactValues(text, values)
-}
-
-// secretValues returns the forms in which the value of the literal sec may
-// be echoed between single quotes: escaped as written and unescaped. An
-// escape string introducer (PostgreSQL E'...') is not part of the value.
-func secretValues(sec string) []string {
-	if len(sec) > 1 && (sec[0] == 'E' || sec[0] == 'e') && sec[1] == '\'' {
-		sec = sec[1:]
-	}
-	inner := strings.TrimSuffix(strings.TrimPrefix(sec, "'"), "'")
-	if inner == "" {
-		return nil
-	}
-	quotes := strings.ReplaceAll(inner, "''", "'")
-	backslash := strings.NewReplacer(`\\`, `\`, `\'`, "'").Replace(quotes)
-	out := []string{inner}
-	for _, v := range []string{quotes, backslash} {
-		if !slices.Contains(out, v) {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-// redactValues replaces each literal context that holds one of values,
-// or a prefix of it of at least minRedactPrefix bytes: text that starts
-// after a single quote and ends at a single quote or at the end of text.
-// Matches are collected at every quote, including quotes inside an
-// earlier match, and their union is redacted. A secret that itself starts
-// with quotes then cannot hide behind a shorter match that begins one
-// quote earlier, and a shorter form (such as the escaped one, which stops
-// at an inner quote) cannot leave the rest of a longer one behind.
-func redactValues(text string, values []string) string {
-	const marker = "<redacted>"
-	if len(values) == 0 {
-		return text
-	}
-	covered := make([]bool, len(text))
-	found := false
-	for i := 0; i < len(text); i++ {
-		if text[i] != '\'' {
-			continue
-		}
-		start := i + 1
-		k := 0
-		for _, v := range values {
-			k = max(k, literalMatchLen(text[start:], v))
-		}
-		for j := start; j < start+k; j++ {
-			covered[j] = true
-		}
-		found = found || k > 0
-	}
-	if !found {
-		return text
-	}
-	var sb strings.Builder
-	for i := 0; i < len(text); i++ {
-		if !covered[i] {
-			sb.WriteByte(text[i])
-			continue
-		}
-		sb.WriteString(marker)
-		for i+1 < len(text) && covered[i+1] {
-			i++
-		}
-	}
-	return sb.String()
-}
-
-// literalMatchLen returns the length of the longest prefix of rest that is
-// v or a prefix of v of at least minRedactPrefix bytes and that is followed
-// by a single quote or the end of rest, or 0 when there is none.
-func literalMatchLen(rest, v string) int {
-	n := min(len(rest), len(v))
-	k := 0
-	for k < n && rest[k] == v[k] {
-		k++
-	}
-	for ; k > 0; k-- {
-		if k < len(v) && k < minRedactPrefix {
-			return 0
-		}
-		if k == len(rest) || rest[k] == '\'' {
-			return k
-		}
-	}
-	return 0
+// HasSecret reports whether s contains a Secret fragment.
+func (s Statement) HasSecret() bool {
+	return slices.ContainsFunc(s.parts, func(p any) bool {
+		_, ok := p.(Secret)
+		return ok
+	})
 }
 
 // Action is the kind of a change.

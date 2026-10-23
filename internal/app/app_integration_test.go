@@ -628,11 +628,11 @@ func TestMySQLErrorsDoNotLeakSecrets(t *testing.T) {
 	}{
 		{
 			name: "truncated near fragment", prefix: "CREATE USER 'dbf_leak'@'%' IDENTIFIED WITH auth-pam BY ",
-			password: long, leak: []string{long[:8]}, wantMsg: "BY '<redacted>' at line 1",
+			password: long, leak: []string{long[:4]}, wantMsg: "near <withheld>",
 		},
 		{
 			name: "short password", prefix: "CREATE USER 'dbf_leak'@'x.example.com' IDENTIFIED WITH auth-pam BY ",
-			password: "x", wantMsg: "near '-pam BY '<redacted>'' at line 1",
+			password: "x'y", leak: []string{"x'y", "x''y", "-pam"}, wantMsg: "near <withheld>",
 		},
 	}
 	for _, tt := range tests {

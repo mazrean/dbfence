@@ -158,3 +158,93 @@ func TestRunPrintsCommentsBeforeTheStatement(t *testing.T) {
 		t.Errorf("output =\n%s\nwant\n%s", out.String(), want)
 	}
 }
+
+func TestWithholdQuoted(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("SECRET0123456789", 6)
+	tests := []struct {
+		name, msg, want string
+		leak            []string
+	}{
+		{
+			name: "mysql near fragment",
+			msg:  "Error 1064 (42000): You have an error in your SQL syntax; near 'p''w'' and 'p'w'",
+			want: "Error 1064 (42000): You have an error in your SQL syntax; near <withheld>" + withheldNote,
+			leak: []string{"p''w", "p'w"},
+		},
+		{
+			name: "inner quote after four characters",
+			msg:  "Error 1064 (42000): You have an error in your SQL syntax; near 'abcd'efgh' at line 1",
+			leak: []string{"abcd", "efgh"},
+		},
+		{
+			name: "secret starting with quotes",
+			msg:  "Error 1064 (42000): You have an error in your SQL syntax; near ''''''abcdef'' at line 1",
+			leak: []string{"abcdef"},
+		},
+		{
+			name: "postgres escape string",
+			msg:  `ERROR: syntax error at or near "E'back\\slash'" (SQLSTATE 42601)`,
+			want: "ERROR: syntax error at or near <withheld>" + withheldNote,
+			leak: []string{"back", "slash", "42601"},
+		},
+		{
+			name: "truncated at 80 characters",
+			msg:  "Error 1064 (42000): You have an error in your SQL syntax; near '-pam BY '" + long[:70] + "' at line 1",
+			leak: []string{"SECR"},
+		},
+		{name: "truncated at the end of the text", msg: "failed near '" + long[:10], leak: []string{"SECR"}},
+		{name: "backslash-escaped value", msg: `near 'a\'b'c' x`, leak: []string{"a\\'b", "c' x"}},
+		{
+			name: "detail lines are cut separately",
+			msg:  "ERROR: password is too short (SQLSTATE 22023)\nDETAIL: near 'hunter2'",
+			want: "ERROR: password is too short (SQLSTATE 22023)\nDETAIL: near <withheld>" + withheldNote,
+			leak: []string{"hunter2"},
+		},
+		{
+			name: "mysql policy rejection is kept",
+			msg:  "Error 1819 (HY000): Your password does not satisfy the current policy requirements",
+			want: "Error 1819 (HY000): Your password does not satisfy the current policy requirements",
+		},
+		{name: "postgres policy rejection is kept", msg: "ERROR: password is too short (SQLSTATE 22023)", want: "ERROR: password is too short (SQLSTATE 22023)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := withholdQuoted(tt.msg)
+			if tt.want != "" && got != tt.want {
+				t.Errorf("withholdQuoted() =\n%s\nwant\n%s", got, tt.want)
+			}
+			for _, l := range tt.leak {
+				if strings.Contains(strings.TrimSuffix(got, withheldNote), l) {
+					t.Errorf("withholdQuoted() leaked %q: %s", l, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRunWithholdsErrorsOfSecretStatements(t *testing.T) {
+	t.Parallel()
+	echo := Rejected(errors.New(`Error 1064 (42000): You have an error in your SQL syntax; near 'hunter2' at line 1`))
+	tests := []struct {
+		name        string
+		want, deny  string
+		failAt      int
+		showSecrets bool
+	}{
+		{name: "secret statement", failAt: 1, want: "near <withheld>", deny: "hunter2"},
+		{name: "secret statement with --show-secrets", failAt: 1, showSecrets: true, want: "near 'hunter2'"},
+		{name: "statement without a secret is shown in full", failAt: 2, want: "near 'hunter2'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &recorder{failAt: tt.failAt, err: echo}
+			err := Run(t.Context(), r, testPlan(), io.Discard, tt.showSecrets)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || (tt.deny != "" && strings.Contains(err.Error(), tt.deny)) {
+				t.Errorf("err = %v, want %q without %q", err, tt.want, tt.deny)
+			}
+		})
+	}
+}
