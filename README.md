@@ -207,8 +207,12 @@ Each secret is fetched once per run. Secret payloads and `base64decode` results 
 
 dbfence compares a declared password with the stored verifier without changing it:
 
-- **PostgreSQL**: `SCRAM-SHA-256`, read from `pg_authid`. Reading it needs superuser. Passwords are sent as SCRAM-SHA-256 verifiers computed by dbfence, so the plaintext never reaches the server or its logs. An `md5` verifier never matches, so it is replaced by SCRAM.
+- **PostgreSQL**: `SCRAM-SHA-256` and `md5`, read from `pg_authid`. Reading them needs superuser. Under `password_encryption = scram-sha-256` an `md5` verifier counts as a mismatch, so setting the password again upgrades it to SCRAM. A password that looks like a verifier (`md5` + 32 characters, or `SCRAM-SHA-256$...`) is an error, because PostgreSQL would store it as is.
 - **MySQL**: `caching_sha2_password`, `mysql_native_password` and `sha256_password`, read from `mysql.user`. Other plugins cannot be compared and always produce a warning.
+
+Passwords are sent in plaintext (`PASSWORD '...'`, `IDENTIFIED BY '...'`), so that the server hashes them with its own settings (`password_encryption`, `scram_iterations`) and password policies apply (`passwordcheck` / `credcheck`, MySQL `validate_password`). As a consequence, PostgreSQL statement logging (`log_statement = ddl` or `all`, and `log_min_error_statement` for failed statements) records the password; MySQL rewrites passwords in its logs. Disable such logging for the dbfence session or role if that matters.
+
+When a statement with a password fails, the server's message is shown up to its first quote on each line, because servers quote parts of the statement in their messages. Policy rejections such as `Your password does not satisfy the current policy requirements` contain no quotes and are shown in full. `--show-secrets` shows the whole message.
 
 If the verifier can't be read (for example on RDS or Cloud SQL, where the admin is not a superuser), plan prints one warning listing the roles whose passwords are not compared. `--force-password` sets the password anyway.
 
@@ -243,6 +247,7 @@ Each fallback is reported as a warning in `plan`. Statements that are re-asserte
 
 - MySQL: database grants written by earlier versions without escaping (`GRANT ... ON my_app.*`, a wildcard) are revoked and granted again escaped (`my\_app`). The plan shows them under `database pattern "my_app"`.
 - PostgreSQL role and user names equal to `public` in any case are reserved, because grant blocks read them as PUBLIC.
+- PostgreSQL passwords are sent in plaintext and hashed by the server again, so server-side password policies apply. Statement logging can record them (see Passwords).
 - MySQL `role = "public"` without a host is an error; write `"public@%"`.
 - PostgreSQL's default privileges of PUBLIC are now read. Where a grant block manages PUBLIC, undeclared defaults are revoked; elsewhere the only new output is the "keeps ... through PUBLIC" warning when a role loses a privilege PUBLIC still holds.
 
