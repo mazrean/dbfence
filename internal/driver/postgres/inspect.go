@@ -173,7 +173,7 @@ func (st *state) ownerWarnings(cur *model.Current) []string {
 func (st *state) pruneWarnings(cur *model.Current) []string {
 	var ignore []*regexp.Regexp
 	for _, p := range st.desired.Ignore.Roles {
-		if re, err := regexp.Compile("^(?:" + p + ")$"); err == nil {
+		if re, err := model.CompileIgnorePattern(p); err == nil {
 			ignore = append(ignore, re)
 		}
 	}

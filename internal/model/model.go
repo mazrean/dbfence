@@ -5,6 +5,7 @@ package model
 import (
 	"cmp"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -161,11 +162,23 @@ type PrivilegeKey struct {
 }
 
 // Ignore lists regular expressions of unmanaged objects that must not
-// be reported or pruned.
+// be reported or pruned. Patterns match the whole name (see
+// CompileIgnorePattern).
 type Ignore struct {
 	Roles     []string
 	Databases []string
 	Schemas   []string
+}
+
+// CompileIgnorePattern compiles an ignore pattern anchored to match the
+// whole name. Config validation and diff both use it, so a pattern that
+// validates is matched exactly as written.
+func CompileIgnorePattern(p string) (*regexp.Regexp, error) {
+	re, err := regexp.Compile("^(?:" + p + ")$")
+	if err != nil {
+		return nil, fmt.Errorf("compile ignore pattern: %w", err)
+	}
+	return re, nil
 }
 
 // Unreadable records facets of the current state that the connected

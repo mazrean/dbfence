@@ -648,7 +648,7 @@ func newIgnorer(ig model.Ignore) (ignorer, error) {
 	compile := func(ps []string) ([]*regexp.Regexp, error) {
 		out := make([]*regexp.Regexp, 0, len(ps))
 		for _, p := range ps {
-			re, err := regexp.Compile("^(?:" + p + ")$")
+			re, err := model.CompileIgnorePattern(p)
 			if err != nil {
 				return nil, fmt.Errorf("ignore pattern %q: %w", p, err)
 			}

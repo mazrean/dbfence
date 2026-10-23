@@ -39,3 +39,32 @@ func TestSortRoleIDs(t *testing.T) {
 		t.Errorf("SortRoleIDs (-want +got):\n%s", d)
 	}
 }
+
+func TestCompileIgnorePattern(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pattern, name string
+		match, err    bool
+	}{
+		{pattern: "staging", name: "staging", match: true},
+		{pattern: "staging", name: "app.staging"},
+		{pattern: `app\.staging`, name: "app.staging", match: true},
+		{pattern: `app\.stag`, name: "app.staging"},
+		{pattern: "a|b", name: "ab"},
+		{pattern: "a|b", name: "b", match: true},
+		{pattern: "(", err: true},
+		{pattern: `\Qrds_`, err: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pattern+"/"+tt.name, func(t *testing.T) {
+			t.Parallel()
+			re, err := model.CompileIgnorePattern(tt.pattern)
+			if (err != nil) != tt.err {
+				t.Fatalf("err = %v, want error %v", err, tt.err)
+			}
+			if err == nil && re.MatchString(tt.name) != tt.match {
+				t.Errorf("match %q = %v, want %v", tt.name, !tt.match, tt.match)
+			}
+		})
+	}
+}

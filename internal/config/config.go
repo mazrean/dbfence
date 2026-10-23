@@ -693,8 +693,8 @@ func decodeIgnore(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine, ig *m
 		name string
 	}{{&ig.Roles, blk.Roles, "roles"}, {&ig.Databases, blk.Databases, "databases"}, {&ig.Schemas, blk.Schemas, "schemas"}} {
 		for _, p := range derefSlice(l.src) {
-			// Anchored exactly like diff compiles ignore patterns.
-			if _, err := regexp.Compile("^(?:" + p + ")$"); err != nil {
+			// Compiled exactly like diff compiles ignore patterns.
+			if _, err := model.CompileIgnorePattern(p); err != nil {
 				diags = append(diags, errAt(attrRange(attrs, l.name, b.DefRange), "Invalid ignore pattern", fmt.Sprintf("%s pattern %q: %v", l.name, p, err)))
 			}
 		}
