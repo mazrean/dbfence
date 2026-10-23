@@ -269,6 +269,84 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("privileges from other grantors converge", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE g_owner", "CREATE ROLE g_ro", "CREATE ROLE g_app", "CREATE ROLE g_x", "CREATE DATABASE g_db OWNER g_owner")
+		s.exec(t, `\c g_db`, "CREATE SCHEMA api AUTHORIZATION g_owner")
+		d := s.open(t, "postgres")
+		schema := model.Object{Type: model.ObjectSchema, Database: "g_db", Schema: "api"}
+		db := model.Object{Type: model.ObjectDatabase, Database: "g_db"}
+		base := func(privs ...model.Privilege) *model.Desired {
+			return &model.Desired{
+				Engine:     model.EnginePostgres,
+				Roles:      []model.Role{{ID: pg("g_owner")}, {ID: pg("g_ro")}, {ID: pg("g_app")}, {ID: pg("g_x")}},
+				Databases:  []model.Database{{Name: "g_db", Owner: "g_owner"}},
+				Schemas:    []model.Schema{{Database: "g_db", Name: "api", Owner: "g_owner"}},
+				Privileges: privs,
+				Ignore:     model.Ignore{Roles: []string{".*"}},
+			}
+		}
+		roUsage := model.Privilege{Grantee: pg("g_ro"), Object: schema, Name: "USAGE", GrantOption: true}
+		converge(t, d, base(roUsage), diff.Options{})
+
+		// L19: a grant made by g_ro is revoked as g_ro.
+		s.exec(t, `\c g_db`, "SET ROLE g_ro; GRANT USAGE ON SCHEMA api TO g_app; RESET ROLE")
+		converge(t, d, base(roUsage), diff.Options{})
+
+		// L20: dropping the grant option of g_ro cascades to g_app and
+		// g_x; the declared grant of g_app is granted again.
+		appUsage := model.Privilege{Grantee: pg("g_app"), Object: schema, Name: "USAGE"}
+		s.exec(t, `\c g_db`, "SET ROLE g_ro; GRANT USAGE ON SCHEMA api TO g_app WITH GRANT OPTION; RESET ROLE",
+			"SET ROLE g_app; GRANT USAGE ON SCHEMA api TO g_x; RESET ROLE")
+		noOption := roUsage
+		noOption.GrantOption = false
+		out := converge(t, d, base(noOption, appUsage), diff.Options{})
+		if !strings.Contains(out, "CASCADE") {
+			t.Errorf("plan does not say CASCADE:\n%s", out)
+		}
+		// Removing the grant entirely with dependents also converges.
+		s.exec(t, `\c g_db`, "GRANT USAGE ON SCHEMA api TO g_ro WITH GRANT OPTION",
+			"SET ROLE g_ro; GRANT USAGE ON SCHEMA api TO g_x; RESET ROLE")
+		converge(t, d, base(appUsage), diff.Options{})
+
+		// C64: database privileges, and the grant option held through a
+		// second grantor.
+		s.exec(t, "GRANT CONNECT ON DATABASE g_db TO g_ro WITH GRANT OPTION",
+			"SET ROLE g_ro; GRANT CONNECT ON DATABASE g_db TO g_app WITH GRANT OPTION; RESET ROLE",
+			"GRANT CONNECT ON DATABASE g_db TO g_app")
+		connect := model.Privilege{Grantee: pg("g_ro"), Object: db, Name: "CONNECT"}
+		appConnect := model.Privilege{Grantee: pg("g_app"), Object: db, Name: "CONNECT"}
+		converge(t, d, base(appUsage, connect, appConnect), diff.Options{})
+		converge(t, d, base(appUsage), diff.Options{})
+		if got := s.queryStrings(t, "SELECT coalesce(datacl::text, '') FROM pg_database WHERE datname = 'g_db'"); strings.Contains(got[0], "g_app") || strings.Contains(got[0], "g_ro") {
+			t.Errorf("datacl = %v", got)
+		}
+	})
+
+	t.Run("memberships from other grantors converge", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE m_mgr CREATEROLE", "CREATE ROLE m_grp", "CREATE ROLE m_u1", "CREATE ROLE m_u2",
+			"GRANT m_grp TO m_mgr WITH ADMIN OPTION",
+			"SET ROLE m_mgr; GRANT m_grp TO m_u1; RESET ROLE",
+			"GRANT m_grp TO m_u1 WITH ADMIN OPTION",
+			"SET ROLE m_u1; GRANT m_grp TO m_u2; RESET ROLE")
+		d := s.open(t, "postgres")
+		desired := &model.Desired{
+			Engine: model.EnginePostgres,
+			Roles: []model.Role{
+				{ID: pg("m_grp")},
+				{ID: pg("m_u1"), MemberOf: []model.RoleID{}},
+				{ID: pg("m_u2"), MemberOf: []model.RoleID{pg("m_grp")}},
+			},
+			Ignore: model.Ignore{Roles: []string{".*"}},
+		}
+		out := converge(t, d, desired, diff.Options{})
+		if !strings.Contains(out, `GRANTED BY "m_mgr"`) || !strings.Contains(out, "CASCADE") {
+			t.Errorf("plan:\n%s", out)
+		}
+		if got := s.queryStrings(t, "SELECT m.rolname FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member WHERE am.roleid = 'm_grp'::regrole ORDER BY 1"); strings.Join(got, ",") != "m_mgr,m_u2" {
+			t.Errorf("members of m_grp = %v", got)
+		}
+	})
+
 	t.Run("exec errors carry detail", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE detail_owner", "CREATE DATABASE detail_db OWNER detail_owner")
 		d := s.open(t, "postgres")
