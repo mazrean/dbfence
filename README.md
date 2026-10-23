@@ -122,7 +122,7 @@ ignore {                                               # unmanaged objects to ne
 }
 ```
 
-A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:3306)/`. The `mysql://` URL form is not supported. A DSN that cannot be parsed is reported as `invalid DSN` without quoting any part of it, because the driver splits it at the last `/`: a password that contains `/` needs the `/` before the database name, as in `admin:a/b@tcp(db.internal:3306)/`.
+A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:3306)/`. The `mysql://` URL form is not supported. A DSN that cannot be parsed is reported as `invalid DSN` without quoting any part of it, because the driver splits it at the last `/`: a password that contains `/` needs the `/` before the database name, as in `admin:a/b@tcp(db.internal:3306)/`. The network must be `tcp`, `tcp4`, `tcp6` or `unix`.
 
 ### Blocks
 

@@ -94,6 +94,11 @@ func parseDSN(dsn string) (*gomysql.Config, error) {
 		// of the password, so they are not passed on.
 		return nil, errors.New("parse mysql dsn: invalid DSN; " + hint + "; a password containing '/' needs the '/' before the database name")
 	}
+	// A '/' in the password can also leave a DSN that parses, with part
+	// of the password as the network, which dial errors would quote.
+	if !slices.Contains([]string{"tcp", "tcp4", "tcp6", "unix"}, cfg.Net) {
+		return nil, errors.New("parse mysql dsn: invalid DSN: the network must be tcp, tcp4, tcp6 or unix; " + hint + "; a password containing '/' needs the '/' before the database name")
+	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultTimeout
 	}
