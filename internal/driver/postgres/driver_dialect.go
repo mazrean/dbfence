@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -14,7 +15,10 @@ import (
 // Dialect.
 
 // DropRole implements diff.Dialect. Databases that cannot be connected to
-// are skipped.
+// are skipped. DROP OWNED revokes what the role holds with CASCADE, which
+// also removes the grants it made to other roles from its grant option
+// and, from PostgreSQL 16 on, the memberships it granted; the declared
+// ones are granted again.
 func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement {
 	if d.st == nil {
 		return d.Dialect.DropRole(id, databases)
@@ -25,7 +29,65 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 			reachable = append(reachable, db)
 		}
 	}
-	return d.Dialect.DropRole(id, reachable)
+	out := d.Dialect.DropRole(id, reachable)
+	if len(reachable) == 0 {
+		// No DROP OWNED runs; DROP ROLE fails on the dependencies.
+		return out
+	}
+	return append(out, d.st.regrantAfterDrop(id.Name, databases, reachable)...)
+}
+
+// regrantAfterDrop grants again the declared privileges and memberships
+// that dropping role takes from other roles: those granted, directly or
+// transitively, by role. Grants on objects role owns survive, since
+// REASSIGN OWNED makes the new owner their grantor. Objects in databases
+// that are dropped or ignored (not in surviving), and schemas in
+// databases where DROP OWNED does not run (not in reachable), are left
+// alone.
+func (st *state) regrantAfterDrop(role string, surviving, reachable []string) []plan.Statement {
+	privs := map[model.Object][]string{}
+	var objs []model.Object
+	for _, e := range st.acl {
+		if e.grantor != role || e.grantee == role || st.owners[e.obj] == role {
+			continue
+		}
+		scope := surviving
+		if e.obj.Type == model.ObjectSchema {
+			scope = reachable
+		}
+		if !slices.Contains(scope, e.obj.Database) {
+			continue
+		}
+		if _, ok := privs[e.obj]; !ok {
+			objs = append(objs, e.obj)
+		}
+		if !slices.Contains(privs[e.obj], e.priv) {
+			privs[e.obj] = append(privs[e.obj], e.priv)
+		}
+	}
+	slices.SortFunc(objs, func(a, b model.Object) int {
+		return cmp.Or(strings.Compare(string(a.Type), string(b.Type)), strings.Compare(a.Database, b.Database), strings.Compare(a.Schema, b.Schema))
+	})
+	var out []plan.Statement
+	for _, obj := range objs {
+		ps := slices.Sorted(slices.Values(privs[obj]))
+		out = append(out, st.regrantPrivileges(obj, st.aclDependents(obj, role, ps), ps)...)
+	}
+	if st.version < pg16 {
+		// Memberships do not depend on their grantor before 16.
+		return out
+	}
+	var granted []string
+	for _, e := range st.members {
+		if e.grantor == role && !slices.Contains(granted, e.role) {
+			granted = append(granted, e.role)
+		}
+	}
+	slices.Sort(granted)
+	for _, g := range granted {
+		out = append(out, st.regrantMembers(g, st.memberDependents(role, g))...)
+	}
+	return out
 }
 
 // DropSchema implements diff.Dialect. A schema that still contains

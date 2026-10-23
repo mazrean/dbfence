@@ -516,6 +516,35 @@ func TestIntegration(t *testing.T) {
 		s.exec(t, "ALTER DATABASE sd_noconn ALLOW_CONNECTIONS true", "DROP DATABASE sd_noconn", "DROP DATABASE sd_ign", "DROP ROLE sd_owner", "DROP ROLE sd_grantee")
 	})
 
+	t.Run("pruning a grantor grants its declared grants again", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE q_x", "CREATE ROLE q_y", "CREATE ROLE q_z", "CREATE ROLE q_g", "CREATE DATABASE q_db",
+			"GRANT CONNECT ON DATABASE q_db TO q_x WITH GRANT OPTION", "GRANT q_g TO q_x WITH ADMIN OPTION",
+			"GRANT q_g TO q_z GRANTED BY q_x",
+			"SET ROLE q_x; GRANT CONNECT ON DATABASE q_db TO q_y; RESET ROLE")
+		s.exec(t, `\c q_db`, "CREATE SCHEMA api", "GRANT USAGE ON SCHEMA api TO q_x WITH GRANT OPTION",
+			"SET ROLE q_x; GRANT USAGE ON SCHEMA api TO q_y; RESET ROLE")
+		d := s.open(t, "postgres")
+		g := pg("q_g")
+		desired := &model.Desired{
+			Engine:    model.EnginePostgres,
+			Roles:     []model.Role{{ID: pg("q_y")}, {ID: pg("q_z"), MemberOf: []model.RoleID{g}}, {ID: g, MemberOf: []model.RoleID{}}},
+			Databases: []model.Database{{Name: "q_db"}},
+			Schemas:   []model.Schema{{Database: "q_db", Name: "api"}},
+			Privileges: []model.Privilege{
+				{Grantee: pg("q_y"), Object: model.Object{Type: model.ObjectDatabase, Database: "q_db"}, Name: "CONNECT"},
+				{Grantee: pg("q_y"), Object: model.Object{Type: model.ObjectSchema, Database: "q_db", Schema: "api"}, Name: "USAGE"},
+			},
+			Ignore: model.Ignore{Roles: []string{"[^q].*"}, Databases: []string{"[^q].*"}, Schemas: []string{"public"}},
+		}
+		out := converge(t, d, desired, diff.Options{Prune: true})
+		if !strings.Contains(out, `DROP ROLE "q_x"`) {
+			t.Errorf("plan does not drop q_x:\n%s", out)
+		}
+		if got := s.queryStrings(t, "SELECT has_database_privilege('q_y', 'q_db', 'CONNECT')::text || pg_has_role('q_z', 'q_g', 'MEMBER')::text"); got[0] != "truetrue" {
+			t.Errorf("q_y CONNECT, q_z in q_g = %s, want truetrue", got[0])
+		}
+	})
+
 	t.Run("prune drops non-empty schemas", func(t *testing.T) {
 		s.exec(t, "CREATE DATABASE p_db")
 		s.exec(t, `\c p_db`, "CREATE SCHEMA junk", "CREATE SCHEMA junkfull", "CREATE TABLE junkfull.t (id int)")

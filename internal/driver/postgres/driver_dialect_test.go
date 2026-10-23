@@ -463,3 +463,93 @@ func TestUnreadableVerifiers(t *testing.T) {
 		t.Errorf("forced password statements = %d, want 1", len(stmts))
 	}
 }
+
+func TestDropRoleRegrants(t *testing.T) {
+	t.Parallel()
+	db := func(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
+	sch := model.Object{Type: model.ObjectSchema, Database: "app", Schema: "api"}
+	desired := &model.Desired{
+		Roles: []model.Role{
+			{ID: model.RoleID{Name: "y"}},
+			{ID: model.RoleID{Name: "q"}},
+			{ID: model.RoleID{Name: "z"}, MemberOf: []model.RoleID{{Name: "g"}}},
+			{ID: model.RoleID{Name: "w"}, MemberOf: []model.RoleID{{Name: "g"}}, MemberOptions: map[model.RoleID]model.MembershipOptions{{Name: "g"}: {Admin: new(true)}}},
+		},
+		Privileges: []model.Privilege{
+			{Grantee: model.RoleID{Name: "y"}, Object: db("app"), Name: "CONNECT", GrantOption: true},
+			{Grantee: model.RoleID{Name: "q"}, Object: db("app"), Name: "CONNECT"},
+			{Grantee: model.RoleID{Name: "y"}, Object: sch, Name: "USAGE"},
+			{Grantee: model.RoleID{Name: "y"}, Object: db("owned"), Name: "CONNECT"},
+			{Grantee: model.RoleID{Name: "y"}, Object: db("gone"), Name: "CONNECT"},
+		},
+	}
+	acl := []aclEntry{
+		{obj: db("app"), grantee: "x", grantor: "postgres", priv: "CONNECT", grantable: true},
+		{obj: db("app"), grantee: "y", grantor: "x", priv: "CONNECT", grantable: true},
+		{obj: db("app"), grantee: "q", grantor: "y", priv: "CONNECT"},
+		{obj: db("app"), grantee: "undeclared", grantor: "x", priv: "CONNECT"},
+		{obj: sch, grantee: "y", grantor: "x", priv: "USAGE"},
+		{obj: db("owned"), grantee: "y", grantor: "x", priv: "CONNECT"},
+		{obj: db("gone"), grantee: "y", grantor: "x", priv: "CONNECT"},
+	}
+	members := []memberEntry{
+		{role: "g", member: "x", grantor: "postgres", admin: true},
+		{role: "g", member: "z", grantor: "x"},
+		{role: "g", member: "w", grantor: "x", admin: true},
+		{role: "g", member: "undeclared", grantor: "w"},
+	}
+	newState := func(version int) *state {
+		return &state{
+			desired: desired, acl: acl, members: members, version: version, user: "postgres", superuser: true,
+			connectable: map[string]bool{"app": true, "owned": true, "postgres": true},
+			owners:      map[model.Object]string{db("app"): "postgres", db("owned"): "x", sch: "postgres"},
+		}
+	}
+	drop := `app: REASSIGN OWNED BY "x" TO CURRENT_USER
+app: DROP OWNED BY "x"
+owned: REASSIGN OWNED BY "x" TO CURRENT_USER
+owned: DROP OWNED BY "x"
+DROP ROLE "x"`
+	tests := []struct {
+		name      string
+		want      string
+		databases []string
+		version   int
+	}{
+		{
+			name:      "PostgreSQL 17",
+			version:   170000,
+			databases: []string{"app", "owned"},
+			want: drop + `
+GRANT CONNECT ON DATABASE "app" TO "q"
+GRANT CONNECT ON DATABASE "app" TO "y" WITH GRANT OPTION
+app: GRANT USAGE ON SCHEMA "api" TO "y"
+GRANT "g" TO "w" WITH ADMIN OPTION
+GRANT "g" TO "z"`,
+		},
+		{
+			name:      "memberships survive before PostgreSQL 16",
+			version:   150000,
+			databases: []string{"app", "owned"},
+			want: drop + `
+GRANT CONNECT ON DATABASE "app" TO "q"
+GRANT CONNECT ON DATABASE "app" TO "y" WITH GRANT OPTION
+app: GRANT USAGE ON SCHEMA "api" TO "y"`,
+		},
+		{
+			name:      "no reachable database",
+			version:   170000,
+			databases: []string{"noconn"},
+			want:      `DROP ROLE "x"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Driver{st: newState(tt.version)}
+			if got := sqlOf(d.DropRole(model.RoleID{Name: "x"}, tt.databases)); got != tt.want {
+				t.Errorf("got\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}
