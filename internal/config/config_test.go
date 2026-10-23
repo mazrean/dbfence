@@ -152,7 +152,7 @@ func TestLoadErrors(t *testing.T) {
 		{"grant undeclared role", pg + `database "d" {}` + "\n" + "grant {\nrole = \"x\"\ndatabase = \"d\"\nprivileges = [\"CONNECT\"]\n}", `role "x", which is not declared`},
 		{"invalid privilege", pg + `role "r" {}` + "\n" + `database "d" {}` + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"SELECT\"]\n}", `privilege "SELECT" is not valid`},
 		{"empty privileges", pg + `role "r" {}` + "\n" + `database "d" {}` + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = []\n}", "privileges must not be empty"},
-		{"duplicate privilege", pg + `role "r" {}` + "\n" + `database "d" {}` + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"CONNECT\"]\n}" + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"ALL\"]\n}", "granted more than once"},
+		{"duplicate privilege", pg + `role "r" {}` + "\n" + `database "d" {}` + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"CONNECT\"]\n}" + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"ALL\"]\n}", "already granted"},
 		{"bad ignore regexp", pg + `ignore { roles = ["("] }`, "Invalid ignore pattern"},
 		{"unknown block", pg + `table "t" {}`, "Unsupported block type"},
 	}
