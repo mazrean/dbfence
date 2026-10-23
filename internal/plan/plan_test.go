@@ -111,6 +111,13 @@ func TestStatementRedact(t *testing.T) {
 			want:   "Error 1064: You have an error in your SQL syntax near '<redacted>'' and '<redacted>'",
 		},
 		{
+			name:   "unescaped echo with an inner quote after the prefix length",
+			secret: "'abcd''efgh'",
+			msg:    "Error 1064 (42000): You have an error in your SQL syntax; near 'abcd'efgh' at line 1",
+			want:   "Error 1064 (42000): You have an error in your SQL syntax; near '<redacted>' at line 1",
+			leak:   []string{"abcd", "efgh"},
+		},
+		{
 			name:   "postgres syntax error token",
 			secret: "'hunter2'",
 			msg:    `ERROR: syntax error at or near "'hunter2'" (SQLSTATE 42601)`,

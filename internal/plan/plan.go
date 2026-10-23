@@ -67,16 +67,13 @@ const minRedactPrefix = 4
 // "near '...'" part of syntax errors at 80 characters), without rewriting
 // unrelated text that merely contains a short password.
 func (s Statement) Redact(text string) string {
+	var values []string
 	for _, p := range s.parts {
-		sec, ok := p.(Secret)
-		if !ok {
-			continue
-		}
-		for _, v := range secretValues(string(sec)) {
-			text = redactValue(text, v)
+		if sec, ok := p.(Secret); ok {
+			values = append(values, secretValues(string(sec))...)
 		}
 	}
-	return text
+	return redactValues(text, values)
 }
 
 // secretValues returns the forms in which the value of the literal sec may
@@ -94,16 +91,20 @@ func secretValues(sec string) []string {
 			out = append(out, v)
 		}
 	}
-	// Longest first, so a longer form is not cut short by a shorter one.
-	slices.SortStableFunc(out, func(a, b string) int { return len(b) - len(a) })
 	return out
 }
 
-// redactValue replaces v, or a prefix of it of at least minRedactPrefix
-// bytes, when it starts after a single quote and ends at a single quote or
-// at the end of text.
-func redactValue(text, v string) string {
+// redactValues replaces, in a single pass, each literal context that holds
+// one of values, or a prefix of it of at least minRedactPrefix bytes: text
+// that starts after a single quote and ends at a single quote or at the
+// end of text. At each quote the longest match over all values wins, so a
+// shorter form (such as the escaped one, which stops at an inner quote)
+// cannot cut a longer one short and leave the rest of the secret behind.
+func redactValues(text string, values []string) string {
 	const marker = "<redacted>"
+	if len(values) == 0 {
+		return text
+	}
 	var sb strings.Builder
 	last := 0
 	for i := 0; i < len(text); i++ {
@@ -111,7 +112,10 @@ func redactValue(text, v string) string {
 			continue
 		}
 		start := i + 1
-		k := literalMatchLen(text[start:], v)
+		k := 0
+		for _, v := range values {
+			k = max(k, literalMatchLen(text[start:], v))
+		}
 		if k == 0 {
 			continue
 		}
