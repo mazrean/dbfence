@@ -10,6 +10,7 @@ MySQL / PostgreSQL servers — databases, users/roles, memberships, grants, Post
 - Test incl. Docker integration: `mise run test:integration` (= `go test ./...`)
 - Test (CI): `mise run test:ci` (`-race -coverprofile=coverage.out -covermode=atomic`; Docker required when `CI` is set)
 - Lint: `mise run lint` (= `go tool lint ./...`); lint failures block commits
+- Fuzz: `mise run test:fuzz` (each `Fuzz*` target for 30s; seed corpora run in `mise run test`)
 - Generate (kessoku DI): `mise run generate` (= `go generate ./...`)
 - Release: `mise run release:check` / `release:build` (snapshot) / `release:publish`
 - API compat: `mise run apicompat` (no-op: no public packages)
@@ -32,7 +33,7 @@ internal/app/        commands, Driver/Opener interfaces, confirmation prompt
 internal/config/     HCL load, references, validation -> desired model
 internal/funcs/      env / aws_secretsmanager / gcp_secretmanager / tfstate (+cache, cty stdlib subset)
 internal/model/      engine-neutral Desired / Current, Role, Database, Schema, Privilege
-internal/driver/     mysql/ and postgres/: Driver (Inspect/Exec) + Dialect (SQL rendering)
+internal/driver/     mysql/ and postgres/: Driver (Inspect/Exec) + Dialect (SQL rendering); internal/sqltest SQL lexer for tests
 internal/password/   stored-hash verification (SCRAM, md5, mysql_native, caching_sha2)
 internal/diff/       desired vs current -> ordered *plan.Plan via diff.Dialect (no I/O)
 internal/policy/     independent safety check of a finished plan (Verify, no I/O)
@@ -49,7 +50,8 @@ tools/lint/          repo linter module (+ outputsink analyzer)
 - Identifiers are quoted and literals escaped only through the engine Dialect; passwords go into SQL only as `plan.Secret`.
 - SQL is built only from `plan` fragments: SQL text is a constant `plan.Keyword`, runtime values enter only as `plan.QuotedIdent`/`EscapedLiteral`/`NewToken`/`Number` made by Dialect code under `internal/driver` (lint `sqlfragment`); Dialect statements use `plan.New` with their `Kind` and `Target`.
 - One `plan.Statement` is exactly one SQL command, sent alone (`;` never chains statements); to run as another role set `AsRole`, never prepend `SET ROLE`.
-- Every protection promised in README ("What `--prune` never drops", the connected user) is also an invariant in `internal/policy.Verify`, which reads only statement `Kind`/`Target`/`RoleChange`, never SQL text, and shares no code with `diff`; diff tests run every plan through it.
+- Every protection promised in README ("What `--prune` never drops", the connected user) is also an invariant in `internal/policy.Verify`, which reads only statement `Kind`/`Target`/`RoleChange`/`AsRole`, never SQL text, and shares no code with `diff`; diff tests run every plan through it.
+- Data read from the server is untrusted: Inspect ends with `model.Current.DropUntrusted`, names failing `model.CheckName` are never put into SQL (guard state-derived names such as grantors), and `policy.Verify` rejects statements naming them.
 - `diff` and `plan` do no I/O; engine-specific code only in `internal/driver/<engine>` and `internal/password`.
 - All output goes through the redacting `secret.Writer` streams wired in `internal/di/di.go` (`app.IO`); never use `os.Stdout`/`os.Stderr`/`fmt.Print*`/`print` elsewhere (lint `outputsink`), and `secret.Register` every new secret source.
 - Table-driven tests next to code; integration tests skip under `testing.Short()` or without Docker (fail if `CI` is set).
