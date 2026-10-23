@@ -1,6 +1,7 @@
 package diff_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -53,6 +54,77 @@ func TestComputeOrder(t *testing.T) {
 			}
 			if d := cmp.Diff(tt.want, statements(p)); d != "" {
 				t.Errorf("statements (-want +got):\n%s", d)
+			}
+		})
+	}
+}
+
+// TestComputeCurrentUser checks that a declared connected user is not
+// locked out.
+func TestComputeCurrentUser(t *testing.T) {
+	t.Parallel()
+	myAdmin := model.RoleID{Name: "admin", Host: "%"}
+	tests := []struct {
+		dialect   diff.Dialect
+		name      string
+		role      model.Role
+		want      []string
+		wantWarns []string
+		state     model.RoleState
+	}{
+		{
+			name:    "postgres login, superuser and memberships",
+			dialect: postgres.Dialect{},
+			role:    model.Role{ID: pgID("admin"), Login: new(false), Superuser: new(false), CreateDB: new(true), MemberOf: []model.RoleID{}},
+			state:   model.RoleState{ID: pgID("admin"), Login: true, Superuser: true, MemberOf: []model.RoleID{pgID("rds_superuser")}},
+			want:    []string{`ALTER ROLE "admin" WITH CREATEDB`},
+			wantWarns: []string{
+				`not disabling login of the connected user "admin": it would lock dbfence out`,
+				`not removing superuser from the connected user "admin": dbfence may rely on it`,
+				`not revoking membership of the connected user "admin" in "rds_superuser": dbfence may rely on it`,
+			},
+		},
+		{
+			name:      "mysql account lock",
+			dialect:   mysql.Dialect{},
+			role:      model.Role{ID: myAdmin, Login: new(false)},
+			state:     model.RoleState{ID: myAdmin, Login: true},
+			want:      []string{},
+			wantWarns: []string{`not disabling login of the connected user "admin@%": it would lock dbfence out`},
+		},
+		{
+			name:      "login already declared",
+			dialect:   postgres.Dialect{},
+			role:      model.Role{ID: pgID("admin"), Login: new(true), MemberOf: []model.RoleID{pgID("x")}},
+			state:     model.RoleState{ID: pgID("admin"), Login: true},
+			want:      []string{`GRANT "x" TO "admin"`},
+			wantWarns: []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			engine := model.EnginePostgres
+			if tt.state.ID.Host != "" {
+				engine = model.EngineMySQL
+			}
+			d := &model.Desired{Engine: engine, Roles: []model.Role{tt.role}}
+			cur := &model.Current{CurrentUser: tt.state.ID, Roles: []model.RoleState{tt.state, {ID: pgID("x")}}}
+			p, err := diff.Compute(d, cur, tt.dialect, diff.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p)); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			var warns []string
+			for _, w := range p.Warnings {
+				if !strings.HasPrefix(w, "unmanaged") {
+					warns = append(warns, w)
+				}
+			}
+			if d := cmp.Diff(tt.wantWarns, append([]string{}, warns...)); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
 			}
 		})
 	}

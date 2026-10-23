@@ -187,6 +187,10 @@ func (df *differ) roles() {
 	u := df.current.Unreadable
 	for _, r := range df.desired.Roles {
 		cur, exists := df.currentRole(r.ID)
+		self := exists && r.ID == df.current.CurrentUser
+		if self {
+			r = df.protectCurrentUser(r, cur)
+		}
 		switch {
 		case !exists && u.Roles:
 			// Existence is unknown: create idempotently and only apply
@@ -220,11 +224,32 @@ func (df *differ) roles() {
 			continue
 		}
 		for _, m := range model.SortRoleIDs(slices.Clone(have)) {
-			if !slices.Contains(want, m) {
-				df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.RevokeMembership(r.ID, m))
+			if slices.Contains(want, m) {
+				continue
 			}
+			if self {
+				df.warn("not revoking membership of the connected user %q in %q: dbfence may rely on it", r.ID, m)
+				continue
+			}
+			df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.RevokeMembership(r.ID, m))
 		}
 	}
+}
+
+// protectCurrentUser drops the attribute changes of r that would lock
+// the connected user out or strip its superuser status.
+func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Role {
+	if r.Login != nil && !*r.Login {
+		if cur.Login || cur.AttributesUnknown {
+			df.warn("not disabling login of the connected user %q: it would lock dbfence out", r.ID)
+		}
+		r.Login = nil
+	}
+	if r.Superuser != nil && !*r.Superuser && cur.Superuser {
+		df.warn("not removing superuser from the connected user %q: dbfence may rely on it", r.ID)
+		r.Superuser = nil
+	}
+	return r
 }
 
 // databases returns the names of databases dropped by the plan.
