@@ -86,7 +86,7 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 	if err != nil {
 		return nil, err
 	}
-	df := &differ{d: d, opts: opts, desired: desired, current: current, ignore: ig}
+	df := &differ{d: d, opts: opts, desired: desired, current: current, ignore: ig, warnings: slices.Clone(current.Warnings)}
 	if !current.Unreadable.Roles {
 		if err := df.checkReferences(); err != nil {
 			return nil, err

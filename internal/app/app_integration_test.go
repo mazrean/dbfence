@@ -250,6 +250,10 @@ func TestMySQLIntegration(t *testing.T) {
 	h.apply(app.Options{})
 	// Converging proves caching_sha2_password verification against a real server.
 	h.assertConverged(app.Options{})
+	// _ is escaped, so the grant does not cover look-alike databases.
+	if got := h.query("SELECT DISTINCT Db FROM mysql.db WHERE User LIKE 'dbf\\_it\\_%'"); len(got) != 1 || got[0] != `dbf\_it\_app` {
+		t.Errorf("granted database patterns = %q", got)
+	}
 
 	h.write(mysqlConfig("second"))
 	if n, out := h.plan(app.Options{}); n != 1 || !strings.Contains(out, "ALTER USER 'dbf_it_app'@'%' IDENTIFIED WITH caching_sha2_password BY '<redacted>'") {

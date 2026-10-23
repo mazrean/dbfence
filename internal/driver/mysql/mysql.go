@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	gomysql "github.com/go-sql-driver/mysql"
 	"github.com/mazrean/dbfence/internal/model"
@@ -45,6 +46,16 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 	}
 	d := &Driver{db: db}
 	d.NoBackslashEscapes = strings.Contains(mode, "NO_BACKSLASH_ESCAPES")
+	var partial bool
+	switch err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.partial_revokes").Scan(&partial); {
+	case mysqlErrorIn(err, errUnknownSystemVariable):
+		// Before MySQL 8.0.16 wildcards in grants are always active.
+	case err != nil:
+		_ = db.Close()
+		return nil, fmt.Errorf("read partial_revokes: %w", err)
+	default:
+		d.PartialRevokes = partial
+	}
 	return d, nil
 }
 
@@ -58,7 +69,7 @@ func (d *Driver) Exec(ctx context.Context, _, query string) error {
 func (d *Driver) Close() error { return d.db.Close() }
 
 // Inspect implements driver.Driver.
-func (d *Driver) Inspect(ctx context.Context, _ *model.Desired) (*model.Current, error) {
+func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Current, error) {
 	cur := &model.Current{}
 	var user string
 	if err := d.db.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&user); err != nil {
@@ -67,10 +78,13 @@ func (d *Driver) Inspect(ctx context.Context, _ *model.Desired) (*model.Current,
 	if name, host, ok := strings.CutLast(user, "@"); ok {
 		cur.CurrentUser = model.RoleID{Name: name, Host: host}
 	}
-	for _, step := range []func(context.Context, *model.Current) error{d.inspectDatabases, d.inspectUsers, d.inspectRoleEdges, d.inspectDBPrivileges} {
+	for _, step := range []func(context.Context, *model.Current) error{d.inspectDatabases, d.inspectUsers, d.inspectRoleEdges} {
 		if err := step(ctx, cur); err != nil {
 			return nil, err
 		}
+	}
+	if err := d.inspectDBPrivileges(ctx, cur, desired); err != nil {
+		return nil, err
 	}
 	return cur, nil
 }
@@ -99,6 +113,9 @@ var accessDeniedErrors = []uint16{
 // errUnknownTable is ER_UNKNOWN_TABLE, returned for
 // information_schema.USER_ATTRIBUTES before MySQL 8.0.21.
 const errUnknownTable = 1109
+
+// errUnknownSystemVariable is ER_UNKNOWN_SYSTEM_VARIABLE.
+const errUnknownSystemVariable = 1193
 
 func mysqlErrorIn(err error, numbers ...uint16) bool {
 	var me *gomysql.MySQLError
@@ -201,39 +218,152 @@ var dbPrivilegeColumns = []struct{ column, name string }{
 	{"Alter_routine_priv", "ALTER ROUTINE"}, {"Execute_priv", "EXECUTE"}, {"Event_priv", "EVENT"}, {"Trigger_priv", "TRIGGER"},
 }
 
-func (d *Driver) inspectDBPrivileges(ctx context.Context, cur *model.Current) error {
+// dbGrant is a row of mysql.db.
+type dbGrant struct {
+	grantee     model.RoleID
+	db          string
+	privs       []string
+	grantOption bool
+}
+
+func (d *Driver) inspectDBPrivileges(ctx context.Context, cur *model.Current, desired *model.Desired) error {
 	cols := make([]string, 0, len(dbPrivilegeColumns))
 	for _, c := range dbPrivilegeColumns {
 		cols = append(cols, c.column)
 	}
-	q := "SELECT User, Host, Db, Grant_priv, " + strings.Join(cols, ", ") + " FROM mysql.db"
-	err := query(ctx, d.db, q, func(rows *sql.Rows) error {
-		var grantee model.RoleID
-		var db, grantOpt string
+	q := "SELECT User, Host, Db, Grant_priv, " + strings.Join(cols, ", ") + " FROM mysql.db ORDER BY User, Host, Db"
+	var rows []dbGrant
+	err := query(ctx, d.db, q, func(r *sql.Rows) error {
+		var g dbGrant
+		var grantOpt string
 		flags := make([]string, len(cols))
-		dest := []any{&grantee.Name, &grantee.Host, &db, &grantOpt}
+		dest := []any{&g.grantee.Name, &g.grantee.Host, &g.db, &grantOpt}
 		for i := range flags {
 			dest = append(dest, &flags[i])
 		}
-		if err := rows.Scan(dest...); err != nil {
+		if err := r.Scan(dest...); err != nil {
 			return err
 		}
+		g.grantOption = grantOpt == "Y"
 		for i, f := range flags {
 			if f == "Y" {
-				cur.Privileges = append(cur.Privileges, model.Privilege{
-					Grantee: grantee, Object: model.Object{Type: model.ObjectDatabase, Database: db},
-					Name: dbPrivilegeColumns[i].name, GrantOption: grantOpt == "Y",
-				})
+				g.privs = append(g.privs, dbPrivilegeColumns[i].name)
 			}
 		}
+		rows = append(rows, g)
 		return nil
 	})
 	if isAccessDenied(err) {
-		cur.Privileges = nil
 		cur.Unreadable.Privileges = true
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	privs, warns := d.dbPrivileges(rows, desired)
+	cur.Privileges = append(cur.Privileges, privs...)
+	cur.Warnings = append(cur.Warnings, warns...)
+	return nil
+}
+
+// dbPrivileges converts mysql.db rows to privileges. Unless partial_revokes
+// is on, Db is a LIKE pattern: escaped rows name a literal database and
+// rows with an unescaped wildcard are pattern grants. A pattern grant whose
+// text equals a declared database (as written by GRANT ON `my_app`.*) keeps
+// its Pattern, so it is revoked and replaced by an escaped grant.
+func (d Dialect) dbPrivileges(rows []dbGrant, desired *model.Desired) ([]model.Privilege, []string) {
+	if desired == nil {
+		desired = &model.Desired{}
+	}
+	var out []model.Privilege
+	var warns []string
+	for _, g := range rows {
+		obj := d.dbObject(g.db)
+		if obj.Pattern != "" && !slices.ContainsFunc(desired.Databases, func(db model.Database) bool { return db.Name == obj.Database }) &&
+			slices.ContainsFunc(desired.Roles, func(r model.Role) bool { return r.ID == g.grantee }) {
+			for _, db := range desired.Databases {
+				if matchPattern(obj.Pattern, db.Name) {
+					warns = append(warns, fmt.Sprintf("%q holds privileges on the database pattern %q, which also matches declared database %q; pattern grants are not managed", g.grantee, obj.Pattern, db.Name))
+					break
+				}
+			}
+		}
+		for _, p := range g.privs {
+			out = append(out, model.Privilege{Grantee: g.grantee, Object: obj, Name: p, GrantOption: g.grantOption})
+		}
+	}
+	return out, warns
+}
+
+// dbObject classifies the Db column of mysql.db.
+func (d Dialect) dbObject(raw string) model.Object {
+	obj := model.Object{Type: model.ObjectDatabase, Database: raw}
+	if d.PartialRevokes {
+		return obj
+	}
+	var sb strings.Builder
+	pattern := false
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; {
+		case c == '\\' && i+1 < len(raw):
+			i++
+			sb.WriteByte(raw[i])
+		case c == '_' || c == '%':
+			pattern = true
+			sb.WriteByte(c)
+		default:
+			sb.WriteByte(c)
+		}
+	}
+	obj.Database = sb.String()
+	if pattern {
+		obj.Pattern = raw
+	}
+	return obj
+}
+
+// matchPattern reports whether name matches the database pattern p, in
+// which _ and % are wildcards and a backslash escapes the next character.
+func matchPattern(p, name string) bool {
+	if p == "" {
+		return name == ""
+	}
+	switch p[0] {
+	case '%':
+		for i := 0; i <= len(name); i++ {
+			if matchPattern(p[1:], name[i:]) {
+				return true
+			}
+		}
+		return false
+	case '_':
+		_, size := utf8.DecodeRuneInString(name)
+		return name != "" && matchPattern(p[1:], name[size:])
+	case '\\':
+		if len(p) > 1 {
+			p = p[1:]
+		}
+	}
+	_, size := utf8.DecodeRuneInString(p)
+	return strings.HasPrefix(name, p[:size]) && matchPattern(p[size:], name[size:])
+}
+
+// escapeWildcards escapes the LIKE wildcards of a database name for
+// database level grants.
+func escapeWildcards(s string) string {
+	return strings.NewReplacer(`\`, `\\`, "_", `\_`, "%", `\%`).Replace(s)
+}
+
+// grantTarget renders the target of a database level GRANT or REVOKE.
+func (d Dialect) grantTarget(obj model.Object) string {
+	switch {
+	case obj.Pattern != "":
+		return Ident(obj.Pattern) + ".*"
+	case d.PartialRevokes:
+		return Ident(obj.Database) + ".*"
+	default:
+		return Ident(escapeWildcards(obj.Database)) + ".*"
+	}
 }
 
 func query(ctx context.Context, db *sql.DB, q string, scan func(*sql.Rows) error) error {
@@ -255,6 +385,9 @@ func query(ctx context.Context, db *sql.DB, q string, scan func(*sql.Rows) error
 type Dialect struct {
 	// NoBackslashEscapes reflects the NO_BACKSLASH_ESCAPES sql_mode.
 	NoBackslashEscapes bool
+	// PartialRevokes reflects partial_revokes. When it is off, _ and % in
+	// database level grants are wildcards, so names are escaped.
+	PartialRevokes bool
 }
 
 // Ident quotes an identifier.
@@ -432,7 +565,7 @@ func (Dialect) DropSchema(model.Schema) []plan.Statement { return nil }
 
 // Grant implements diff.Dialect.
 func (d Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, grantOption bool) []plan.Statement {
-	q := "GRANT " + strings.Join(privs, ", ") + " ON " + Ident(obj.Database) + ".* TO " + d.Account(grantee)
+	q := "GRANT " + strings.Join(privs, ", ") + " ON " + d.grantTarget(obj) + " TO " + d.Account(grantee)
 	if grantOption {
 		q += " WITH GRANT OPTION"
 	}
@@ -441,11 +574,11 @@ func (d Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, g
 
 // Revoke implements diff.Dialect.
 func (d Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "REVOKE "+strings.Join(privs, ", ")+" ON "+Ident(obj.Database)+".* FROM "+d.Account(grantee))}
+	return []plan.Statement{plan.SQL("", "REVOKE "+strings.Join(privs, ", ")+" ON "+d.grantTarget(obj)+" FROM "+d.Account(grantee))}
 }
 
 // RevokeGrantOption implements diff.Dialect. MySQL tracks the grant
 // option per level, not per privilege.
 func (d Dialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, _ []string) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "REVOKE GRANT OPTION ON "+Ident(obj.Database)+".* FROM "+d.Account(grantee))}
+	return []plan.Statement{plan.SQL("", "REVOKE GRANT OPTION ON "+d.grantTarget(obj)+" FROM "+d.Account(grantee))}
 }

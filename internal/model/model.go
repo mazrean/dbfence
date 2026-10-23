@@ -105,6 +105,10 @@ type Object struct {
 	Type     ObjectType
 	Database string
 	Schema   string
+	// Pattern is the raw MySQL grant target when an inspected grant is a
+	// wildcard pattern rather than a literal database name. Database then
+	// holds the pattern with escapes removed. Always empty in Desired.
+	Pattern string
 }
 
 func (o Object) String() string {
@@ -177,6 +181,9 @@ type Current struct {
 	Privileges []Privilege
 	// InspectedDatabases lists databases whose schemas were inspected.
 	InspectedDatabases []string
+	// Warnings are engine specific findings of the inspection that the
+	// plan reports.
+	Warnings []string
 	// Unreadable lists what could not be inspected.
 	Unreadable Unreadable
 }
