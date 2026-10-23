@@ -116,6 +116,8 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 		file, d := parser.ParseHCLFile(f)
 		diags = append(diags, d...)
 		if file != nil {
+			// Even when parsing failed: the body holds what parsed.
+			registerLiteralSecrets(file.Body)
 			bodies = append(bodies, file)
 		}
 	}
@@ -167,6 +169,8 @@ func hclFiles(path string) ([]string, error) {
 
 // diagError renders the error diagnostics. The leading "Error: " of the
 // first one is dropped because the CLI prefixes errors with it already.
+// Source snippets show the values of password and dsn masked (see
+// maskSecrets).
 func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
 	diags = hideSecretKeys(dropCascades(errorsOnly(diags)))
 	// gohcl decodes attributes in map order; report in source order.
@@ -181,7 +185,7 @@ func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
 		}
 	})
 	var sb strings.Builder
-	w := hcl.NewDiagnosticTextWriter(&sb, p.Files(), 0, false)
+	w := hcl.NewDiagnosticTextWriter(&sb, maskedFiles(p.Files()), 0, false)
 	if err := w.WriteDiagnostics(diags); err != nil {
 		return diags
 	}
