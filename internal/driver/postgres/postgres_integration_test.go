@@ -3,6 +3,7 @@ package postgres
 import (
 	"database/sql"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -182,6 +183,42 @@ func TestIntegration(t *testing.T) {
 		}
 		if got := s.queryStrings(t, "SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = 'scs'"); len(got) != 1 || got[0] != `a\'b` {
 			t.Errorf("literal round trip = %q", got)
+		}
+	})
+
+	t.Run("passwords are sent as SCRAM verifiers", func(t *testing.T) {
+		pw := func(s string) *string { return &s }
+		login := true
+		d := s.open(t, "postgres")
+		for _, p := range []string{`it's\'; SELECT 1; --`, "md5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""} {
+			desired := &model.Desired{Engine: model.EnginePostgres, Roles: []model.Role{{ID: pg("pwuser"), Login: &login, Password: pw(p)}}}
+			converge(t, d, desired, diff.Options{})
+			if p == "" {
+				if got := s.queryStrings(t, "SELECT coalesce(rolpassword, 'NULL') FROM pg_authid WHERE rolname = 'pwuser'"); got[0] != "NULL" {
+					t.Errorf("empty password stored as %q", got)
+				}
+				continue
+			}
+			u, err := url.Parse(s.dsn("pwuser"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			u.User = url.UserPassword("pwuser", p)
+			c, err := sql.Open("pgx", u.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.PingContext(t.Context()); err != nil {
+				t.Errorf("cannot log in with %q: %v", p, err)
+			}
+			_ = c.Close()
+		}
+		// An md5 verifier of the declared password is upgraded.
+		s.exec(t, "SET password_encryption = 'md5'; ALTER ROLE pwuser PASSWORD 'old'")
+		desired := &model.Desired{Engine: model.EnginePostgres, Roles: []model.Role{{ID: pg("pwuser"), Login: &login, Password: pw("old")}}}
+		converge(t, d, desired, diff.Options{})
+		if got := s.queryStrings(t, "SELECT left(rolpassword, 14) FROM pg_authid WHERE rolname = 'pwuser'"); got[0] != "SCRAM-SHA-256$" {
+			t.Errorf("verifier not upgraded: %q", got)
 		}
 	})
 

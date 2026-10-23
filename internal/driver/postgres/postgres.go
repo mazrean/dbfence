@@ -411,9 +411,40 @@ func (Dialect) CreateRole(r model.Role) []plan.Statement {
 		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
 	}
 	if r.Password != nil {
-		parts = append(parts, " PASSWORD ", plan.Secret(Literal(*r.Password)))
+		parts = append(parts, passwordClause(*r.Password)...)
 	}
 	return []plan.Statement{plan.SQL("", parts...)}
+}
+
+// passwordClause renders the PASSWORD option. The password is sent as a
+// SCRAM-SHA-256 verifier computed here, so the plaintext never reaches
+// the server, its logs or pg_stat_statements, and a declared password
+// that looks like a verifier is still hashed. PostgreSQL clears an empty
+// password, so "" is rendered as NULL.
+func passwordClause(pw string) []any {
+	if pw == "" {
+		return []any{" PASSWORD NULL"}
+	}
+	v, err := password.SCRAMVerifier(pw)
+	if err != nil {
+		// Only reachable when crypto/pbkdf2 rejects its input (FIPS-only
+		// mode); the server then hashes the password itself.
+		v = pw
+	}
+	return []any{" PASSWORD ", plan.Secret(Literal(v))}
+}
+
+// passwordMatches reports whether the stored verifier already holds pw.
+// md5 verifiers never match, so that they are upgraded to SCRAM.
+func passwordMatches(verifier, user, pw string) (bool, error) {
+	switch {
+	case pw == "":
+		return verifier == "", nil
+	case strings.HasPrefix(verifier, "md5"):
+		return false, nil
+	default:
+		return password.MatchPostgres(verifier, user, pw)
+	}
 }
 
 // EnsureRole implements diff.Dialect. pg_roles is always readable, so
@@ -440,7 +471,7 @@ func (Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.
 		case !cur.PasswordReadable:
 			warns = append(warns, fmt.Sprintf("cannot read the password verifier of role %q (superuser required); password not compared, use --force-password to set it", r.ID))
 		default:
-			ok, err := password.MatchPostgres(string(cur.PasswordHash), r.ID.Name, *r.Password)
+			ok, err := passwordMatches(string(cur.PasswordHash), r.ID.Name, *r.Password)
 			switch {
 			case err != nil:
 				warns = append(warns, fmt.Sprintf("cannot compare the password of role %q: %v; use --force-password to set it", r.ID, err))
@@ -457,7 +488,7 @@ func (Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.
 		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
 	}
 	if setPassword {
-		parts = append(parts, " PASSWORD ", plan.Secret(Literal(*r.Password)))
+		parts = append(parts, passwordClause(*r.Password)...)
 	}
 	return []plan.Statement{plan.SQL("", parts...)}, warns
 }
