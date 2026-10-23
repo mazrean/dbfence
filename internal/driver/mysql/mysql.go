@@ -491,8 +491,14 @@ func (d Dialect) Account(id model.RoleID) string {
 
 // IsSystemRole implements diff.Dialect.
 func (Dialect) IsSystemRole(id model.RoleID) bool {
-	return slices.Contains([]string{"root", "mysql.sys", "mysql.session", "mysql.infoschema", "mariadb.sys", "rdsadmin", "rdsrepladmin", "debian-sys-maint"}, id.Name) ||
-		strings.HasPrefix(id.Name, "cloudsql") || strings.HasPrefix(id.Name, "azure_")
+	lower := strings.ToLower(id.Name)
+	return slices.Contains([]string{"root", "mariadb.sys", "debian-sys-maint"}, id.Name) ||
+		slices.ContainsFunc([]string{
+			"mysql.", // mysql.sys, mysql.session, mysql.infoschema
+			"rds",    // RDS: rdsadmin, rdsrepladmin, rdsproxyadmin, rds_superuser_role
+			"aws_",   // Aurora: AWS_LOAD_S3_ACCESS, AWS_LAMBDA_ACCESS, ...
+			"cloudsql", "azure_",
+		}, func(p string) bool { return strings.HasPrefix(lower, p) })
 }
 
 // IsSystemDatabase implements diff.Dialect.
