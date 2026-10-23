@@ -246,6 +246,17 @@ func unmanagedGrantorWarning(what string) string {
 	return what + ", but its grantor is a role dbfence does not manage (see its warning), so it is not changed; handle it manually"
 }
 
+// unmanagedDependentWarning explains a change skipped because its CASCADE
+// would also revoke grants or memberships held by a role dbfence does not
+// manage. That role is not shown; Inspect warns about it.
+func unmanagedDependentWarning(what string) string {
+	return what + ", but revoking it with CASCADE would also revoke what a role dbfence does not manage (see its warning) holds through it, so it is not changed; handle it manually"
+}
+
+// anyUnmanaged reports whether roles contains a role dbfence does not
+// manage.
+func anyUnmanaged(roles []string) bool { return slices.ContainsFunc(roles, unmanagedRole) }
+
 // AlterMembership implements diff.Dialect. From PostgreSQL 16 on each
 // grantor's grant of a membership carries its own options, so each grant
 // is changed.
@@ -262,13 +273,17 @@ func (d *Driver) AlterMembership(member, role model.RoleID, want model.Membershi
 func (st *state) alterMembership(member, role string, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string) {
 	revokeAdmin := want.Admin != nil && !*want.Admin && have.Admin
 	var dependents []string
-	if revokeAdmin {
-		dependents = st.memberDependents(member, role)
-	}
 	var out []plan.Statement
 	var warns []string
+	if revokeAdmin {
+		dependents = st.memberDependents(member, role)
+		if anyUnmanaged(dependents) {
+			warns = append(warns, unmanagedDependentWarning(fmt.Sprintf("ADMIN OPTION of %q on %q differs from the configuration", member, role)))
+			revokeAdmin, dependents = false, nil
+		}
+	}
 	for _, e := range st.members {
-		if e.role != role || e.member != member || st.losesMembership(e.grantor, role) {
+		if e.role != role || e.member != member || st.cascadesFrom(e.grantor, role) {
 			// A grant whose grantor loses the membership or its ADMIN
 			// OPTION is removed by CASCADE and granted again if declared.
 			continue
@@ -452,9 +467,12 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 				switch {
 				case asSelf(g):
 					g = ""
-				case st.losesGrantOption(g, obj, priv):
+				case st.losesGrantOption(g, obj, priv) && !anyUnmanaged(st.aclDependents(obj, g, st.heldOn(g, obj))):
 					// The plan revokes the grant option of g with
-					// CASCADE, which removes this grant as well.
+					// CASCADE, which removes this grant as well. When
+					// that CASCADE reaches a role dbfence does not
+					// manage, it is not planned, so this grant is
+					// revoked on its own.
 					found = true
 					continue
 				}
@@ -496,6 +514,14 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 			continue
 		}
 		dependents := st.aclDependents(obj, grantee, ps)
+		if anyUnmanaged(dependents) {
+			what := strings.Join(ps, ", ")
+			if optionOnly {
+				what = "grant option for " + what
+			}
+			warns = append(warns, unmanagedDependentWarning(fmt.Sprintf("%s on %s granted to %s differs from the configuration", what, objectLabel(obj), Grantee(grantee))))
+			continue
+		}
 		var tail []plan.Fragment
 		if len(dependents) > 0 {
 			tail = append(tail, plan.Keyword(" CASCADE"))
@@ -522,6 +548,17 @@ func (st *state) losesGrantOption(grantor string, obj model.Object, priv string)
 	return !slices.ContainsFunc(st.desired.Privileges, func(p model.Privilege) bool {
 		return p.Grantee.Name == grantor && p.Object == obj && p.Name == priv && p.GrantOption
 	})
+}
+
+// heldOn returns the privileges role holds on obj.
+func (st *state) heldOn(role string, obj model.Object) []string {
+	var out []string
+	for _, e := range st.acl {
+		if e.obj == obj && e.grantee == role && !slices.Contains(out, e.priv) {
+			out = append(out, e.priv)
+		}
+	}
+	return out
 }
 
 // aclDependents returns the roles that hold privs on obj through grants
@@ -586,6 +623,9 @@ func (st *state) regrantPrivileges(obj model.Object, grantor string, roles, priv
 // user may not revoke are reported instead.
 func (st *state) revokeMembership(member, role string) ([]plan.Statement, []string) {
 	dependents := st.memberDependents(member, role)
+	if anyUnmanaged(dependents) {
+		return nil, []string{unmanagedDependentWarning(fmt.Sprintf("membership of %q in %q differs from the configuration", member, role))}
+	}
 	var out []plan.Statement
 	var warns []string
 	revoked := false
@@ -594,7 +634,7 @@ func (st *state) revokeMembership(member, role string) ([]plan.Statement, []stri
 			continue
 		}
 		revoked = true
-		if st.losesMembership(e.grantor, role) {
+		if st.cascadesFrom(e.grantor, role) {
 			// The plan revokes the grantor's membership with CASCADE,
 			// which removes this grant as well.
 			continue
@@ -669,6 +709,14 @@ func (st *state) losesMembership(grantor, role string) bool {
 			return e.member == grantor && e.role == role && e.admin
 		})
 	})
+}
+
+// cascadesFrom reports whether the plan removes the grants of role made by
+// grantor through the CASCADE of revoking the membership of grantor, or
+// its ADMIN OPTION (losesMembership). That revoke is not planned when its
+// CASCADE reaches a role dbfence does not manage.
+func (st *state) cascadesFrom(grantor, role string) bool {
+	return st.losesMembership(grantor, role) && !anyUnmanaged(st.memberDependents(grantor, role))
 }
 
 // memberDependents returns the members of role whose grants were made,
