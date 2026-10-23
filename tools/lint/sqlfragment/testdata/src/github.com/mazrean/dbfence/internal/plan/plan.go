@@ -66,3 +66,9 @@ func pointers(s string) *Keyword {
 func internalUse(s string) (Keyword, Ident) {
 	return Keyword(s), QuotedIdent(s) // want `plan.Keyword converts a non-constant value to SQL text`
 }
+
+// The plan package may slice and concatenate Keywords.
+func cut(a, b Keyword) Keyword {
+	a += b
+	return a + b[1:]
+}

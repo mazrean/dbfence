@@ -618,13 +618,13 @@ func grantMembership(member, role string, opts model.MembershipOptions, grantor 
 			parts = append(parts, plan.Keyword(" WITH ADMIN OPTION"))
 		}
 	default:
-		var list []plan.Keyword
+		var list []plan.Seq
 		for _, o := range []struct {
 			v    *bool
 			name plan.Keyword
 		}{{opts.Admin, "ADMIN"}, {opts.Inherit, "INHERIT"}, {opts.Set, "SET"}} {
 			if o.v != nil {
-				list = append(list, o.name+" "+flag(*o.v, "TRUE", "FALSE"))
+				list = append(list, plan.Seq{o.name, plan.Keyword(" "), flag(*o.v, "TRUE", "FALSE")})
 			}
 		}
 		parts = append(parts, plan.Keyword(" WITH "), plan.Join(", ", list...))

@@ -48,5 +48,6 @@ func f(name string, w word, k plan.Keyword) {
 
 	// Constants, Keyword values and numbers are fine.
 	_ = plan.SQL("", plan.Keyword("GRANT "), plan.Keyword(create), plan.Keyword(typed))
-	_ = plan.SQL("", k, plan.Keyword(k), k+" CASCADE", plan.Number(len(name)))
+	_ = plan.SQL("", k, plan.Keyword(k), plan.Number(len(name)))
+	_ = plan.SQL("", k+" CASCADE") // want `concatenating plan.Keyword at runtime`
 }

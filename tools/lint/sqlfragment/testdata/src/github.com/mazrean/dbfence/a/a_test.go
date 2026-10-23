@@ -25,4 +25,5 @@ func helpers(name string, k plan.Keyword) {
 	_ = testConv[plan.Keyword](name)  // want `plan.Keyword instantiates a type parameter that admits string conversions`
 	_ = *(*plan.Keyword)(&name)       // want `conversion to \*plan.Keyword, which contains plan.Keyword`
 	_ = []plan.Keyword([]plan.Keyword{k})
+	_ = k + k[1:]
 }

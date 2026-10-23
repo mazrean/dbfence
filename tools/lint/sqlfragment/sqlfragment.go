@@ -13,7 +13,12 @@
 // contain a Keyword, instantiations of generics defined outside
 // internal/plan with a type argument that contains a Keyword, and imports
 // of unsafe, reflect and encoding/gob (which decodes registered types into
-// interface fields such as plan.Fragment). Code the analyzer cannot read
+// interface fields such as plan.Fragment). Slicing or indexing a Keyword
+// and non-constant concatenation (k + k2, k += k2) are reported there too:
+// with them, pieces of a constant alphabet rebuild any runtime string.
+// Picking a whole constant Keyword from a slice or map stays allowed, like
+// choosing one in a switch; plan.Seq keeps each such Keyword a separate
+// fragment. Code the analyzer cannot read
 // is reported too: outside internal/plan, function declarations without a
 // Go body (implemented in assembly, which can return or store a Keyword)
 // and non-Go files compiled into the package (.s, .syso, C sources). Values
@@ -50,7 +55,7 @@ var Analyzer = &analysis.Analyzer{
 	Name: "sqlfragment",
 	Doc: "reports conversions of non-constant values to plan.Keyword or to types that contain it (SQL text must be a constant); " +
 		"outside internal/plan and test files, pointers to values that contain plan.Keyword, generic instantiations with such type " +
-		"arguments, imports of encoding/gob, reflect and unsafe, function declarations without a Go body and non-Go files; and uses of plan.QuotedIdent, plan.EscapedLiteral and plan.NewToken outside " +
+		"arguments, slicing, indexing and non-constant concatenation of plan.Keyword, imports of encoding/gob, reflect and unsafe, function declarations without a Go body and non-Go files; and uses of plan.QuotedIdent, plan.EscapedLiteral and plan.NewToken outside " +
 		"internal/driver, internal/plan and test files",
 	Run: run,
 }
@@ -80,6 +85,22 @@ func run(pass *analysis.Pass) (any, error) {
 				}
 				if strict {
 					checkNew(pass, n)
+				}
+			case *ast.SliceExpr:
+				if strict && isKeyword(pass.TypesInfo.TypeOf(n.X)) {
+					pass.Reportf(n.Pos(), "slicing plan.Keyword cuts SQL text into pieces that can rebuild a runtime string; use whole constants")
+				}
+			case *ast.IndexExpr:
+				if strict && isKeyword(pass.TypesInfo.TypeOf(n.X)) {
+					pass.Reportf(n.Pos(), "indexing plan.Keyword takes SQL text apart; use whole constants")
+				}
+			case *ast.BinaryExpr:
+				if tv := pass.TypesInfo.Types[n]; strict && n.Op == token.ADD && tv.Value == nil && containsKeyword(tv.Type) {
+					pass.Reportf(n.Pos(), "concatenating plan.Keyword at runtime rebuilds SQL text from runtime values; use constants or plan.Seq")
+				}
+			case *ast.AssignStmt:
+				if strict && n.Tok == token.ADD_ASSIGN && containsKeyword(pass.TypesInfo.TypeOf(n.Lhs[0])) {
+					pass.Reportf(n.Pos(), "concatenating plan.Keyword at runtime rebuilds SQL text from runtime values; use constants or plan.Seq")
 				}
 			case *ast.UnaryExpr:
 				if strict && n.Op == token.AND && containsKeyword(pass.TypesInfo.TypeOf(n.X)) {
