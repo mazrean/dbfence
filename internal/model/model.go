@@ -89,8 +89,28 @@ type Role struct {
 	ID RoleID
 	// AuthPlugin is MySQL only.
 	AuthPlugin string
+	// MemberOptions holds the managed options of memberships in MemberOf.
+	// A membership without an entry has no managed options.
+	MemberOptions map[RoleID]MembershipOptions
 	// MemberOf is nil when membership is not managed.
 	MemberOf []RoleID
+}
+
+// MembershipOptions are the options of a membership. Nil fields are not
+// managed. Inherit and Set are PostgreSQL 16+ only.
+type MembershipOptions struct {
+	Admin   *bool
+	Inherit *bool
+	Set     *bool
+}
+
+// MembershipState is the observed state of a membership. When a membership
+// was granted more than once (by several grantors on PostgreSQL 16+), an
+// option is true if any of the grants carries it.
+type MembershipState struct {
+	Admin   bool
+	Inherit bool
+	Set     bool
 }
 
 // RoleState is the observed state of a role.
@@ -101,6 +121,8 @@ type RoleState struct {
 	// when the connected user cannot read verifiers.
 	PasswordHash []byte
 	MemberOf     []RoleID
+	// MemberOptions is the state of each membership in MemberOf.
+	MemberOptions map[RoleID]MembershipState
 	// DefaultRoles are the roles activated at login (MySQL only).
 	DefaultRoles     []RoleID
 	ConnectionLimit  int

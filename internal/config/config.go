@@ -59,19 +59,19 @@ type databaseBlock struct {
 }
 
 type roleBlock struct {
-	Name            *string   `hcl:"name"`
-	Host            *string   `hcl:"host"`
-	Login           *bool     `hcl:"login"`
-	Password        *string   `hcl:"password"`
-	MemberOf        *[]string `hcl:"member_of"`
-	Superuser       *bool     `hcl:"superuser"`
-	CreateDB        *bool     `hcl:"createdb"`
-	CreateRole      *bool     `hcl:"createrole"`
-	Inherit         *bool     `hcl:"inherit"`
-	Replication     *bool     `hcl:"replication"`
-	BypassRLS       *bool     `hcl:"bypassrls"`
-	ConnectionLimit *int      `hcl:"connection_limit"`
-	AuthPlugin      *string   `hcl:"auth_plugin"`
+	Name            *string        `hcl:"name"`
+	Host            *string        `hcl:"host"`
+	Login           *bool          `hcl:"login"`
+	Password        *string        `hcl:"password"`
+	MemberOf        hcl.Expression `hcl:"member_of"`
+	Superuser       *bool          `hcl:"superuser"`
+	CreateDB        *bool          `hcl:"createdb"`
+	CreateRole      *bool          `hcl:"createrole"`
+	Inherit         *bool          `hcl:"inherit"`
+	Replication     *bool          `hcl:"replication"`
+	BypassRLS       *bool          `hcl:"bypassrls"`
+	ConnectionLimit *int           `hcl:"connection_limit"`
+	AuthPlugin      *string        `hcl:"auth_plugin"`
 }
 
 type schemaBlock struct {
@@ -607,11 +607,14 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 		Replication: blk.Replication, BypassRLS: blk.BypassRLS, ConnectionLimit: blk.ConnectionLimit,
 		AuthPlugin: deref(blk.AuthPlugin),
 	}
-	if blk.MemberOf != nil {
+	members, managed, dd := decodeMemberOf(blk.MemberOf, ctx, engine)
+	diags = append(diags, dd...)
+	if managed {
 		role.MemberOf = []model.RoleID{}
 		rng := attrRange(r.attrs, "member_of", r.block.DefRange)
 		seen := map[model.RoleID]bool{}
-		for _, m := range *blk.MemberOf {
+		for _, e := range members {
+			m := e.role
 			id := ParseRoleID(m, engine)
 			switch {
 			case engine == model.EngineMySQL && id.Host == "":
@@ -630,6 +633,12 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 				out.hostless = append(out.hostless, id)
 			}
 			role.MemberOf = append(role.MemberOf, id)
+			if e.opts != (model.MembershipOptions{}) {
+				if role.MemberOptions == nil {
+					role.MemberOptions = map[model.RoleID]model.MembershipOptions{}
+				}
+				role.MemberOptions[id] = e.opts
+			}
 		}
 		model.SortRoleIDs(role.MemberOf)
 	}
