@@ -98,19 +98,21 @@ func secretValues(sec string) []string {
 	return out
 }
 
-// redactValues replaces, in a single pass, each literal context that holds
-// one of values, or a prefix of it of at least minRedactPrefix bytes: text
-// that starts after a single quote and ends at a single quote or at the
-// end of text. At each quote the longest match over all values wins, so a
-// shorter form (such as the escaped one, which stops at an inner quote)
-// cannot cut a longer one short and leave the rest of the secret behind.
+// redactValues replaces each literal context that holds one of values,
+// or a prefix of it of at least minRedactPrefix bytes: text that starts
+// after a single quote and ends at a single quote or at the end of text.
+// Matches are collected at every quote, including quotes inside an
+// earlier match, and their union is redacted. A secret that itself starts
+// with quotes then cannot hide behind a shorter match that begins one
+// quote earlier, and a shorter form (such as the escaped one, which stops
+// at an inner quote) cannot leave the rest of a longer one behind.
 func redactValues(text string, values []string) string {
 	const marker = "<redacted>"
 	if len(values) == 0 {
 		return text
 	}
-	var sb strings.Builder
-	last := 0
+	covered := make([]bool, len(text))
+	found := false
 	for i := 0; i < len(text); i++ {
 		if text[i] != '\'' {
 			continue
@@ -120,19 +122,25 @@ func redactValues(text string, values []string) string {
 		for _, v := range values {
 			k = max(k, literalMatchLen(text[start:], v))
 		}
-		if k == 0 {
-			continue
+		for j := start; j < start+k; j++ {
+			covered[j] = true
 		}
-		end := start + k
-		sb.WriteString(text[last:start])
-		sb.WriteString(marker)
-		last = end
-		i = end - 1
+		found = found || k > 0
 	}
-	if last == 0 {
+	if !found {
 		return text
 	}
-	sb.WriteString(text[last:])
+	var sb strings.Builder
+	for i := 0; i < len(text); i++ {
+		if !covered[i] {
+			sb.WriteByte(text[i])
+			continue
+		}
+		sb.WriteString(marker)
+		for i+1 < len(text) && covered[i+1] {
+			i++
+		}
+	}
 	return sb.String()
 }
 

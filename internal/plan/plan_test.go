@@ -118,6 +118,13 @@ func TestStatementRedact(t *testing.T) {
 			leak:   []string{"abcd", "efgh"},
 		},
 		{
+			name:   "secret starting with quotes, echoed one quote later",
+			secret: "'''''abcdef'",
+			msg:    "Error 1064 (42000): You have an error in your SQL syntax; near ''''''abcdef'' at line 1",
+			want:   "Error 1064 (42000): You have an error in your SQL syntax; near '<redacted>'' at line 1",
+			leak:   []string{"abcdef"},
+		},
+		{
 			name:   "postgres escape string, escaped echo",
 			secret: `E'back\\slash'`,
 			msg:    `ERROR: syntax error at or near "E'back\\slash'" (SQLSTATE 42601)`,
