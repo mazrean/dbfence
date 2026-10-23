@@ -30,7 +30,8 @@ const Placeholder = "<redacted>"
 // it may be printed. It is safe for concurrent use.
 type Registry struct {
 	set    map[string]struct{}
-	sorted []string // set, longest first; nil when stale
+	sorted []string   // set, longest first; nil when stale
+	lines  [][]string // forms that span lines, split into their lines
 	mu     sync.Mutex
 }
 
@@ -71,9 +72,10 @@ func (r *Registry) Add(s string) {
 // also with backslashes doubled as in MySQL and PostgreSQL E'' literals).
 // The output Writer escapes control characters before it redacts, so
 // every form is also kept with control characters escaped as by
-// plan.EscapeLines and plan.Escape. A form spanning lines is also split
-// into its lines, because output is redacted line by line. Forms shorter
-// than MinLength are dropped.
+// plan.EscapeLines and plan.Escape. A form spanning lines is also kept
+// without its leading and trailing line breaks, and split into its
+// lines, so that a single line of it printed alone is found too. Forms
+// shorter than MinLength are dropped.
 func Variants(s string) []string {
 	bases := []string{s}
 	if n := norm.NFC.String(s); n != s {
@@ -83,7 +85,7 @@ func Variants(s string) []string {
 	var out []string
 	add := func(v string) {
 		for _, form := range []string{v, plan.EscapeLines(v), plan.Escape(v)} {
-			for _, piece := range append(strings.Split(form, "\n"), form) {
+			for _, piece := range append(strings.Split(form, "\n"), form, strings.Trim(form, "\n")) {
 				if _, ok := seen[piece]; ok || len(piece) < MinLength {
 					continue
 				}
@@ -129,14 +131,20 @@ func unquote(q string) string {
 	return q[1 : len(q)-1]
 }
 
-// snapshot returns the registered forms, longest first.
-func (r *Registry) snapshot() []string {
+// snapshot returns the registered forms, longest first, and those that
+// span lines (without leading and trailing line breaks) split into their
+// lines.
+func (r *Registry) snapshot() ([]string, [][]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sorted == nil && len(r.set) > 0 {
 		r.sorted = make([]string, 0, len(r.set))
+		r.lines = nil
 		for v := range r.set {
 			r.sorted = append(r.sorted, v)
+			if strings.Contains(v, "\n") && strings.Trim(v, "\n") == v {
+				r.lines = append(r.lines, strings.Split(v, "\n"))
+			}
 		}
 		slices.SortFunc(r.sorted, func(a, b string) int {
 			if d := len(b) - len(a); d != 0 {
@@ -145,7 +153,7 @@ func (r *Registry) snapshot() []string {
 			return strings.Compare(a, b)
 		})
 	}
-	return r.sorted
+	return r.sorted, r.lines
 }
 
 // Redact returns s with every occurrence of a registered form replaced
@@ -153,9 +161,15 @@ func (r *Registry) snapshot() []string {
 // different secrets, are replaced together, so no part of any occurrence
 // remains.
 func (r *Registry) Redact(s string) string {
-	forms := r.snapshot()
+	return replaceSpans(s, r.spans(s))
+}
+
+// spans returns the merged byte ranges of s that hold registered forms,
+// in order.
+func (r *Registry) spans(s string) [][2]int {
+	forms, _ := r.snapshot()
 	if len(forms) == 0 || len(s) < MinLength {
-		return s
+		return nil
 	}
 	var spans [][2]int
 	for _, f := range forms {
@@ -169,21 +183,55 @@ func (r *Registry) Redact(s string) string {
 			i = start + 1
 		}
 	}
+	slices.SortFunc(spans, func(a, b [2]int) int { return a[0] - b[0] })
+	var merged [][2]int
+	for _, sp := range spans {
+		if n := len(merged); n > 0 && sp[0] <= merged[n-1][1] {
+			merged[n-1][1] = max(merged[n-1][1], sp[1])
+			continue
+		}
+		merged = append(merged, sp)
+	}
+	return merged
+}
+
+// replaceSpans returns s with each of the ordered, disjoint spans
+// replaced by Placeholder.
+func replaceSpans(s string, spans [][2]int) string {
 	if len(spans) == 0 {
 		return s
 	}
-	slices.SortFunc(spans, func(a, b [2]int) int { return a[0] - b[0] })
 	var sb strings.Builder
 	pos := 0
-	for k := 0; k < len(spans); {
-		start, end := spans[k][0], spans[k][1]
-		for k++; k < len(spans) && spans[k][0] <= end; k++ {
-			end = max(end, spans[k][1])
-		}
-		sb.WriteString(s[pos:start])
+	for _, sp := range spans {
+		sb.WriteString(s[pos:sp[0]])
 		sb.WriteString(Placeholder)
-		pos = end
+		pos = sp[1]
 	}
 	sb.WriteString(s[pos:])
 	return sb.String()
+}
+
+// openFrom returns the index of the first of lines (complete lines
+// without their line breaks) from which the lines to the end are the
+// beginning of a registered form spanning lines that has more lines to
+// come, or -1. Output from there on may be the beginning of a secret.
+func (r *Registry) openFrom(lines []string) int {
+	_, forms := r.snapshot()
+	first := -1
+	for _, f := range forms {
+		for s := max(0, len(lines)-(len(f)-1)); s < len(lines); s++ {
+			if first >= 0 && s >= first {
+				break
+			}
+			if !strings.HasSuffix(lines[s], f[0]) {
+				continue
+			}
+			if slices.Equal(lines[s+1:], f[1:len(lines)-s]) {
+				first = s
+				break
+			}
+		}
+	}
+	return first
 }

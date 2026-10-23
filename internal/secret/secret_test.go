@@ -194,3 +194,49 @@ func TestWriterRedactsEscapedForms(t *testing.T) {
 		})
 	}
 }
+
+// TestWriterMultiLineSecrets checks that a secret spanning lines is
+// redacted as a whole, even when its lines are shorter than MinLength.
+func TestWriterMultiLineSecrets(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		want    string
+		secrets []string
+		writes  []string
+		flush   bool
+	}{
+		{name: "lines shorter than MinLength", secrets: []string{"k9Q\nz7W\nm2X\np4R"}, writes: []string{"near k9Q\nz7W\nm2X\np4R at line 1\n"}, want: "near <redacted> at line 1\n"},
+		{name: "short last line", secrets: []string{"Vb6nMk2LqP\nx8Z"}, writes: []string{"near Vb6nMk2LqP\nx8Z at line 1\n"}, want: "near <redacted> at line 1\n"},
+		{name: "one line per write", secrets: []string{"k9Q\nz7W\nm2X"}, writes: []string{"near k9Q\n", "z7W\n", "m2X at 1\n"}, want: "near <redacted> at 1\n"},
+		{name: "lines are written once they differ", secrets: []string{"k9Q\nz7W\nm2X"}, writes: []string{"a k9Q\nz7W\nother\n"}, want: "a k9Q\nz7W\nother\n"},
+		{name: "a possible beginning is held", secrets: []string{"k9Q\nz7W"}, writes: []string{"first\nsecond k9Q\n"}, want: "first\n"},
+		{name: "flush writes held lines", secrets: []string{"k9Q\nz7W"}, writes: []string{"first\nsecond k9Q\n"}, flush: true, want: "first\nsecond k9Q\n"},
+		{name: "leading and trailing line breaks", secrets: []string{"\nk9Q\nz7W\n"}, writes: []string{"x\nk9Q\nz7W\ny\n"}, want: "x\n<redacted>\ny\n"},
+		{name: "secret across the start of another", secrets: []string{"aa\nbbbb", "bbbb\ncc\ndd"}, writes: []string{"x aa\n", "bbbb\n", "cc\n", "zz\n"}, want: "x <redacted>\ncc\nzz\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewRegistry()
+			for _, s := range tt.secrets {
+				r.Add(s)
+			}
+			var out bytes.Buffer
+			w := NewWriter(&out, r)
+			for _, s := range tt.writes {
+				if _, err := w.Write([]byte(s)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.flush {
+				if err := w.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out.String() != tt.want {
+				t.Errorf("output = %q, want %q", out.String(), tt.want)
+			}
+		})
+	}
+}
