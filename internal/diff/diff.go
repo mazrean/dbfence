@@ -521,7 +521,7 @@ func (df *differ) privileges() {
 		return df.desired.Engine == model.EnginePostgres && p.Grantee.Name == df.owner(p.Object)
 	}
 	managed := func(p model.Privilege) bool {
-		if p.Grantee.IsPublic() {
+		if df.isPublic(p.Grantee) {
 			// PUBLIC is managed only where a grant block names it.
 			if !slices.Contains(df.desired.PublicObjects, p.Object) {
 				return false
@@ -633,16 +633,22 @@ func (df *differ) createdPublicPrivileges() []model.Privilege {
 	return out
 }
 
+// isPublic reports whether id is PostgreSQL's PUBLIC pseudo-role. On
+// MySQL, 'public'@'' is an ordinary account.
+func (df *differ) isPublic(id model.RoleID) bool {
+	return df.desired.Engine == model.EnginePostgres && id.IsPublic()
+}
+
 // warnHeldByPublic warns when privileges revoked from a role stay
 // available to it because PUBLIC holds them on an object where PUBLIC is
 // not managed.
 func (df *differ) warnHeldByPublic(g grantGroup, privs []string) {
-	if g.grantee.IsPublic() || slices.Contains(df.desired.PublicObjects, g.obj) {
+	if df.isPublic(g.grantee) || slices.Contains(df.desired.PublicObjects, g.obj) {
 		return
 	}
 	var held []string
 	for _, p := range df.current.Privileges {
-		if p.Grantee.IsPublic() && p.Object == g.obj && slices.Contains(privs, p.Name) && !slices.Contains(held, p.Name) {
+		if df.isPublic(p.Grantee) && p.Object == g.obj && slices.Contains(privs, p.Name) && !slices.Contains(held, p.Name) {
 			held = append(held, p.Name)
 		}
 	}

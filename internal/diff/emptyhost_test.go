@@ -74,3 +74,58 @@ func TestComputeMySQLEmptyHost(t *testing.T) {
 		})
 	}
 }
+
+// TestComputeMySQLPublicAccount checks that the MySQL account 'public'@''
+// is an ordinary account, not PostgreSQL's PUBLIC pseudo-role.
+func TestComputeMySQLPublicAccount(t *testing.T) {
+	t.Parallel()
+	root := model.RoleID{Name: "root", Host: "localhost"}
+	app := model.RoleID{Name: "app", Host: "%"}
+	pub := model.RoleID{Name: "public", Host: ""}
+	tests := []struct {
+		name         string
+		wantStmts    []string
+		wantWarnings []string
+		prune        bool
+	}{
+		{
+			name:         "warned without prune",
+			wantStmts:    []string{"REVOKE SELECT ON `shop`.* FROM 'app'@'%'"},
+			wantWarnings: []string{`unmanaged role "public"@"" (use --prune to drop it)`},
+		},
+		{
+			name:      "dropped with prune",
+			prune:     true,
+			wantStmts: []string{"REVOKE SELECT ON `shop`.* FROM 'app'@'%'", "DROP USER 'public'@''"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{
+				Engine:    model.EngineMySQL,
+				Roles:     []model.Role{{ID: app}},
+				Databases: []model.Database{{Name: "shop"}},
+			}
+			current := &model.Current{
+				CurrentUser: root,
+				Roles:       []model.RoleState{{ID: root, Login: true}, {ID: app}, {ID: pub}},
+				Databases:   []model.Database{{Name: "shop"}},
+				Privileges: []model.Privilege{
+					{Grantee: app, Object: dbObj("shop"), Name: "SELECT"},
+					{Grantee: pub, Object: dbObj("shop"), Name: "SELECT"},
+				},
+			}
+			p, err := diff.Compute(desired, current, mysql.Dialect{}, diff.Options{Prune: tt.prune})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.wantStmts, statements(p)); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			if d := cmp.Diff(tt.wantWarnings, p.Warnings); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
+			}
+		})
+	}
+}
