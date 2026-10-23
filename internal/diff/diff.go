@@ -288,13 +288,17 @@ func (df *differ) schemas() {
 
 // owner returns the effective owner of obj after the plan runs.
 func (df *differ) owner(obj model.Object) string {
+	if o := df.desiredOwner(obj); o != "" {
+		return o
+	}
+	return df.currentOwner(obj)
+}
+
+// desiredOwner returns the declared owner of obj, or "" when the owner
+// is not managed.
+func (df *differ) desiredOwner(obj model.Object) string {
 	if obj.Type == model.ObjectSchema {
 		for _, s := range df.desired.Schemas {
-			if s.Database == obj.Database && s.Name == obj.Schema && s.Owner != "" {
-				return s.Owner
-			}
-		}
-		for _, s := range df.current.Schemas {
 			if s.Database == obj.Database && s.Name == obj.Schema {
 				return s.Owner
 			}
@@ -302,9 +306,22 @@ func (df *differ) owner(obj model.Object) string {
 		return ""
 	}
 	for _, d := range df.desired.Databases {
-		if d.Name == obj.Database && d.Owner != "" {
+		if d.Name == obj.Database {
 			return d.Owner
 		}
+	}
+	return ""
+}
+
+// currentOwner returns the owner of obj before the plan runs.
+func (df *differ) currentOwner(obj model.Object) string {
+	if obj.Type == model.ObjectSchema {
+		for _, s := range df.current.Schemas {
+			if s.Database == obj.Database && s.Name == obj.Schema {
+				return s.Owner
+			}
+		}
+		return ""
 	}
 	for _, d := range df.current.Databases {
 		if d.Name == obj.Database {
@@ -312,6 +329,20 @@ func (df *differ) owner(obj model.Object) string {
 		}
 	}
 	return ""
+}
+
+// afterOwnerChange returns p as it will be after the planned owner
+// changes. PostgreSQL's ALTER ... OWNER TO rewrites the old owner's ACL
+// entries to the new owner, so they no longer belong to the old owner.
+func (df *differ) afterOwnerChange(p model.Privilege) model.Privilege {
+	if df.desired.Engine != model.EnginePostgres || p.Grantee.Host != "" {
+		return p
+	}
+	from, to := df.currentOwner(p.Object), df.desiredOwner(p.Object)
+	if from != "" && to != "" && from != to && p.Grantee.Name == from {
+		p.Grantee = model.RoleID{Name: to}
+	}
+	return p
 }
 
 type grantGroup struct {
@@ -333,10 +364,16 @@ func (df *differ) privileges() {
 		return p.Object.Type != model.ObjectSchema || df.managedSchema(p.Object.Database, p.Object.Schema)
 	}
 	want := map[model.PrivilegeKey]model.Privilege{}
+	ineffective := map[grantGroup]bool{}
 	for _, p := range df.desired.Privileges {
-		if !implicit(p) {
-			want[p.Key()] = p
+		if implicit(p) {
+			ineffective[grantGroup{grantee: p.Grantee, obj: p.Object}] = true
+			continue
 		}
+		want[p.Key()] = p
+	}
+	for _, g := range sortedGroups(ineffective) {
+		df.warn("grant to %q on %s has no effect: %q owns it and holds every privilege implicitly", g.grantee, objectLabel(g.obj), g.grantee)
 	}
 	// Unknown privileges are re-granted (GRANT is idempotent) and never revoked.
 	unknown := df.current.Unreadable.Privileges
@@ -345,9 +382,16 @@ func (df *differ) privileges() {
 		if unknown {
 			break
 		}
-		if managed(p) && !implicit(p) {
-			have[p.Key()] = p
+		p = df.afterOwnerChange(p)
+		if !managed(p) || implicit(p) {
+			continue
 		}
+		// One entry per grantor may exist; the grant option is held if
+		// any of them carries it.
+		if c, ok := have[p.Key()]; ok {
+			p.GrantOption = p.GrantOption || c.GrantOption
+		}
+		have[p.Key()] = p
 	}
 
 	grants := map[grantGroup][]string{}
@@ -387,7 +431,15 @@ func (df *differ) privileges() {
 	}
 }
 
-func sortedGroups(m map[grantGroup][]string) []grantGroup {
+// objectLabel names obj for plan output.
+func objectLabel(obj model.Object) string {
+	if obj.Type == model.ObjectSchema {
+		return fmt.Sprintf("schema %q in database %q", obj.Schema, obj.Database)
+	}
+	return fmt.Sprintf("%s %q", obj.Type, obj.Database)
+}
+
+func sortedGroups[V any](m map[grantGroup]V) []grantGroup {
 	keys := make([]grantGroup, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

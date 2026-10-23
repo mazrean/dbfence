@@ -53,8 +53,6 @@ func pgDesired() *model.Desired {
 		Privileges: []model.Privilege{
 			{Grantee: pgID("app"), Object: dbObj("app"), Name: "CONNECT"},
 			{Grantee: pgID("app"), Object: model.Object{Type: model.ObjectSchema, Database: "app", Schema: "api"}, Name: "USAGE"},
-			// Owner privileges are implicit and must be ignored.
-			{Grantee: pgID("owner"), Object: dbObj("app"), Name: "CREATE"},
 		},
 	}
 }
@@ -148,8 +146,10 @@ func TestComputeDrift(t *testing.T) {
 		`REVOKE "postgres" FROM "app"`,
 		`ALTER DATABASE "app" OWNER TO "owner"`,
 		`app: ALTER SCHEMA "api" OWNER TO "owner"`,
-		`REVOKE GRANT OPTION FOR CONNECT ON DATABASE "app" FROM "app"`,
-		`REVOKE TEMPORARY ON DATABASE "app" FROM "app"`,
+		// ALTER ... OWNER TO moves the ACL entries of the old owner "app"
+		// to "owner", so the declared privileges are granted again.
+		`GRANT CONNECT ON DATABASE "app" TO "app"`,
+		`app: GRANT USAGE ON SCHEMA "api" TO "app"`,
 	}
 	if d := cmp.Diff(want, statements(p)); d != "" {
 		t.Errorf("statements (-want +got):\n%s", d)
