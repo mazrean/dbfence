@@ -72,6 +72,8 @@ func TestFunctions(t *testing.T) {
 		{"gcp empty version in name", `gcp_secretmanager("projects/p/secrets/s/versions/")`, cty.NilVal, "must look like"},
 		{"gcp extra segment", `gcp_secretmanager("projects/p/secrets/s/versions/1/x")`, cty.NilVal, "must look like"},
 		{"gcp regional", `gcp_secretmanager("projects/p/locations/l/secrets/s")`, cty.NilVal, "regional secrets"},
+		{"gcp project named locations", `gcp_secretmanager("projects/locations/secrets/s")`, cty.StringVal("payload:projects/locations/secrets/s/versions/latest"), ""},
+		{"gcp project named versions", `gcp_secretmanager("projects/versions/secrets/s", "2")`, cty.StringVal("payload:projects/versions/secrets/s/versions/2"), ""},
 		{"tfstate attribute", `tfstate("testdata/terraform.tfstate", "aws_db_instance.main.address")`, cty.StringVal("main.rds.amazonaws.com"), ""},
 		{"tfstate output", `tfstate("testdata/terraform.tfstate", "output.db_host")`, cty.StringVal("db.internal"), ""},
 		{"tfstate number", `tfstate("testdata/terraform.tfstate", "aws_db_instance.main.port")`, cty.NumberIntVal(5432), ""},

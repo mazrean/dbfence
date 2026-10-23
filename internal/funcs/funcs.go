@@ -338,14 +338,17 @@ var (
 // gcpVersionName returns the version resource name, or a function.ArgError
 // pointing at the offending argument.
 func gcpVersionName(name string, rest []cty.Value) (string, error) {
-	if strings.HasPrefix(name, "projects/") && strings.Contains(name, "/locations/") {
+	// Classify by segment: the project ID itself may be "locations" or
+	// "versions".
+	if seg := strings.Split(name, "/"); len(seg) > 2 && seg[0] == "projects" && seg[2] == "locations" {
 		return "", function.NewArgErrorf(0, "regional secrets (projects/<project>/locations/<location>/...) are not supported, got %q", name)
 	}
-	if !gcpSecretName.MatchString(name) {
+	m := gcpSecretName.FindStringSubmatch(name)
+	if m == nil {
 		return "", function.NewArgErrorf(0, "name must look like projects/<project>/secrets/<secret>[/versions/<version>], got %q", name)
 	}
 	version, hasVersion := optionalString(rest)
-	if strings.Contains(name, "/versions/") {
+	if m[1] != "" {
 		if hasVersion {
 			return "", function.NewArgErrorf(0, "version given twice in %q", name)
 		}
