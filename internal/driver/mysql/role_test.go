@@ -46,11 +46,11 @@ func TestRoleWarnings(t *testing.T) {
 		plugins []string
 		want    []string
 	}{
-		{name: "new account without password", role: model.Role{ID: app, Login: new(true)}, plugins: active, want: []string{`"app@%" can log in without a password`}},
+		{name: "new account without password", role: model.Role{ID: app, Login: new(true)}, plugins: active, want: []string{`"app"@"%" can log in without a password`}},
 		{
 			name: "existing account with an empty password", role: model.Role{ID: app, Login: new(true)}, plugins: active,
 			cur:  []model.RoleState{{ID: app, AuthPlugin: "caching_sha2_password", PasswordReadable: true}},
-			want: []string{`"app@%" can log in without a password`},
+			want: []string{`"app"@"%" can log in without a password`},
 		},
 		{
 			name: "existing account with a password", role: model.Role{ID: app, Login: new(true)}, plugins: active,
@@ -69,12 +69,12 @@ func TestRoleWarnings(t *testing.T) {
 		{name: "active plugin", role: model.Role{ID: app, Login: new(true), Password: new("p"), AuthPlugin: "SHA256_PASSWORD"}, plugins: active},
 		{
 			name: "password plugin without password", role: model.Role{ID: app, Login: new(true), AuthPlugin: "sha256_password"}, plugins: active,
-			want: []string{`"app@%" can log in without a password`},
+			want: []string{`"app"@"%" can log in without a password`},
 		},
 		{name: "passwordless plugin", role: model.Role{ID: app, Login: new(true), AuthPlugin: "auth_socket"}, plugins: []string{"auth_socket"}},
 		{
 			name: "inactive plugin", role: model.Role{ID: app, Login: new(true), Password: new("p"), AuthPlugin: "mysql_native_password"}, plugins: active,
-			want: []string{`auth_plugin "mysql_native_password" of "app@%" is not an active authentication plugin on the server (MySQL 8.4 loads it only with --mysql-native-password=ON)`},
+			want: []string{`auth_plugin "mysql_native_password" of "app"@"%" is not an active authentication plugin on the server (MySQL 8.4 loads it only with --mysql-native-password=ON)`},
 		},
 		{name: "unknown plugins", role: model.Role{ID: app, Login: new(true), Password: new("p"), AuthPlugin: "mysql_native_password"}},
 	}

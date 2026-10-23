@@ -137,7 +137,7 @@ func TestDBPrivilegesPatterns(t *testing.T) {
 		{
 			name:      "other pattern covering a declared database is reported",
 			rows:      []dbGrant{{grantee: app, db: `my\_%`, privs: []string{"DELETE"}}, {grantee: app, db: `my\_app`, privs: []string{"SELECT"}}},
-			wantWarns: []string{`"app@%" holds privileges on the database pattern "my\\_%", which also matches declared database "my_app"`},
+			wantWarns: []string{`"app"@"%" holds privileges on the database pattern "my\\_%", which also matches declared database "my_app"`},
 		},
 		{
 			name: "pattern of an undeclared role is ignored",

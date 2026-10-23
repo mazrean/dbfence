@@ -59,11 +59,14 @@ type DefaultRoleSetter interface {
 }
 
 // Execution phases. Roles come first because databases and schemas
-// reference owners; drops run in reverse dependency order.
+// reference owners. Memberships follow right after roles: creating a
+// database owned by another role, or handing it over, requires the
+// connected user to be a member of that role. Drops run in reverse
+// dependency order.
 const (
 	phaseRole = iota
-	phaseDatabase
 	phaseMembership
+	phaseDatabase
 	phaseSchema
 	phaseGrant
 	phaseRevoke
@@ -93,7 +96,7 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 	if err != nil {
 		return nil, err
 	}
-	df := &differ{d: d, opts: opts, desired: desired, current: current, ignore: ig, warnings: slices.Clone(current.Warnings)}
+	df := &differ{d: d, opts: opts, desired: desired, current: sortedCurrent(current), ignore: ig, warnings: slices.Clone(current.Warnings)}
 	if !current.Unreadable.Roles {
 		if err := df.checkReferences(); err != nil {
 			return nil, err
@@ -114,6 +117,18 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 	return p, nil
 }
 
+// sortedCurrent returns a copy of cur whose objects are sorted, so that
+// the plan does not depend on the order in which they were read.
+func sortedCurrent(cur *model.Current) *model.Current {
+	c := *cur
+	c.Roles = slices.SortedFunc(slices.Values(cur.Roles), func(a, b model.RoleState) int { return model.CompareRoleIDs(a.ID, b.ID) })
+	c.Databases = slices.SortedFunc(slices.Values(cur.Databases), func(a, b model.Database) int { return strings.Compare(a.Name, b.Name) })
+	c.Schemas = slices.SortedFunc(slices.Values(cur.Schemas), func(a, b model.Schema) int {
+		return cmp.Or(strings.Compare(a.Database, b.Database), strings.Compare(a.Name, b.Name))
+	})
+	return &c
+}
+
 func (df *differ) add(phase int, action plan.Action, resource string, stmts []plan.Statement) {
 	if len(stmts) == 0 {
 		return
@@ -127,7 +142,19 @@ func (df *differ) warn(format string, args ...any) {
 	df.warnings = append(df.warnings, fmt.Sprintf(format, args...))
 }
 
-func roleResource(id model.RoleID) string { return fmt.Sprintf("role %q", id) }
+// roleResource names a role for plan output: "user" for login roles
+// (declared by user blocks by default), "role" otherwise.
+func (df *differ) roleResource(id model.RoleID) string {
+	kind := "role"
+	if i := slices.IndexFunc(df.desired.Roles, func(r model.Role) bool { return r.ID == id }); i >= 0 {
+		if l := df.desired.Roles[i].Login; l != nil && *l {
+			kind = "user"
+		}
+	} else if cur, ok := df.currentRole(id); ok && cur.Login {
+		kind = "user"
+	}
+	return fmt.Sprintf("%s %q", kind, id)
+}
 
 func (df *differ) currentRole(id model.RoleID) (model.RoleState, bool) {
 	i := slices.IndexFunc(df.current.Roles, func(r model.RoleState) bool { return r.ID == id })
@@ -155,7 +182,7 @@ func (df *differ) checkReferences() error {
 	}
 	for _, r := range df.desired.Roles {
 		for _, m := range r.MemberOf {
-			check(roleResource(r.ID)+" member_of", m)
+			check(df.roleResource(r.ID)+" member_of", m)
 		}
 	}
 	for _, db := range df.desired.Databases {
@@ -191,21 +218,25 @@ func (df *differ) roles() {
 	u := df.current.Unreadable
 	for _, r := range df.desired.Roles {
 		cur, exists := df.currentRole(r.ID)
+		self := exists && r.ID == df.current.CurrentUser
+		if self {
+			r = df.protectCurrentUser(r, cur)
+		}
 		switch {
 		case !exists && u.Roles:
 			// Existence is unknown: create idempotently and only apply
 			// what does not need the current state.
-			df.add(phaseRole, plan.ActionCreate, roleResource(r.ID)+" (if not exists)", df.d.EnsureRole(r))
+			df.add(phaseRole, plan.ActionCreate, df.roleResource(r.ID)+" (if not exists)", df.d.EnsureRole(r))
 			cur = model.RoleState{ID: r.ID, AttributesUnknown: true}
 			stmts, warns := df.d.AlterRole(r, cur, df.opts.ForcePassword)
 			df.warnings = append(df.warnings, warns...)
-			df.add(phaseRole, plan.ActionUpdate, roleResource(r.ID), stmts)
+			df.add(phaseRole, plan.ActionUpdate, df.roleResource(r.ID), stmts)
 		case !exists:
-			df.add(phaseRole, plan.ActionCreate, roleResource(r.ID), df.d.CreateRole(r))
+			df.add(phaseRole, plan.ActionCreate, df.roleResource(r.ID), df.d.CreateRole(r))
 		default:
 			stmts, warns := df.d.AlterRole(r, cur, df.opts.ForcePassword)
 			df.warnings = append(df.warnings, warns...)
-			df.add(phaseRole, plan.ActionUpdate, roleResource(r.ID), stmts)
+			df.add(phaseRole, plan.ActionUpdate, df.roleResource(r.ID), stmts)
 		}
 		if r.MemberOf == nil {
 			continue
@@ -221,14 +252,35 @@ func (df *differ) roles() {
 			}
 		}
 		for _, m := range model.SortRoleIDs(slices.Clone(have)) {
-			if !unknown && !slices.Contains(want, m) {
-				df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.RevokeMembership(r.ID, m))
+			if unknown || slices.Contains(want, m) {
+				continue
 			}
+			if self {
+				df.warn("not revoking membership of the connected user %q in %q: dbfence may rely on it", r.ID, m)
+				continue
+			}
+			df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.RevokeMembership(r.ID, m))
 		}
 		if s, ok := df.d.(DefaultRoleSetter); ok {
-			df.add(phaseMembership, plan.ActionUpdate, "default roles of "+roleResource(r.ID), s.SetDefaultRoles(r, cur))
+			df.add(phaseMembership, plan.ActionUpdate, "default roles of "+df.roleResource(r.ID), s.SetDefaultRoles(r, cur))
 		}
 	}
+}
+
+// protectCurrentUser drops the attribute changes of r that would lock
+// the connected user out or strip its superuser status.
+func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Role {
+	if r.Login != nil && !*r.Login {
+		if cur.Login || cur.AttributesUnknown {
+			df.warn("not disabling login of the connected user %q: it would lock dbfence out", r.ID)
+		}
+		r.Login = nil
+	}
+	if r.Superuser != nil && !*r.Superuser && cur.Superuser {
+		df.warn("not removing superuser from the connected user %q: dbfence may rely on it", r.ID)
+		r.Superuser = nil
+	}
+	return r
 }
 
 // databases returns the names of databases dropped by the plan.
@@ -246,7 +298,8 @@ func (df *differ) databases() []string {
 	}
 	var dropped []string
 	for _, c := range df.current.Databases {
-		if df.managedDatabase(c.Name) || df.d.IsSystemDatabase(c.Name) || df.ignore.database(c.Name) {
+		if df.managedDatabase(c.Name) || df.d.IsSystemDatabase(c.Name) || df.ignore.database(c.Name) ||
+			(c.Name != "" && c.Name == df.current.CurrentDatabase) {
 			continue
 		}
 		if !df.opts.Prune {
@@ -271,6 +324,13 @@ func (df *differ) schemas() {
 	for _, s := range df.desired.Schemas {
 		res := fmt.Sprintf("schema %q in database %q", s.Name, s.Database)
 		i := slices.IndexFunc(df.current.Schemas, func(c model.Schema) bool { return c.Database == s.Database && c.Name == s.Name })
+		if i < 0 && !slices.Contains(df.current.InspectedDatabases, s.Database) && df.d.IsSystemSchema(s.Name) {
+			// The database is created by this plan (or was not inspected)
+			// and already contains the system schemas copied from its
+			// template, such as public: only its owner is converged.
+			df.add(phaseSchema, plan.ActionUpdate, res, df.d.AlterSchema(s, model.Schema{Database: s.Database, Name: s.Name}))
+			continue
+		}
 		if i < 0 {
 			df.add(phaseSchema, plan.ActionCreate, res, df.d.CreateSchema(s))
 			continue
@@ -291,13 +351,17 @@ func (df *differ) schemas() {
 
 // owner returns the effective owner of obj after the plan runs.
 func (df *differ) owner(obj model.Object) string {
+	if o := df.desiredOwner(obj); o != "" {
+		return o
+	}
+	return df.currentOwner(obj)
+}
+
+// desiredOwner returns the declared owner of obj, or "" when the owner
+// is not managed.
+func (df *differ) desiredOwner(obj model.Object) string {
 	if obj.Type == model.ObjectSchema {
 		for _, s := range df.desired.Schemas {
-			if s.Database == obj.Database && s.Name == obj.Schema && s.Owner != "" {
-				return s.Owner
-			}
-		}
-		for _, s := range df.current.Schemas {
 			if s.Database == obj.Database && s.Name == obj.Schema {
 				return s.Owner
 			}
@@ -305,9 +369,22 @@ func (df *differ) owner(obj model.Object) string {
 		return ""
 	}
 	for _, d := range df.desired.Databases {
-		if d.Name == obj.Database && d.Owner != "" {
+		if d.Name == obj.Database {
 			return d.Owner
 		}
+	}
+	return ""
+}
+
+// currentOwner returns the owner of obj before the plan runs.
+func (df *differ) currentOwner(obj model.Object) string {
+	if obj.Type == model.ObjectSchema {
+		for _, s := range df.current.Schemas {
+			if s.Database == obj.Database && s.Name == obj.Schema {
+				return s.Owner
+			}
+		}
+		return ""
 	}
 	for _, d := range df.current.Databases {
 		if d.Name == obj.Database {
@@ -315,6 +392,20 @@ func (df *differ) owner(obj model.Object) string {
 		}
 	}
 	return ""
+}
+
+// afterOwnerChange returns p as it will be after the planned owner
+// changes. PostgreSQL's ALTER ... OWNER TO rewrites the old owner's ACL
+// entries to the new owner, so they no longer belong to the old owner.
+func (df *differ) afterOwnerChange(p model.Privilege) model.Privilege {
+	if df.desired.Engine != model.EnginePostgres || p.Grantee.Host != "" {
+		return p
+	}
+	from, to := df.currentOwner(p.Object), df.desiredOwner(p.Object)
+	if from != "" && to != "" && from != to && p.Grantee.Name == from {
+		p.Grantee = model.RoleID{Name: to}
+	}
+	return p
 }
 
 type grantGroup struct {
@@ -336,10 +427,16 @@ func (df *differ) privileges() {
 		return p.Object.Type != model.ObjectSchema || df.managedSchema(p.Object.Database, p.Object.Schema)
 	}
 	want := map[model.PrivilegeKey]model.Privilege{}
+	ineffective := map[grantGroup]bool{}
 	for _, p := range df.desired.Privileges {
-		if !implicit(p) {
-			want[p.Key()] = p
+		if implicit(p) {
+			ineffective[grantGroup{grantee: p.Grantee, obj: p.Object}] = true
+			continue
 		}
+		want[p.Key()] = p
+	}
+	for _, g := range sortedGroups(ineffective) {
+		df.warn("grant to %q on %s has no effect: %q owns it and holds every privilege implicitly", g.grantee, objectLabel(g.obj), g.grantee)
 	}
 	// Unknown privileges are re-granted (GRANT is idempotent) and never revoked.
 	unknown := df.current.Unreadable.Privileges
@@ -348,9 +445,16 @@ func (df *differ) privileges() {
 		if unknown {
 			break
 		}
-		if managed(p) && !implicit(p) {
-			have[p.Key()] = p
+		p = df.afterOwnerChange(p)
+		if !managed(p) || implicit(p) {
+			continue
 		}
+		// One entry per grantor may exist; the grant option is held if
+		// any of them carries it.
+		if c, ok := have[p.Key()]; ok {
+			p.GrantOption = p.GrantOption || c.GrantOption
+		}
+		have[p.Key()] = p
 	}
 
 	grants := map[grantGroup][]string{}
@@ -374,7 +478,7 @@ func (df *differ) privileges() {
 		}
 	}
 	res := func(g grantGroup, privs []string, prep string) string {
-		return fmt.Sprintf("%s on %s %q %s %q", strings.Join(privs, ", "), g.obj.Type, g.obj, prep, g.grantee)
+		return fmt.Sprintf("%s on %s %s %q", strings.Join(privs, ", "), objectLabel(g.obj), prep, g.grantee)
 	}
 	for _, g := range sortedGroups(grants) {
 		privs := sortedPrivs(grants[g])
@@ -390,16 +494,25 @@ func (df *differ) privileges() {
 	}
 }
 
-func sortedGroups(m map[grantGroup][]string) []grantGroup {
+// objectLabel names obj for plan output.
+func objectLabel(obj model.Object) string {
+	if obj.Type == model.ObjectSchema {
+		return fmt.Sprintf("schema %q in database %q", obj.Schema, obj.Database)
+	}
+	return fmt.Sprintf("%s %q", obj.Type, obj.Database)
+}
+
+func sortedGroups[V any](m map[grantGroup]V) []grantGroup {
 	keys := make([]grantGroup, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
 	slices.SortFunc(keys, func(a, b grantGroup) int {
 		return cmp.Or(
-			strings.Compare(a.grantee.String(), b.grantee.String()),
+			model.CompareRoleIDs(a.grantee, b.grantee),
 			strings.Compare(string(a.obj.Type), string(b.obj.Type)),
-			strings.Compare(a.obj.String(), b.obj.String()),
+			strings.Compare(a.obj.Database, b.obj.Database),
+			strings.Compare(a.obj.Schema, b.obj.Schema),
 			cmp.Compare(boolInt(a.grantOption), boolInt(b.grantOption)),
 		)
 	})
@@ -419,25 +532,112 @@ func boolInt(b bool) int {
 }
 
 func (df *differ) pruneRoles(droppedDatabases []string) {
+	// Objects in ignored databases must not be reassigned or dropped.
 	var surviving []string
 	for _, db := range df.current.Databases {
-		if !slices.Contains(droppedDatabases, db.Name) {
+		if !slices.Contains(droppedDatabases, db.Name) && !df.ignore.database(db.Name) {
 			surviving = append(surviving, db.Name)
 		}
 	}
 	if df.current.Unreadable.Roles {
 		return
 	}
+	referenced := df.referencedRoles()
+	reliedOn := df.currentUserRoles()
+	if df.opts.Prune && df.current.Unreadable.Memberships {
+		df.warn("cannot read role memberships: roles granted to the connected user are not protected from --prune")
+	}
 	for _, r := range df.current.Roles {
 		if df.desiredRole(r.ID) || r.ID == df.current.CurrentUser || df.d.IsSystemRole(r.ID) || df.ignore.role(r.ID) {
+			continue
+		}
+		if reason := df.keepRole(r.ID, referenced, reliedOn); reason != "" {
+			if df.opts.Prune {
+				df.warn("%s %s; not pruned", df.roleResource(r.ID), reason)
+			}
 			continue
 		}
 		if !df.opts.Prune {
 			df.warn("unmanaged role %q (use --prune to drop it)", r.ID)
 			continue
 		}
-		df.add(phaseDropRole, plan.ActionDrop, roleResource(r.ID), df.d.DropRole(r.ID, surviving))
+		df.add(phaseDropRole, plan.ActionDrop, df.roleResource(r.ID), df.d.DropRole(r.ID, surviving))
 	}
+}
+
+// keepRole explains why the undeclared role id must survive --prune, or
+// returns "" when it may be dropped.
+func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleID]bool) string {
+	switch {
+	case referenced[id]:
+		return "is referenced by the configuration but not declared (declare it to manage it)"
+	case reliedOn[id]:
+		return fmt.Sprintf("is granted to the connected user %q", df.current.CurrentUser)
+	}
+	// REASSIGN OWNED also reassigns databases the role owns, and DROP
+	// ROLE fails while it still owns objects, so owners of ignored
+	// objects are kept.
+	if id.Host == "" {
+		for _, db := range df.current.Databases {
+			if db.Owner == id.Name && df.ignore.database(db.Name) {
+				return fmt.Sprintf("owns the ignored database %q", db.Name)
+			}
+		}
+		for _, s := range df.current.Schemas {
+			if s.Owner == id.Name && df.ignore.schema(s.Name) && !df.d.IsSystemSchema(s.Name) {
+				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
+			}
+		}
+	}
+	return ""
+}
+
+// referencedRoles returns the roles the desired state refers to by name:
+// owners, member_of entries and grantees.
+func (df *differ) referencedRoles() map[model.RoleID]bool {
+	refs := map[model.RoleID]bool{}
+	for _, r := range df.desired.Roles {
+		for _, m := range r.MemberOf {
+			refs[m] = true
+		}
+	}
+	for _, db := range df.desired.Databases {
+		if db.Owner != "" {
+			refs[model.RoleID{Name: db.Owner}] = true
+		}
+	}
+	for _, s := range df.desired.Schemas {
+		if s.Owner != "" {
+			refs[model.RoleID{Name: s.Owner}] = true
+		}
+	}
+	for _, p := range df.desired.Privileges {
+		refs[p.Grantee] = true
+	}
+	return refs
+}
+
+// currentUserRoles returns the roles granted to the connected user,
+// directly or transitively. Dropping them would take away the privileges
+// dbfence runs with.
+func (df *differ) currentUserRoles() map[model.RoleID]bool {
+	seen := map[model.RoleID]bool{}
+	queue := []model.RoleID{df.current.CurrentUser}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		cur, ok := df.currentRole(id)
+		if !ok {
+			continue
+		}
+		for _, m := range cur.MemberOf {
+			if !seen[m] {
+				seen[m] = true
+				queue = append(queue, m)
+			}
+		}
+	}
+	return seen
 }
 
 type ignorer struct {

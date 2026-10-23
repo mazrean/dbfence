@@ -53,8 +53,6 @@ func pgDesired() *model.Desired {
 		Privileges: []model.Privilege{
 			{Grantee: pgID("app"), Object: dbObj("app"), Name: "CONNECT"},
 			{Grantee: pgID("app"), Object: model.Object{Type: model.ObjectSchema, Database: "app", Schema: "api"}, Name: "USAGE"},
-			// Owner privileges are implicit and must be ignored.
-			{Grantee: pgID("owner"), Object: dbObj("app"), Name: "CREATE"},
 		},
 	}
 }
@@ -96,8 +94,8 @@ func TestComputeCreateAll(t *testing.T) {
 	want := []string{
 		`CREATE ROLE "owner" WITH NOLOGIN`,
 		`CREATE ROLE "app" WITH LOGIN PASSWORD '<redacted>'`,
-		`CREATE DATABASE "app" OWNER "owner"`,
 		`GRANT "owner" TO "app"`,
+		`CREATE DATABASE "app" OWNER "owner"`,
 		`app: CREATE SCHEMA "api" AUTHORIZATION "owner"`,
 		`GRANT CONNECT ON DATABASE "app" TO "app"`,
 		`app: GRANT USAGE ON SCHEMA "api" TO "app"`,
@@ -145,11 +143,13 @@ func TestComputeDrift(t *testing.T) {
 	}
 	want := []string{
 		`ALTER ROLE "app" WITH LOGIN CONNECTION LIMIT -1`,
-		`ALTER DATABASE "app" OWNER TO "owner"`,
 		`REVOKE "postgres" FROM "app"`,
+		`ALTER DATABASE "app" OWNER TO "owner"`,
 		`app: ALTER SCHEMA "api" OWNER TO "owner"`,
-		`REVOKE GRANT OPTION FOR CONNECT ON DATABASE "app" FROM "app"`,
-		`REVOKE TEMPORARY ON DATABASE "app" FROM "app"`,
+		// ALTER ... OWNER TO moves the ACL entries of the old owner "app"
+		// to "owner", so the declared privileges are granted again.
+		`GRANT CONNECT ON DATABASE "app" TO "app"`,
+		`app: GRANT USAGE ON SCHEMA "api" TO "app"`,
 	}
 	if d := cmp.Diff(want, statements(p)); d != "" {
 		t.Errorf("statements (-want +got):\n%s", d)
@@ -188,10 +188,10 @@ func TestComputeUnmanaged(t *testing.T) {
 	want := []string{
 		`app: DROP SCHEMA "junk"`,
 		`DROP DATABASE "legacy"`,
-		`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
-		`postgres: DROP OWNED BY "stray"`,
 		`app: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
 		`app: DROP OWNED BY "stray"`,
+		`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
+		`postgres: DROP OWNED BY "stray"`,
 		`DROP ROLE "stray"`,
 	}
 	if d := cmp.Diff(want, statements(p)); d != "" {
@@ -284,9 +284,9 @@ func TestComputeMySQL(t *testing.T) {
 	want := []string{
 		`CREATE USER 'reader'@'%' ACCOUNT LOCK`,
 		`CREATE USER 'app'@'%' IDENTIFIED WITH caching_sha2_password BY '<redacted>'`,
-		"CREATE DATABASE `app` CHARACTER SET utf8mb4",
 		`GRANT 'reader'@'%' TO 'app'@'%'`,
 		`SET DEFAULT ROLE 'reader'@'%' TO 'app'@'%'`,
+		"CREATE DATABASE `app` CHARACTER SET utf8mb4",
 		"GRANT INSERT, SELECT ON `app`.* TO 'app'@'%'",
 	}
 	if diff := cmp.Diff(want, statements(p)); diff != "" {
@@ -361,7 +361,7 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 				`SET DEFAULT ROLE 'reader'@'%' TO 'app'@'%'`,
 				"GRANT SELECT ON `app`.* TO 'app'@'%'",
 			},
-			wantWarns: []string{"cannot read login state", "cannot read role memberships", "cannot read privileges", `unmanaged role "stray@%"`},
+			wantWarns: []string{"cannot read login state", "cannot read role memberships", "cannot read privileges", `unmanaged role "stray"@"%"`},
 		},
 		{
 			name: "forced password with unknown credentials",

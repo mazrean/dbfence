@@ -32,13 +32,13 @@ func TestLoadMemberships(t *testing.T) {
 		{
 			name:  "mysql host-less member_of misses the declared account",
 			src:   myConn + "role \"ro\" { host = \"localhost\" }\nuser \"u\" {\n  member_of = [role.ro.name]\n}\n",
-			want:  []string{`member_of entry "ro" resolves to "ro@%"`, `"ro@localhost" (role "ro")`, "role.<label>.id", "dbfence.hcl line 7"},
+			want:  []string{`member_of entry "ro" resolves to "ro"@"%"`, `"ro"@"localhost" (role "ro")`, "role.<label>.id", "dbfence.hcl line 7"},
 			count: 1,
 		},
 		{
 			name:  "mysql grant role with another host",
 			src:   myConn + "user \"u\" { host = \"localhost\" }\ndatabase \"d\" {}\ngrant {\n  role = user.u.name\n  database = database.d.name\n  privileges = [\"SELECT\"]\n}\n",
-			want:  []string{`grant targets role "u@%"`, `"u@localhost" (user "u")`, "user.<label>.id"},
+			want:  []string{`grant targets role "u"@"%"`, `"u"@"localhost" (user "u")`, "user.<label>.id"},
 			count: 1,
 		},
 	})
