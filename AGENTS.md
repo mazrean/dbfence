@@ -53,7 +53,7 @@ tools/lint/          repo linter module (+ outputsink analyzer)
 - Every protection promised in README ("What `--prune` never drops", the connected user) is also an invariant in `internal/policy.Verify`, which reads only statement `Kind`/`Target`/`RoleChange`/`AsRole`, never SQL text, and shares no code with `diff`; diff tests run every plan through it.
 - Data read from the server is untrusted: Inspect ends with `model.Current.DropUntrusted`, names failing `model.CheckName` are never put into SQL (guard state-derived names such as grantors), and `policy.Verify` rejects statements naming them.
 - `diff` and `plan` do no I/O; engine-specific code only in `internal/driver/<engine>` and `internal/password`.
-- All output goes through the redacting `secret.Writer` streams wired in `internal/di/di.go` (`app.IO`); never use `os.Stdout`/`os.Stderr`/`fmt.Print*`/`print` elsewhere (lint `outputsink`), and `secret.Register` every new secret source.
+- All output goes through the redacting `secret.Writer` streams wired in `internal/di/di.go` (`app.IO`); never use `os.Stdout`/`os.Stderr`/`fmt.Print*`/`print` elsewhere (lint `outputsink`); route library loggers to the `Output.Err` stream in `NewOutput` (the lint cannot see them, e.g. `mysql.SetLogOutput`), and `secret.Register` every new secret source.
 - Table-driven tests next to code; integration tests skip under `testing.Short()` or without Docker (fail if `CI` is set).
 
 ## Boundaries

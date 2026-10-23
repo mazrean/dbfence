@@ -115,6 +115,9 @@ func parseDSN(dsn string) (*gomysql.Config, error) {
 	// registered for it either.
 	cfg.MultiStatements = false
 	cfg.AllowAllFiles = false
+	// ParseDSN copies the driver's default logger, which writes to
+	// os.Stderr directly (see SetLogOutput).
+	cfg.Logger = *logger.Load()
 	return cfg, nil
 }
 

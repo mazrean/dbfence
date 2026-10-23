@@ -12,6 +12,7 @@ import (
 	"os"
 
 	"github.com/mazrean/dbfence/internal/app"
+	"github.com/mazrean/dbfence/internal/driver/mysql"
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/secret"
 	"github.com/mazrean/kessoku"
@@ -29,12 +30,17 @@ type Output struct {
 	Err *secret.Writer
 }
 
-// NewOutput wraps the process standard output and error.
+// NewOutput wraps the process standard output and error, and sends the
+// messages that go-sql-driver/mysql logs to the error stream: they may
+// quote text the server sent.
 func NewOutput() *Output {
-	return &Output{
+	o := &Output{
 		Out: secret.NewWriter(os.Stdout, secret.Default()),
 		Err: secret.NewWriter(os.Stderr, secret.Default()),
 	}
+	// It fails only for a nil writer.
+	_ = mysql.SetLogOutput(o.Err)
+	return o
 }
 
 // NewIO returns the standard input and the streams of o.
