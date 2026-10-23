@@ -89,7 +89,7 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 	if err != nil {
 		return nil, err
 	}
-	df := &differ{d: d, opts: opts, desired: desired, current: current, ignore: ig}
+	df := &differ{d: d, opts: opts, desired: desired, current: sortedCurrent(current), ignore: ig}
 	if !current.Unreadable.Roles {
 		if err := df.checkReferences(); err != nil {
 			return nil, err
@@ -108,6 +108,18 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 		p.Changes = append(p.Changes, c.Change)
 	}
 	return p, nil
+}
+
+// sortedCurrent returns a copy of cur whose objects are sorted, so that
+// the plan does not depend on the order in which they were read.
+func sortedCurrent(cur *model.Current) *model.Current {
+	c := *cur
+	c.Roles = slices.SortedFunc(slices.Values(cur.Roles), func(a, b model.RoleState) int { return model.CompareRoleIDs(a.ID, b.ID) })
+	c.Databases = slices.SortedFunc(slices.Values(cur.Databases), func(a, b model.Database) int { return strings.Compare(a.Name, b.Name) })
+	c.Schemas = slices.SortedFunc(slices.Values(cur.Schemas), func(a, b model.Schema) int {
+		return cmp.Or(strings.Compare(a.Database, b.Database), strings.Compare(a.Name, b.Name))
+	})
+	return &c
 }
 
 func (df *differ) add(phase int, action plan.Action, resource string, stmts []plan.Statement) {

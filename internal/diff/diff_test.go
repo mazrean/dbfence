@@ -188,10 +188,10 @@ func TestComputeUnmanaged(t *testing.T) {
 	want := []string{
 		`app: DROP SCHEMA "junk"`,
 		`DROP DATABASE "legacy"`,
-		`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
-		`postgres: DROP OWNED BY "stray"`,
 		`app: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
 		`app: DROP OWNED BY "stray"`,
+		`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
+		`postgres: DROP OWNED BY "stray"`,
 		`DROP ROLE "stray"`,
 	}
 	if d := cmp.Diff(want, statements(p)); d != "" {

@@ -224,10 +224,10 @@ func TestComputePruneProtection(t *testing.T) {
 			dialect: postgres.Dialect{},
 			want: []string{
 				`app: CREATE SCHEMA "api" AUTHORIZATION "schema_owner"`,
-				`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
-				`postgres: DROP OWNED BY "stray"`,
 				`app: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
 				`app: DROP OWNED BY "stray"`,
+				`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
+				`postgres: DROP OWNED BY "stray"`,
 				`DROP ROLE "stray"`,
 			},
 			wantWarns: []string{
