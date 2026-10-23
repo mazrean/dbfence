@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -28,7 +29,7 @@ func (r *recorder) Exec(_ context.Context, database, query string) error {
 	if r.err != nil {
 		return r.err
 	}
-	return errors.New("syntax error near " + query)
+	return Rejected(errors.New("syntax error near " + query))
 }
 
 func testPlan() *plan.Plan {
@@ -92,6 +93,15 @@ func TestRunErrors(t *testing.T) {
 			name: "interrupted keeps a driver error that says more", failAt: 1, cancelCtx: true, err: errors.New("read tcp: use of closed connection"),
 			wantIs:     context.Canceled,
 			wantSuffix: "run plan to see the remaining changes): read tcp: use of closed connection: context canceled",
+		},
+		{
+			name: "connection closed after sending", failAt: 2, err: io.EOF,
+			want:       []string{`interrupted during statement 2/2 (on database "app"), whose outcome is unknown (1 statement confirmed applied;`},
+			wantSuffix: "run plan to see the remaining changes): EOF",
+		},
+		{
+			name: "rejected before sending", failAt: 2, err: Rejected(errors.New(`connect to database "app": refused`)),
+			want: []string{`statement 2/2 (on database "app") failed: connect to database "app": refused (1 of 2 statements applied;`},
 		},
 		{
 			name: "connection lost", failAt: 1, wantSuffix: "run plan to see the remaining changes): driver: bad connection", err: driver.ErrBadConn, wantIs: driver.ErrBadConn,

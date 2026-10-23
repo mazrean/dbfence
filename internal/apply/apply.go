@@ -12,9 +12,30 @@ import (
 	"github.com/mazrean/dbfence/internal/plan"
 )
 
-// Executor runs a single statement on a database.
+// Executor runs a single statement on a database. Errors with which the
+// server refused the statement, or that occurred before it was sent, are
+// marked with Rejected; any other error leaves its outcome unknown.
 type Executor interface {
 	Exec(ctx context.Context, database, query string) error
+}
+
+// Rejected marks err as known not to have applied its statement: the
+// server answered with an error, or the statement was never sent. It
+// returns nil for a nil err.
+func Rejected(err error) error {
+	if err == nil {
+		return nil
+	}
+	return rejection{err}
+}
+
+type rejection struct{ error }
+
+func (r rejection) Unwrap() error { return r.error }
+
+func isRejected(err error) bool {
+	var r rejection
+	return errors.As(err, &r)
 }
 
 // Run executes every statement in order, stopping at the first error.
@@ -45,21 +66,25 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int, err error) error {
 	at := fmt.Sprintf("statement %d/%d%s", n, total, onDatabase(s.Database, " ", ""))
 	msg := s.Redact(err.Error())
-	if ctx.Err() != nil || errors.Is(err, driver.ErrBadConn) {
+	if ctx.Err() != nil || !isRejected(err) {
 		// The server may still complete the statement: drivers cancel by
-		// closing the connection or by sending a cancel request.
-		cause := driver.ErrBadConn
-		if ctx.Err() != nil {
-			// The cause names the signal, as the confirmation prompt does.
-			cause = context.Cause(ctx)
-		}
+		// closing the connection or by sending a cancel request, and a
+		// connection lost after the server committed the statement but
+		// before it answered (io.EOF, a network error) hides the result.
 		head := fmt.Sprintf("%s %s: interrupted during %s, whose outcome is unknown (%s confirmed applied; run plan to see the remaining changes)",
 			c.Action, c.Resource, at, plan.Count(n-1, "statement"))
-		if isCancellation(ctx, err) {
-			// The driver error only repeats the cancellation.
-			return fmt.Errorf("%s: %w", head, cause)
+		switch {
+		case ctx.Err() != nil && isCancellation(ctx, err):
+			// The driver error only repeats the cancellation. The cause
+			// names the signal, as the confirmation prompt does.
+			return fmt.Errorf("%s: %w", head, context.Cause(ctx))
+		case ctx.Err() != nil:
+			return fmt.Errorf("%s: %s: %w", head, msg, context.Cause(ctx))
+		case errors.Is(err, driver.ErrBadConn):
+			return fmt.Errorf("%s: %w", head, driver.ErrBadConn)
+		default:
+			return fmt.Errorf("%s: %s", head, msg)
 		}
-		return fmt.Errorf("%s: %s: %w", head, msg, cause)
 	}
 	return fmt.Errorf("%s %s: %s failed: %s (%d of %s applied; run plan to see the remaining changes)",
 		c.Action, c.Resource, at, msg, n-1, plan.Count(total, "statement"))

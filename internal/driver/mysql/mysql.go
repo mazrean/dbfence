@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	gomysql "github.com/go-sql-driver/mysql"
+	"github.com/mazrean/dbfence/internal/apply"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
 	"github.com/mazrean/dbfence/internal/plan"
@@ -110,8 +111,13 @@ func checkCharset(charset string) error {
 }
 
 // Exec implements driver.Driver.
+// Errors the server answered with are marked as rejected; others, such
+// as a lost connection, leave the outcome unknown.
 func (d *Driver) Exec(ctx context.Context, _, query string) error {
 	_, err := d.db.ExecContext(ctx, query)
+	if _, ok := errors.AsType[*gomysql.MySQLError](err); ok {
+		return apply.Rejected(err)
+	}
 	return err
 }
 

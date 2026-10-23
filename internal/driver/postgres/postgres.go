@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/mazrean/dbfence/internal/apply"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
 	"github.com/mazrean/dbfence/internal/plan"
@@ -216,16 +217,22 @@ func (d *Driver) conn(ctx context.Context, database string) (*sql.DB, error) {
 }
 
 // Exec implements driver.Driver.
+// Errors the server answered with, and failures to connect before the
+// statement was sent, are marked as rejected; others, such as a lost
+// connection, leave the outcome unknown.
 func (d *Driver) Exec(ctx context.Context, database, query string) error {
 	c, err := d.conn(ctx, database)
 	if err != nil {
-		return err
+		return apply.Rejected(err)
 	}
 	d.notices.take()
 	if _, err = c.ExecContext(ctx, query); err != nil {
-		return withDetail(err)
+		if _, ok := errors.AsType[*pgconn.PgError](err); ok {
+			return apply.Rejected(withDetail(err))
+		}
+		return err
 	}
-	return noticeError(d.notices.take())
+	return apply.Rejected(noticeError(d.notices.take()))
 }
 
 // detailError adds the server's DETAIL and HINT, which often name the
