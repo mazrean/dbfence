@@ -38,10 +38,19 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 	db := sql.OpenDB(conn)
 	// A single connection keeps session state such as sql_mode stable.
 	db.SetMaxOpenConns(1)
-	if err := db.PingContext(ctx); err != nil {
+	// cfg.Timeout only bounds the dial; a server that accepts the
+	// connection but never sends the handshake would block forever.
+	// The connection is reused, so the session queries below share it.
+	connectCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	if err := db.PingContext(connectCtx); err != nil {
 		_ = db.Close()
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("connect to mysql: timed out after %s: %w", cfg.Timeout, err)
+		}
 		return nil, fmt.Errorf("connect to mysql: %w", err)
 	}
+	ctx = connectCtx
 	var mode, charset string
 	var lowerCaseNames int
 	if err := db.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode, @@SESSION.character_set_client, @@lower_case_table_names").
@@ -69,7 +78,7 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 	return d, nil
 }
 
-// defaultTimeout bounds dialing when the DSN sets no timeout.
+// defaultTimeout bounds connecting when the DSN sets no timeout.
 const defaultTimeout = 10 * time.Second
 
 // parseDSN parses a go-sql-driver/mysql DSN and applies defaults.
