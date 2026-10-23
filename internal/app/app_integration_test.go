@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	gomysql "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/mazrean/dbfence/internal/app"
 	"github.com/mazrean/dbfence/internal/apply"
@@ -363,6 +364,38 @@ func TestMySQLRetainedPassword(t *testing.T) {
 	h.assertConverged(app.Options{})
 	if got := h.query("SELECT User FROM mysql.user WHERE JSON_CONTAINS_PATH(User_attributes, 'one', '$.additional_password')"); len(got) != 0 {
 		t.Errorf("accounts with a secondary password = %q", got)
+	}
+}
+
+// TestMySQLOneStatementPerExec checks that Driver.Exec sends exactly one
+// statement even when the DSN asks for multiStatements.
+func TestMySQLOneStatementPerExec(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	d, err := mysql.Open(t.Context(), h.dsn+"?multiStatements=true&allowAllFiles=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	for _, q := range []string{
+		"SELECT 1; SELECT 2",
+		"CREATE USER 'dbf_ms1'@'%'; CREATE USER 'dbf_ms2'@'%'",
+		"DO 1;DO 2",
+	} {
+		err := d.Exec(t.Context(), plan.SQL("", q))
+		if myErr, ok := errors.AsType[*gomysql.MySQLError](err); !ok || myErr.Number != 1064 {
+			t.Errorf("Exec(%q) = %v, want error 1064", q, err)
+		}
+	}
+	if got := h.query("SELECT User FROM mysql.user WHERE User LIKE 'dbf\\_ms%'"); len(got) != 0 {
+		t.Errorf("users created by rejected statements: %q", got)
+	}
+	if err := d.Exec(t.Context(), plan.SQL("", "DO 1")); err != nil {
+		t.Errorf("single statement: %v", err)
+	}
+	// MySQL statements never run as another role.
+	if err := d.Exec(t.Context(), plan.SQL("", "DO 1").WithRole("r")); err == nil || !strings.Contains(err.Error(), "not supported on MySQL") {
+		t.Errorf("Exec as role = %v", err)
 	}
 }
 

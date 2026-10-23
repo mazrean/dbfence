@@ -31,6 +31,9 @@ func TestParseDSN(t *testing.T) {
 		{dsn: "root:pw@tcp6([::1]:3306)/", wantTimeout: defaultTimeout},
 		{dsn: "root:pw@unix(/tmp/mysql.sock)/", wantTimeout: defaultTimeout},
 		{dsn: "/", wantTimeout: defaultTimeout},
+		// One statement per query, and no client files for the server.
+		{dsn: "root:pw@tcp(127.0.0.1:3306)/?multiStatements=true", wantTimeout: defaultTimeout},
+		{dsn: "root:pw@tcp(127.0.0.1:3306)/?allowAllFiles=true&multiStatements=true&timeout=2s", wantTimeout: 2 * time.Second},
 	}
 	for _, tt := range tests {
 		cfg, err := parseDSN(tt.dsn)
@@ -46,6 +49,8 @@ func TestParseDSN(t *testing.T) {
 			t.Errorf("parseDSN(%q): %v", tt.dsn, err)
 		case cfg.Timeout != tt.wantTimeout:
 			t.Errorf("parseDSN(%q) timeout = %v, want %v", tt.dsn, cfg.Timeout, tt.wantTimeout)
+		case cfg.MultiStatements || cfg.AllowAllFiles:
+			t.Errorf("parseDSN(%q) multiStatements = %v, allowAllFiles = %v, want both off", tt.dsn, cfg.MultiStatements, cfg.AllowAllFiles)
 		}
 	}
 }

@@ -102,6 +102,13 @@ func parseDSN(dsn string) (*gomysql.Config, error) {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultTimeout
 	}
+	// Each Exec sends exactly one statement: without multiStatements the
+	// server rejects a query holding a second one, so a quoting mistake
+	// cannot chain another statement. allowAllFiles would let a server
+	// read any client file with LOAD DATA LOCAL INFILE; no file is
+	// registered for it either.
+	cfg.MultiStatements = false
+	cfg.AllowAllFiles = false
 	return cfg, nil
 }
 
