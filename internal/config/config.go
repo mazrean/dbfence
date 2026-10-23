@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
@@ -389,6 +391,10 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 		if dd.HasErrors() {
 			continue
 		}
+		if dd := checkNotEmpty(r, map[string]*string{"owner": blk.Owner}); dd.HasErrors() {
+			diags = append(diags, dd...)
+			continue
+		}
 		dec.schemas = append(dec.schemas, decodedSchema{res: r, schema: model.Schema{Database: blk.Database, Name: r.name, Owner: deref(blk.Owner)}})
 	}
 	for _, b := range byType["grant"] {
@@ -438,10 +444,13 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 	} else if engine == model.EngineMySQL && (b.Type == "role" || b.Type == "user") {
 		r.host = "%"
 	}
-	if r.name == "" && !diags.HasErrors() {
-		diags = append(diags, errAt(r.nameRange, "Empty name", "Object names must not be empty."))
+	if diags.HasErrors() {
+		return r, diags
 	}
-	return r, diags
+	if r.name == "" {
+		return r, append(diags, errAt(r.nameRange, "Empty name", "Object names must not be empty."))
+	}
+	return r, append(diags, checkName(r, engine)...)
 }
 
 // refValue is the value exposed to expressions as <type>.<label>.
@@ -486,6 +495,11 @@ func decodeDatabase(r resource, ctx *hcl.EvalContext, engine model.Engine) (mode
 	diags = append(diags, checkEngineOnly(r, engine, map[string]bool{
 		"owner": blk.Owner != nil, "encoding": blk.Encoding != nil, "lc_collate": blk.LcCollate != nil, "lc_ctype": blk.LcCtype != nil,
 	}, map[string]bool{"charset": blk.Charset != nil, "collation": blk.Collation != nil})...)
+	if engine == model.EnginePostgres {
+		diags = append(diags, checkNotEmpty(r, map[string]*string{"owner": blk.Owner, "encoding": blk.Encoding, "lc_collate": blk.LcCollate, "lc_ctype": blk.LcCtype})...)
+	} else {
+		diags = append(diags, checkSimpleIdent(r, map[string]*string{"charset": blk.Charset, "collation": blk.Collation})...)
+	}
 	return model.Database{
 		Name: r.name, Owner: deref(blk.Owner), Encoding: deref(blk.Encoding), LcCollate: deref(blk.LcCollate),
 		LcCtype: deref(blk.LcCtype), Charset: deref(blk.Charset), Collation: deref(blk.Collation),
@@ -503,6 +517,13 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 		"inherit": blk.Inherit != nil, "replication": blk.Replication != nil, "bypassrls": blk.BypassRLS != nil,
 		"connection_limit": blk.ConnectionLimit != nil,
 	}, map[string]bool{"auth_plugin": blk.AuthPlugin != nil})...)
+	if engine == model.EngineMySQL {
+		diags = append(diags, checkSimpleIdent(r, map[string]*string{"auth_plugin": blk.AuthPlugin})...)
+	} else if l := blk.ConnectionLimit; l != nil && (*l < -1 || *l > math.MaxInt32) {
+		diags = append(diags, errAt(attrRange(r.attrs, "connection_limit", r.block.DefRange), "Invalid connection_limit",
+			fmt.Sprintf("connection_limit must be -1 (unlimited) or between 0 and %d, got %d.", math.MaxInt32, *l)))
+	}
+	diags = append(diags, checkPassword(r, typ, blk.Password, engine)...)
 	login := blk.Login
 	if login == nil {
 		// "user" logs in by default, "role" does not, like CREATE USER / CREATE ROLE.
@@ -657,6 +678,94 @@ func checkEngineOnly(r resource, engine model.Engine, pgOnly, mysqlOnly map[stri
 	}
 	check(pgOnly, model.EnginePostgres)
 	check(mysqlOnly, model.EngineMySQL)
+	return diags
+}
+
+// Identifier length limits.
+const (
+	pgMaxIdentBytes   = 63 // NAMEDATALEN - 1
+	mysqlMaxUserChars = 32
+	mysqlMaxDBChars   = 64
+	mysqlMaxHostChars = 255
+)
+
+// checkName checks the engine's identifier limits.
+func checkName(r resource, engine model.Engine) hcl.Diagnostics {
+	var diags hcl.Diagnostics
+	typ := r.block.Type
+	isRole := typ == "role" || typ == "user"
+	tooLong := func(rng hcl.Range, what, v string, n, limit int, unit string) {
+		diags = append(diags, errAt(rng, "Name too long",
+			fmt.Sprintf("%s %q is %d %s long; %s allows at most %d.", what, v, n, unit, engine, limit)))
+	}
+	switch engine {
+	case model.EnginePostgres:
+		// Longer names are silently truncated (NAMEDATALEN - 1).
+		if n := len(r.name); n > pgMaxIdentBytes {
+			tooLong(r.nameRange, typ+" name", r.name, n, pgMaxIdentBytes, "bytes")
+		}
+		if isRole && (r.name == "public" || r.name == "none" || strings.HasPrefix(r.name, "pg_")) {
+			diags = append(diags, errAt(r.nameRange, "Reserved name",
+				fmt.Sprintf(`%s name %q is reserved by PostgreSQL ("public", "none" and names starting with "pg_").`, typ, r.name)))
+		}
+	case model.EngineMySQL:
+		limit := mysqlMaxDBChars
+		if isRole {
+			limit = mysqlMaxUserChars
+		}
+		if n := utf8.RuneCountInString(r.name); n > limit {
+			tooLong(r.nameRange, typ+" name", r.name, n, limit, "characters")
+		}
+		if n := utf8.RuneCountInString(r.host); isRole && n > mysqlMaxHostChars {
+			tooLong(attrRange(r.attrs, "host", r.block.DefRange), "host", r.host, n, mysqlMaxHostChars, "characters")
+		}
+	}
+	return diags
+}
+
+// checkPassword rejects passwords the server cannot store. The diagnostics
+// carry no source range: the snippet would print the password.
+func checkPassword(r resource, typ string, pw *string, engine model.Engine) hcl.Diagnostics {
+	if pw == nil {
+		return nil
+	}
+	fail := func(summary, detail string) hcl.Diagnostics {
+		return hcl.Diagnostics{{Severity: hcl.DiagError, Summary: summary,
+			Detail: fmt.Sprintf("%s %q at %s: %s", typ, r.block.Labels[0], loc(r.block.DefRange), detail)}}
+	}
+	switch {
+	case strings.ContainsRune(*pw, 0):
+		return fail("Invalid password", "password must not contain NUL characters.")
+	case *pw == "" && engine == model.EnginePostgres:
+		return fail("Empty password", "an empty password is not valid on PostgreSQL (it clears the password); omit password to leave it unmanaged.")
+	}
+	return nil
+}
+
+// checkNotEmpty rejects set but empty attributes, which would otherwise
+// silently mean "unmanaged".
+func checkNotEmpty(r resource, attrs map[string]*string) hcl.Diagnostics {
+	var diags hcl.Diagnostics
+	for _, name := range slices.Sorted(maps.Keys(attrs)) {
+		if v := attrs[name]; v != nil && *v == "" {
+			diags = append(diags, errAt(attrRange(r.attrs, name, r.block.DefRange), "Empty value",
+				fmt.Sprintf("%s must not be empty; omit the attribute to leave it unmanaged.", name)))
+		}
+	}
+	return diags
+}
+
+var simpleIdent = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// checkSimpleIdent checks MySQL charset, collation and plugin names.
+func checkSimpleIdent(r resource, attrs map[string]*string) hcl.Diagnostics {
+	var diags hcl.Diagnostics
+	for _, name := range slices.Sorted(maps.Keys(attrs)) {
+		if v := attrs[name]; v != nil && !simpleIdent.MatchString(*v) {
+			diags = append(diags, errAt(attrRange(r.attrs, name, r.block.DefRange), "Invalid "+name,
+				fmt.Sprintf("%s must consist of letters, digits and underscores, got %q.", name, *v)))
+		}
+	}
 	return diags
 }
 

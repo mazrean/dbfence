@@ -14,6 +14,7 @@ const (
 type diagCase struct {
 	name, src string
 	want      []string
+	deny      []string
 	count     int
 }
 
@@ -30,6 +31,11 @@ func runDiagCases(t *testing.T, tests []diagCase) {
 			for _, w := range tt.want {
 				if !strings.Contains(msg, w) {
 					t.Errorf("error does not contain %q:\n%s", w, msg)
+				}
+			}
+			for _, w := range tt.deny {
+				if strings.Contains(msg, w) {
+					t.Errorf("error contains %q:\n%s", w, msg)
 				}
 			}
 			if got := 1 + strings.Count(msg, "Error: "); got != tt.count {
