@@ -19,6 +19,10 @@ func TestRun(t *testing.T) {
 	if err := os.WriteFile(valid, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	unknownAttr := filepath.Join(dir, "unknown.hcl")
+	if err := os.WriteFile(unknownAttr, []byte(strings.Replace(src, "role \"r\" {}", "role \"r\" {\n  bogus = true\n}", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name       string
 		wantOut    string
@@ -34,6 +38,7 @@ func TestRun(t *testing.T) {
 		{name: "plan help lists flags", args: []string{"plan", "--help"}, wantCode: exitOK, wantOut: "--detailed-exitcode", wantErrOut: ""},
 		{name: "apply unknown flag", args: []string{"apply", "--detailed-exitcode"}, wantCode: exitError, wantOut: "", wantErrOut: "unknown flag --detailed-exitcode"},
 		{name: "validate ok", args: []string{"validate", "-f", valid}, wantCode: exitOK, wantOut: "The configuration is valid (postgres: 0 databases, 1 roles", wantErrOut: ""},
+		{name: "validate unknown attribute renders the diagnostic unindented", args: []string{"validate", "-f", unknownAttr}, wantCode: exitError, wantOut: "", wantErrOut: "dbfence: error: Unsupported argument\n\n  on " + unknownAttr + " line 6, in role \"r\":\n   6:   bogus = true\n\nAn argument named \"bogus\" is not expected here.\n"},
 		{name: "validate missing file", args: []string{"validate", "-f", filepath.Join(dir, "none.hcl")}, wantCode: exitError, wantOut: "", wantErrOut: "not found (set -f/--file or DBFENCE_FILE)"},
 	}
 	for _, tt := range tests {

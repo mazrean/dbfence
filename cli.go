@@ -146,7 +146,9 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Write
 	case errors.Is(err, errChanges):
 		return exitChanges
 	default:
-		parser.Errorf("%v", err)
+		// Written directly: kong's Errorf indents every line after the
+		// first, which garbles multi-line HCL diagnostics.
+		_, _ = fmt.Fprintf(stderr, "dbfence: error: %v\n", err)
 		return exitError
 	}
 }
