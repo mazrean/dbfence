@@ -310,7 +310,7 @@ func TestInheritOptions(t *testing.T) {
 		},
 		{
 			name: "grant by another role as non-superuser", version: 170000,
-			role: model.Role{ID: pg("u"), Inherit: &no, MemberOf: []model.RoleID{pg("g3")}},
+			role:     model.Role{ID: pg("u"), Inherit: &no, MemberOf: []model.RoleID{pg("g3")}},
 			wantWarn: true,
 		},
 		{name: "unmanaged", version: 170000, superuser: true, role: model.Role{ID: pg("u")}},
