@@ -45,6 +45,42 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			leaked: "Hx7kLm2pQz",
 			shown:  "****",
 		},
+		{
+			name:   "heredoc inside a function call, unknown variable",
+			src:    pgConn + "user \"app\" {\n  password = trimspace(<<EOT\nBb1Hx7kLm2pQz${nope}\nEOT\n  )\n}\n",
+			leaked: "Bb1Hx7kLm2pQz",
+			shown:  "****",
+		},
+		{
+			name:   "heredoc inside a function call, parse error",
+			src:    pgConn + "user \"app\" {\n  password = trimspace(<<EOT\nBb2Hx7kLm2pQz${\nEOT\n  )\n}\n",
+			leaked: "Bb2Hx7kLm2pQz",
+			shown:  "****",
+		},
+		{
+			name:   "multi-line function call, unknown variable",
+			src:    pgConn + "user \"app\" {\n  password = format(\n    \"Cc1Qm4vRt8z${nope}\"\n  )\n}\n",
+			leaked: "Cc1Qm4vRt8z",
+			shown:  "****",
+		},
+		{
+			name:   "multi-line parentheses, parse error",
+			src:    pgConn + "user \"app\" {\n  password = (\n    \"Dd1Pw9xTnQ2\" 1\n  )\n}\n",
+			leaked: "Dd1Pw9xTnQ2",
+			shown:  "****",
+		},
+		{
+			name:   "multi-line dsn format, unknown variable",
+			src:    "connection {\n  engine = \"postgres\"\n  dsn    = format(\n    \"postgres://u:Ee1Lp3sWq9@h/d${nope}\"\n  )\n}\n",
+			leaked: "Ee1Lp3sWq9",
+			shown:  "****",
+		},
+		{
+			name:   "multi-line list index, unknown variable",
+			src:    pgConn + "user \"app\" {\n  password = [\n    \"Ff1Gt5yHn7${nope}\"\n  ][0]\n}\n",
+			leaked: "Ff1Gt5yHn7",
+			shown:  "****",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -77,6 +113,11 @@ func TestMaskSecrets(t *testing.T) {
 		{name: "heredoc", in: "password = <<-EOT\n  secret\n  EOT\nlogin = true\n", want: "password =*******\n********\n  EOT\nlogin = true\n"},
 		{name: "unterminated heredoc", in: "dsn = <<EOT\nsecret\n", want: "dsn =******\n******\n"},
 		{name: "multi-byte characters keep their byte length", in: "password = \"é\"", want: "password =*****"},
+		{name: "multi-line call", in: "password = format(\n  \"a\",\n  \")\"\n)\nlogin = true\n", want: "password =********\n******\n*****\n*\nlogin = true\n"},
+		{name: "heredoc inside a call", in: "dsn = trimspace(<<EOT\nsecret\nEOT\n)\nx = 1\n", want: "dsn =****************\n******\nEOT\n*\nx = 1\n"},
+		{name: "brackets of a one-line block", in: "user \"a\" { password = \"x\" }\nlogin = true\n", want: "user \"a\" { password =******\nlogin = true\n"},
+		{name: "brackets in a comment", in: "password = \"x\" # (\nlogin = true\n", want: "password =********\nlogin = true\n"},
+		{name: "unclosed bracket masks the rest", in: "password = format(\nx = 1\n", want: "password =********\n*****\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,6 +166,16 @@ func TestRegisterLiteralSecrets(t *testing.T) {
 			name:    "text around a lookup in a dsn",
 			src:     "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://dsnuser:${env(\"PW\")}@dsnhost/d\"\n}\nuser \"app\" { login = \"maybe\" }\n",
 			visible: []string{"postgres://dsnuser:", "@dsnhost/d"},
+		},
+		{
+			name:       "literals in nested expressions",
+			src:        pgConn + "user \"app\" {\n  password = format(\n    [\"Ff1Gt5yHn7${nope}\"][0], true ? \"Kk2Lm4Np6q\" : \"x\"\n  )\n}\n",
+			registered: []string{"Ff1Gt5yHn7", "Kk2Lm4Np6q"},
+		},
+		{
+			name:       "URL password in a dsn template",
+			src:        "connection {\n  engine = \"postgres\"\n  dsn    = format(\"postgres://u:Ee1Lp3sWq9@h/d${nope}\")\n}\n",
+			registered: []string{"Ee1Lp3sWq9"},
 		},
 		{
 			name:    "function arguments name secrets",

@@ -69,7 +69,7 @@ REVOKE CONNECT, TEMPORARY ON DATABASE "app" FROM PUBLIC;
 
 `validate` prints a summary such as `The configuration is valid (postgres: 1 database, 3 roles, 1 schema, 3 privileges).`
 
-Errors are printed to stderr as `dbfence: error: ...` (configuration diagnostics follow unindented) and exit with 1. The source lines that diagnostics quote show the value of every `password` and `dsn` assignment (to the end of its line, and the body of a heredoc it starts) as `*`, even with `--show-secrets`, since an error can come before the value is known to be a secret; literal `password` and `dsn` values (and the password of a literal URL `dsn`) are known secrets as soon as the file is parsed. `plan --detailed-exitcode` exits with 2 when the plan has changes; everything else that succeeds exits with 0.
+Errors are printed to stderr as `dbfence: error: ...` (configuration diagnostics follow unindented) and exit with 1. The source lines that diagnostics quote show the value of every `password` and `dsn` assignment (to the end of its line, and further while it has open brackets or heredocs, so a multi-line `format(...)` or `trimspace(<<EOT ...)` is hidden as a whole) as `*`, even with `--show-secrets`, since an error can come before the value is known to be a secret; the literal strings of `password` and `dsn` values (also inside lists, conditionals and function calls other than `env`, `secretenv`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate`, whose arguments name the secret) and the password of a URL literal in a `dsn` are known secrets as soon as the file is parsed. `plan --detailed-exitcode` exits with 2 when the plan has changes; everything else that succeeds exits with 0.
 
 ## Configuration
 
