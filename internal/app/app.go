@@ -26,8 +26,9 @@ type Driver interface {
 	// Inspect reads the current state. Schemas and schema privileges are
 	// read for the databases declared in desired that already exist.
 	Inspect(ctx context.Context, desired *model.Desired) (*model.Current, error)
-	// Exec runs query on database ("" is the configured connection).
-	Exec(ctx context.Context, database, query string) error
+	// Exec runs one statement on s.Database ("" is the configured
+	// connection), as s.AsRole when set; see apply.Executor.
+	Exec(ctx context.Context, s plan.Statement) error
 	Close() error
 }
 

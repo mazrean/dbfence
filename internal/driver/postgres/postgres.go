@@ -4,6 +4,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -200,24 +201,122 @@ func (d *Driver) conn(ctx context.Context, database string) (*sql.DB, error) {
 	return c, nil
 }
 
-// Exec implements driver.Driver.
-// Errors the server answered with, and failures to connect before the
-// statement was sent, are marked as rejected; others, such as a lost
-// connection, leave the outcome unknown.
-func (d *Driver) Exec(ctx context.Context, database, query string) error {
-	c, err := d.conn(ctx, database)
+// Exec implements driver.Driver. The statement is sent with the extended
+// query protocol, in which the server refuses a query string holding more
+// than one command, so a quoting mistake cannot chain another statement.
+// A statement with AsRole runs on one pinned connection in a transaction
+// of its own, under SET LOCAL ROLE; others run without a transaction,
+// since CREATE DATABASE and DROP DATABASE cannot run inside one.
+//
+// Errors the server answered with, and failures before the statement was
+// sent or before its transaction committed, are marked as rejected;
+// others, such as a connection lost while the statement ran, leave the
+// outcome unknown.
+func (d *Driver) Exec(ctx context.Context, s plan.Statement) error {
+	c, err := d.conn(ctx, s.Database)
 	if err != nil {
 		return apply.Rejected(err)
 	}
+	conn, err := c.Conn(ctx)
+	if err != nil {
+		return apply.Rejected(fmt.Errorf("get a connection: %w", err))
+	}
+	defer func() { _ = conn.Close() }()
 	d.notices.take()
-	if _, err = c.ExecContext(ctx, query); err != nil {
-		if _, ok := errors.AsType[*pgconn.PgError](err); ok {
-			return apply.Rejected(withDetail(err))
+	err = conn.Raw(func(dc any) error {
+		sc, ok := dc.(*stdlib.Conn)
+		if !ok {
+			return apply.Rejected(fmt.Errorf("unexpected driver connection %T", dc))
 		}
+		pc := sc.Conn().PgConn()
+		if s.AsRole == "" {
+			return classify(execOne(ctx, pc, s.SQL()), false)
+		}
+		return execAs(ctx, pc, s.AsRole, s.SQL())
+	})
+	if err != nil {
 		return err
 	}
 	return apply.Rejected(noticeError(d.notices.take()))
 }
+
+// execOne sends query as a single extended-protocol statement and waits
+// for its result.
+func execOne(ctx context.Context, pc *pgconn.PgConn, query string) error {
+	return pc.ExecParams(ctx, query, nil, nil, nil, nil).Read().Err
+}
+
+// execAs runs query as role: BEGIN; SET LOCAL ROLE role; query; COMMIT,
+// each sent on its own. SET LOCAL ends with the transaction, so the
+// connection returns to the pool as the connected user whatever happens.
+func execAs(ctx context.Context, pc *pgconn.PgConn, role, query string) error {
+	if err := execOne(ctx, pc, "BEGIN"); err != nil {
+		return discardIfInTx(pc, classify(err, true))
+	}
+	for _, q := range []string{"SET LOCAL ROLE " + Ident(role), query} {
+		if err := execOne(ctx, pc, q); err != nil {
+			// Nothing was committed: the server rolls the transaction
+			// back on ROLLBACK or when the connection is lost.
+			rollback(ctx, pc)
+			return discardIfInTx(pc, classify(err, true))
+		}
+	}
+	if err := execOne(ctx, pc, "COMMIT"); err != nil {
+		// A COMMIT the server answered with an error rolled back; any
+		// other failure hides whether it committed.
+		return discardIfInTx(pc, classify(err, false))
+	}
+	return nil
+}
+
+// rollbackTimeout bounds the ROLLBACK after a failed statement, which
+// runs even when ctx is cancelled, and closing a connection left in it.
+const rollbackTimeout = 5 * time.Second
+
+// rollback ends the failed transaction. Its error is not reported:
+// discardIfInTx drops a connection that is still inside the transaction.
+func rollback(ctx context.Context, pc *pgconn.PgConn) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+	_ = execOne(ctx, pc, "ROLLBACK")
+}
+
+// classify marks err as rejected when the server answered with it, when
+// nothing was sent, or when notApplied is set because nothing can have
+// taken effect. Other errors leave the outcome unknown.
+func classify(err error, notApplied bool) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[*pgconn.PgError](err); ok {
+		return apply.Rejected(withDetail(err))
+	}
+	if notApplied || pgconn.SafeToRetry(err) {
+		return apply.Rejected(err)
+	}
+	return err
+}
+
+// discardIfInTx makes database/sql drop the connection when it is closed
+// or still inside a transaction, so that no later statement can run in
+// what is left of the failed one.
+func discardIfInTx(pc *pgconn.PgConn, err error) error {
+	if pc.IsClosed() || pc.TxStatus() != 'I' {
+		ctx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		defer cancel()
+		_ = pc.Close(ctx)
+		return badConn{err}
+	}
+	return err
+}
+
+// badConn marks err as driver.ErrBadConn, which makes database/sql close
+// the connection, without changing its text.
+type badConn struct{ error }
+
+func (e badConn) Is(target error) bool { return target == driver.ErrBadConn }
+
+func (e badConn) Unwrap() error { return e.error }
 
 // detailError adds the server's DETAIL and HINT, which often name the
 // object that blocks a statement, to a PostgreSQL error.

@@ -117,11 +117,17 @@ func checkCharset(charset string) error {
 	return nil
 }
 
-// Exec implements driver.Driver.
+// Exec implements driver.Driver. The connection does not allow multiple
+// statements, so the server rejects a query holding more than one.
 // Errors the server answered with are marked as rejected; others, such
 // as a lost connection, leave the outcome unknown.
-func (d *Driver) Exec(ctx context.Context, _, query string) error {
-	_, err := d.db.ExecContext(ctx, query)
+func (d *Driver) Exec(ctx context.Context, s plan.Statement) error {
+	if s.AsRole != "" {
+		// The MySQL dialect never renders one; refuse rather than run it
+		// as the connected account.
+		return apply.Rejected(errors.New("running a statement as another role is not supported on MySQL"))
+	}
+	_, err := d.db.ExecContext(ctx, s.SQL())
 	if _, ok := errors.AsType[*gomysql.MySQLError](err); ok {
 		return apply.Rejected(err)
 	}

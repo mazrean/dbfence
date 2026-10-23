@@ -29,7 +29,7 @@ func TestStateRevokeNeedsSetRole(t *testing.T) {
 		},
 		{
 			name: "grantor it may SET ROLE to", roles: map[string]roleAccess{"h3": {set: true}},
-			want: `SET ROLE "h3"; REVOKE CONNECT ON DATABASE "hdb" FROM "hu"; RESET ROLE`,
+			want: `as "h3": REVOKE CONNECT ON DATABASE "hdb" FROM "hu"`,
 		},
 	}
 	for _, tt := range tests {
@@ -142,6 +142,9 @@ func sqlOf(stmts []plan.Statement) string {
 	out := make([]string, len(stmts))
 	for i, s := range stmts {
 		out[i] = s.SQL()
+		if s.AsRole != "" {
+			out[i] = "as " + Ident(s.AsRole) + ": " + out[i]
+		}
 		for _, n := range slices.Backward(s.Notes()) {
 			out[i] = "-- " + n + "\n" + out[i]
 		}
@@ -184,7 +187,7 @@ func TestStateRevoke(t *testing.T) {
 			},
 			obj:     schema,
 			grantee: "app", privs: []string{"USAGE"},
-			want: `app: SET ROLE "ro"; REVOKE USAGE ON SCHEMA "api" FROM "app"; RESET ROLE`,
+			want: `app: as "ro": REVOKE USAGE ON SCHEMA "api" FROM "app"`,
 		},
 		{
 			name: "two grantors",
@@ -194,7 +197,7 @@ func TestStateRevoke(t *testing.T) {
 			},
 			obj:     db,
 			grantee: "b", privs: []string{"CONNECT"}, optionOnly: true,
-			want: `SET ROLE "a"; REVOKE GRANT OPTION FOR CONNECT ON DATABASE "app" FROM "b"; RESET ROLE`,
+			want: `as "a": REVOKE GRANT OPTION FOR CONNECT ON DATABASE "app" FROM "b"`,
 		},
 		{
 			name: "dependent grants cascade and declared ones are granted again",
@@ -242,7 +245,7 @@ func TestStateRevoke(t *testing.T) {
 			},
 			obj:     schema,
 			grantee: "public", privs: []string{"USAGE"},
-			want: `app: SET ROLE "ro"; REVOKE USAGE ON SCHEMA "api" FROM PUBLIC; RESET ROLE`,
+			want: `app: as "ro": REVOKE USAGE ON SCHEMA "api" FROM PUBLIC`,
 		},
 		{
 			name: "PUBLIC as a dependent of a cascade is granted again",

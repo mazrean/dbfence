@@ -33,6 +33,45 @@ func TestStatementNotesAreNotSQL(t *testing.T) {
 	}
 }
 
+// AsRole is carried beside the SQL: the executable text is the bare
+// statement, never a SET ROLE chained in front of it.
+func TestStatementWithRole(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		wantRole  string
+		wantWhere string
+		stmt      Statement
+	}{
+		{name: "configured connection", stmt: SQL("", "REVOKE X")},
+		{name: "database only", stmt: SQL("app", "REVOKE X"), wantWhere: `on database "app"`},
+		{name: "role only", stmt: SQL("", "REVOKE X").WithRole("ro"), wantRole: "ro", wantWhere: `as role "ro"`},
+		{
+			name: "database and role", stmt: SQL("app", "REVOKE X").WithRole(`r"o`).WithNote("n"),
+			wantRole: `r"o`, wantWhere: `on database "app", as role "r\"o"`,
+		},
+		{name: "last role wins", stmt: SQL("", "REVOKE X").WithRole("a").WithRole("b"), wantRole: "b", wantWhere: `as role "b"`},
+		{name: "control characters escaped", stmt: SQL("", "REVOKE X").WithRole("x\n-- y"), wantRole: "x\n-- y", wantWhere: `as role "x\n-- y"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.stmt.SQL(); got != "REVOKE X" {
+				t.Errorf("SQL() = %q, want the bare statement", got)
+			}
+			if got := tt.stmt.Display(true); got != "REVOKE X" {
+				t.Errorf("Display(true) = %q, want the bare statement", got)
+			}
+			if tt.stmt.AsRole != tt.wantRole {
+				t.Errorf("AsRole = %q, want %q", tt.stmt.AsRole, tt.wantRole)
+			}
+			if got := tt.stmt.Where(); got != tt.wantWhere {
+				t.Errorf("Where() = %q, want %q", got, tt.wantWhere)
+			}
+		})
+	}
+}
+
 func TestRender(t *testing.T) {
 	t.Parallel()
 	schema := Change{
@@ -71,6 +110,15 @@ func TestRender(t *testing.T) {
 			}}},
 			want: "-- [revoke] r\n-- (on database \"app\")\n-- first\n-- second\nREVOKE X CASCADE;\n\n" +
 				"-- Plan: 0 to create, 0 to change, 1 to revoke, 0 to drop (1 statement).\n",
+		},
+		{
+			name: "statement run as another role",
+			plan: &Plan{Changes: []Change{{
+				Action: ActionRevoke, Resource: "r",
+				Statements: []Statement{SQL("app", `REVOKE X FROM "u"`).WithRole("ro\n-- x"), SQL("", "R").WithRole("g")},
+			}}},
+			want: "-- [revoke] r\n-- (on database \"app\", as role \"ro\\n-- x\")\nREVOKE X FROM \"u\";\n-- (as role \"g\")\nR;\n\n" +
+				"-- Plan: 0 to create, 0 to change, 1 to revoke, 0 to drop (2 statements).\n",
 		},
 		{
 			name: "no changes",

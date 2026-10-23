@@ -482,12 +482,9 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 		if len(dependents) > 0 {
 			q += " CASCADE"
 		}
-		if g != "" {
-			// One simple-protocol query runs as one implicit transaction,
-			// so a failing REVOKE also rolls back the SET ROLE.
-			q = "SET ROLE " + Ident(g) + "; " + q + "; RESET ROLE"
-		}
-		stmt := plan.SQL(db, q)
+		// Exec runs a statement with AsRole in a transaction of its own,
+		// under SET LOCAL ROLE, so the role never outlives it.
+		stmt := plan.SQL(db, q).WithRole(g)
 		if len(dependents) > 0 {
 			stmt = stmt.WithNote(cascadeNote("privileges on "+objectLabel(obj), grantee, dependents))
 		}

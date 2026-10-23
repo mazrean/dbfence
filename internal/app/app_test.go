@@ -14,6 +14,7 @@ import (
 	"github.com/mazrean/dbfence/internal/driver/postgres"
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/plan"
 )
 
 type fakeDriver struct {
@@ -27,8 +28,8 @@ func (f *fakeDriver) Inspect(context.Context, *model.Desired) (*model.Current, e
 	return &model.Current{CurrentUser: model.RoleID{Name: "postgres"}, Roles: roles}, nil
 }
 
-func (f *fakeDriver) Exec(_ context.Context, _, q string) error {
-	f.executed = append(f.executed, q)
+func (f *fakeDriver) Exec(_ context.Context, s plan.Statement) error {
+	f.executed = append(f.executed, s.SQL())
 	return nil
 }
 

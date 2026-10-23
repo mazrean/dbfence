@@ -15,11 +15,16 @@ import (
 type Secret string
 
 // Statement is a single SQL statement executed on Database ("" means the
-// connection given in configuration).
+// connection given in configuration). A Statement is always exactly one
+// SQL command: drivers send it so that the server rejects a second one.
 type Statement struct {
 	Database string
-	parts    []any
-	notes    []string
+	// AsRole, when set, is the role the statement runs as. The driver
+	// switches to it for this statement only, so the SQL never chains a
+	// SET ROLE in front of the statement.
+	AsRole string
+	parts  []any
+	notes  []string
 }
 
 // SQL builds a statement from string and Secret fragments.
@@ -40,6 +45,26 @@ func SQL(database string, parts ...any) Statement {
 func (s Statement) WithNote(note string) Statement {
 	s.notes = append([]string{note}, s.notes...)
 	return s
+}
+
+// WithRole returns s run as role (see AsRole).
+func (s Statement) WithRole(role string) Statement {
+	s.AsRole = role
+	return s
+}
+
+// Where describes where s runs, such as `on database "app", as role
+// "ro"`, or returns "" for the configured connection and user. Names are
+// Go-quoted, so control characters in them are escaped.
+func (s Statement) Where() string {
+	var parts []string
+	if s.Database != "" {
+		parts = append(parts, fmt.Sprintf("on database %q", s.Database))
+	}
+	if s.AsRole != "" {
+		parts = append(parts, fmt.Sprintf("as role %q", s.AsRole))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Notes returns the notes explaining s, in display order.
@@ -135,8 +160,8 @@ func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 	for _, c := range p.Changes {
 		fmt.Fprintf(&sb, "-- [%s] %s\n", c.Action, Escape(c.Resource))
 		for _, s := range c.Statements {
-			if s.Database != "" {
-				fmt.Fprintf(&sb, "-- (on database %q)\n", s.Database)
+			if c := s.Where(); c != "" {
+				fmt.Fprintf(&sb, "-- (%s)\n", c)
 			}
 			for _, n := range s.notes {
 				fmt.Fprintf(&sb, "-- %s\n", Escape(n))
