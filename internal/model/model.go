@@ -170,6 +170,9 @@ type Desired struct {
 type Current struct {
 	// CurrentUser is the role dbfence is connected as.
 	CurrentUser RoleID
+	// CurrentDatabase is the database dbfence is connected to, if any.
+	// It is never pruned.
+	CurrentDatabase string
 	Databases   []Database
 	Roles       []RoleState
 	// Schemas only contains schemas of inspected databases.

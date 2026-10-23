@@ -242,7 +242,8 @@ func (df *differ) databases() []string {
 	}
 	var dropped []string
 	for _, c := range df.current.Databases {
-		if df.managedDatabase(c.Name) || df.d.IsSystemDatabase(c.Name) || df.ignore.database(c.Name) {
+		if df.managedDatabase(c.Name) || df.d.IsSystemDatabase(c.Name) || df.ignore.database(c.Name) ||
+			(c.Name != "" && c.Name == df.current.CurrentDatabase) {
 			continue
 		}
 		if !df.opts.Prune {
@@ -415,17 +416,29 @@ func boolInt(b bool) int {
 }
 
 func (df *differ) pruneRoles(droppedDatabases []string) {
+	// Objects in ignored databases must not be reassigned or dropped.
 	var surviving []string
 	for _, db := range df.current.Databases {
-		if !slices.Contains(droppedDatabases, db.Name) {
+		if !slices.Contains(droppedDatabases, db.Name) && !df.ignore.database(db.Name) {
 			surviving = append(surviving, db.Name)
 		}
 	}
 	if df.current.Unreadable.Roles {
 		return
 	}
+	referenced := df.referencedRoles()
+	reliedOn := df.currentUserRoles()
+	if df.opts.Prune && df.current.Unreadable.Memberships {
+		df.warn("cannot read role memberships: roles granted to the connected user are not protected from --prune")
+	}
 	for _, r := range df.current.Roles {
 		if df.desiredRole(r.ID) || r.ID == df.current.CurrentUser || df.d.IsSystemRole(r.ID) || df.ignore.role(r.ID) {
+			continue
+		}
+		if reason := df.keepRole(r.ID, referenced, reliedOn); reason != "" {
+			if df.opts.Prune {
+				df.warn("%s %s; not pruned", roleResource(r.ID), reason)
+			}
 			continue
 		}
 		if !df.opts.Prune {
@@ -434,6 +447,81 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 		}
 		df.add(phaseDropRole, plan.ActionDrop, roleResource(r.ID), df.d.DropRole(r.ID, surviving))
 	}
+}
+
+// keepRole explains why the undeclared role id must survive --prune, or
+// returns "" when it may be dropped.
+func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleID]bool) string {
+	switch {
+	case referenced[id]:
+		return "is referenced by the configuration but not declared (declare it to manage it)"
+	case reliedOn[id]:
+		return fmt.Sprintf("is granted to the connected user %q", df.current.CurrentUser)
+	}
+	// REASSIGN OWNED also reassigns databases the role owns, and DROP
+	// ROLE fails while it still owns objects, so owners of ignored
+	// objects are kept.
+	if id.Host == "" {
+		for _, db := range df.current.Databases {
+			if db.Owner == id.Name && df.ignore.database(db.Name) {
+				return fmt.Sprintf("owns the ignored database %q", db.Name)
+			}
+		}
+		for _, s := range df.current.Schemas {
+			if s.Owner == id.Name && df.ignore.schema(s.Name) && !df.d.IsSystemSchema(s.Name) {
+				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
+			}
+		}
+	}
+	return ""
+}
+
+// referencedRoles returns the roles the desired state refers to by name:
+// owners, member_of entries and grantees.
+func (df *differ) referencedRoles() map[model.RoleID]bool {
+	refs := map[model.RoleID]bool{}
+	for _, r := range df.desired.Roles {
+		for _, m := range r.MemberOf {
+			refs[m] = true
+		}
+	}
+	for _, db := range df.desired.Databases {
+		if db.Owner != "" {
+			refs[model.RoleID{Name: db.Owner}] = true
+		}
+	}
+	for _, s := range df.desired.Schemas {
+		if s.Owner != "" {
+			refs[model.RoleID{Name: s.Owner}] = true
+		}
+	}
+	for _, p := range df.desired.Privileges {
+		refs[p.Grantee] = true
+	}
+	return refs
+}
+
+// currentUserRoles returns the roles granted to the connected user,
+// directly or transitively. Dropping them would take away the privileges
+// dbfence runs with.
+func (df *differ) currentUserRoles() map[model.RoleID]bool {
+	seen := map[model.RoleID]bool{}
+	queue := []model.RoleID{df.current.CurrentUser}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		cur, ok := df.currentRole(id)
+		if !ok {
+			continue
+		}
+		for _, m := range cur.MemberOf {
+			if !seen[m] {
+				seen[m] = true
+				queue = append(queue, m)
+			}
+		}
+	}
+	return seen
 }
 
 type ignorer struct {
