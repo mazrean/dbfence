@@ -19,10 +19,12 @@ import (
 type fakeDriver struct {
 	postgres.Dialect
 	executed []string
+	extra    []model.RoleState
 }
 
 func (f *fakeDriver) Inspect(context.Context, *model.Desired) (*model.Current, error) {
-	return &model.Current{CurrentUser: model.RoleID{Name: "postgres"}, Roles: []model.RoleState{{ID: model.RoleID{Name: "postgres"}}}}, nil
+	roles := append([]model.RoleState{{ID: model.RoleID{Name: "postgres"}}}, f.extra...)
+	return &model.Current{CurrentUser: model.RoleID{Name: "postgres"}, Roles: roles}, nil
 }
 
 func (f *fakeDriver) Exec(_ context.Context, _, q string) error {
@@ -122,5 +124,26 @@ func TestApplyPromptInterrupted(t *testing.T) {
 	}
 	if len(d.executed) != 0 {
 		t.Errorf("executed = %v", d.executed)
+	}
+}
+
+func TestPlanWritesWarningsToStderr(t *testing.T) {
+	t.Parallel()
+	_, d, _, path := newApp(t, "")
+	d.extra = []model.RoleState{{ID: model.RoleID{Name: "legacy"}}}
+	var out, errOut strings.Builder
+	a := app.New(funcs.NewRegistry(t.Context()), fakeOpener{d}, &app.IO{In: strings.NewReader(""), Out: &out, Err: &errOut})
+	if _, err := a.Plan(t.Context(), app.Options{Path: path}); err != nil {
+		t.Fatal(err)
+	}
+	const warn = `unmanaged role "legacy"`
+	if !strings.Contains(out.String(), "-- warning: "+warn) {
+		t.Errorf("stdout = %q", out.String())
+	}
+	if !strings.HasPrefix(errOut.String(), "warning: "+warn) {
+		t.Errorf("stderr = %q", errOut.String())
+	}
+	if !strings.Contains(out.String(), "-- Plan: 1 to create, 0 to change, 0 to drop (1 statement).") {
+		t.Errorf("stdout has no summary: %q", out.String())
 	}
 }

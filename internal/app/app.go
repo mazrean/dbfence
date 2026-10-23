@@ -103,7 +103,16 @@ func (a *App) Plan(ctx context.Context, o Options) (*plan.Plan, error) {
 		return nil, err
 	}
 	defer closeQuietly(drv)
-	return p, p.Render(a.io.Out, o.ShowSecrets)
+	return p, a.render(p, o)
+}
+
+// render prints the plan to stdout and its warnings to stderr as well, so
+// they stay visible when stdout is redirected.
+func (a *App) render(p *plan.Plan, o Options) error {
+	if err := p.Render(a.io.Out, o.ShowSecrets); err != nil {
+		return err
+	}
+	return p.WriteWarnings(a.io.Err)
 }
 
 // Apply prints the plan, asks for confirmation, and executes it.
@@ -113,7 +122,7 @@ func (a *App) Apply(ctx context.Context, o Options) error {
 		return err
 	}
 	defer closeQuietly(drv)
-	if err = p.Render(a.io.Out, o.ShowSecrets); err != nil {
+	if err = a.render(p, o); err != nil {
 		return err
 	}
 	if p.Empty() {

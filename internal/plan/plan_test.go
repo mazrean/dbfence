@@ -21,28 +21,79 @@ func TestStatementRedaction(t *testing.T) {
 
 func TestRender(t *testing.T) {
 	t.Parallel()
-	p := &Plan{
-		Warnings: []string{`unmanaged role "x"`},
-		Changes: []Change{{
-			Action: ActionCreate, Resource: `schema "api"`,
-			Statements: []Statement{SQL("app", `CREATE SCHEMA "api"`)},
-		}},
+	schema := Change{
+		Action: ActionCreate, Resource: `schema "api"`,
+		Statements: []Statement{SQL("app", `CREATE SCHEMA "api"`)},
 	}
-	var sb strings.Builder
-	if err := p.Render(&sb, false); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		plan *Plan
+		want string
+	}{
+		{
+			name: "changes and warnings",
+			plan: &Plan{Warnings: []string{`unmanaged role "x"`}, Changes: []Change{schema}},
+			want: "-- warning: unmanaged role \"x\"\n\n-- [create] schema \"api\"\n-- (on database \"app\")\nCREATE SCHEMA \"api\";\n\n" +
+				"-- Plan: 1 to create, 0 to change, 0 to drop (1 statement).\n",
+		},
+		{
+			name: "every action with drops",
+			plan: &Plan{Changes: []Change{
+				schema,
+				{Action: ActionUpdate, Resource: `role "a"`, Statements: []Statement{SQL("", "A"), SQL("", "B")}},
+				{Action: ActionGrant, Resource: "g", Statements: []Statement{SQL("", "G")}},
+				{Action: ActionRevoke, Resource: "r", Statements: []Statement{SQL("", "R")}},
+				{Action: ActionDrop, Resource: `database "d"`, Statements: []Statement{SQL("", "D")}},
+				{Action: ActionDrop, Resource: `role "x"`, Statements: []Statement{SQL("", "X")}},
+			}},
+			want: "-- Plan: 1 to create, 1 to change, 1 to grant, 1 to revoke, 2 to drop (7 statements).\n" +
+				"-- DESTRUCTIVE: this plan drops 2 objects: database \"d\", role \"x\"\n",
+		},
+		{
+			name: "no changes",
+			plan: &Plan{},
+			want: "-- No changes. The server matches the configuration.\n",
+		},
+		{
+			name: "no changes with a warning",
+			plan: &Plan{Warnings: []string{"password not compared"}},
+			want: "-- warning: password not compared\n\n-- No changes to apply. See the 1 warning above for differences that are not changed and items that were not compared.\n",
+		},
 	}
-	want := "-- warning: unmanaged role \"x\"\n\n-- [create] schema \"api\"\n-- (on database \"app\")\nCREATE SCHEMA \"api\";\n\n"
-	if sb.String() != want {
-		t.Errorf("Render() =\n%s\nwant\n%s", sb.String(), want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var sb strings.Builder
+			if err := tt.plan.Render(&sb, false); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasSuffix(sb.String(), tt.want) {
+				t.Errorf("Render() =\n%s\nwant suffix\n%s", sb.String(), tt.want)
+			}
+			if !tt.plan.Empty() && strings.Contains(sb.String(), "No changes") {
+				t.Errorf("Render() claims no changes:\n%s", sb.String())
+			}
+		})
 	}
+}
 
-	var empty strings.Builder
-	if err := (&Plan{}).Render(&empty, false); err != nil {
+func TestWriteWarnings(t *testing.T) {
+	t.Parallel()
+	var sb strings.Builder
+	if err := (&Plan{Warnings: []string{"a", "b"}}).WriteWarnings(&sb); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(empty.String(), "No changes") {
-		t.Errorf("empty plan output = %q", empty.String())
+	if got, want := sb.String(), "warning: a\nwarning: b\n"; got != want {
+		t.Errorf("WriteWarnings() = %q, want %q", got, want)
+	}
+}
+
+func TestCount(t *testing.T) {
+	t.Parallel()
+	for n, want := range map[int]string{0: "0 statements", 1: "1 statement", 2: "2 statements"} {
+		if got := Count(n, "statement"); got != want {
+			t.Errorf("Count(%d) = %q, want %q", n, got, want)
+		}
 	}
 }
 
