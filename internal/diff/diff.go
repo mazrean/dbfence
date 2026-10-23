@@ -346,8 +346,13 @@ func (df *differ) databases() []string {
 	}
 	var dropped []string
 	for _, c := range df.current.Databases {
-		if df.managedDatabase(c.Name) || df.d.IsSystemDatabase(c.Name) || df.ignore.database(c.Name) ||
-			(c.Name != "" && c.Name == df.current.CurrentDatabase) {
+		if df.managedDatabase(c.Name) || df.d.IsSystemDatabase(c.Name) || df.ignore.database(c.Name) {
+			continue
+		}
+		if c.Name != "" && c.Name == df.current.CurrentDatabase {
+			if df.opts.Prune {
+				df.warn("database %q is the database dbfence is connected to; not pruned", c.Name)
+			}
 			continue
 		}
 		if !df.opts.Prune {
@@ -656,7 +661,13 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 		df.warn("cannot read role memberships: roles granted to the connected user are not protected from --prune")
 	}
 	for _, r := range df.current.Roles {
-		if df.desiredRole(r.ID) || r.ID == df.current.CurrentUser || df.d.IsSystemRole(r.ID) || df.ignore.role(r.ID) {
+		if df.desiredRole(r.ID) || df.d.IsSystemRole(r.ID) || df.ignore.role(r.ID) {
+			continue
+		}
+		if r.ID == df.current.CurrentUser {
+			if df.opts.Prune {
+				df.warn("%s is the connected user; not pruned", df.roleResource(r.ID))
+			}
 			continue
 		}
 		if reason := df.keepRole(r.ID, referenced, reliedOn); reason != "" {

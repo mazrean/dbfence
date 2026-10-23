@@ -231,6 +231,7 @@ func TestComputePruneProtection(t *testing.T) {
 				`DROP ROLE "stray"`,
 			},
 			wantWarns: []string{
+				`user "admin" is the connected user; not pruned`,
 				`role "legacy_grp" is referenced by the configuration but not declared (declare it to manage it); not pruned`,
 				`role "legacy_owner" is referenced by the configuration but not declared (declare it to manage it); not pruned`,
 				`role "schema_owner" is referenced by the configuration but not declared (declare it to manage it); not pruned`,
@@ -263,6 +264,7 @@ func TestComputePruneProtection(t *testing.T) {
 			dialect: mysql.Dialect{},
 			want:    []string{`DROP USER 'stale'@'%'`},
 			wantWarns: []string{
+				`user "admin"@"%" is the connected user; not pruned`,
 				`role "dba"@"%" is granted to the connected user "admin"@"%"; not pruned`,
 				`role "super"@"%" is granted to the connected user "admin"@"%"; not pruned`,
 			},
@@ -285,6 +287,7 @@ func TestComputePruneProtection(t *testing.T) {
 				`DROP ROLE "stray"`,
 			},
 			wantWarns: []string{
+				`user "admin" is the connected user; not pruned`,
 				`role "legacy_owner" owns the ignored database "keepme"; not pruned`,
 				`role "vendor_owner" owns the ignored schema "vendor" in database "app"; not pruned`,
 			},
@@ -303,7 +306,7 @@ func TestComputePruneProtection(t *testing.T) {
 				`postgres: DROP OWNED BY "stray"`,
 				`DROP ROLE "stray"`,
 			},
-			wantWarns: []string{},
+			wantWarns: []string{`user "admin" is the connected user; not pruned`},
 		},
 		{
 			name:    "owner of a schema ignored by its qualified name",
@@ -316,7 +319,7 @@ func TestComputePruneProtection(t *testing.T) {
 			}(),
 			dialect:   postgres.Dialect{},
 			want:      []string{},
-			wantWarns: []string{`role "vendor_owner" owns the ignored schema "vendor" in database "app"; not pruned`},
+			wantWarns: []string{`user "admin" is the connected user; not pruned`, `role "vendor_owner" owns the ignored schema "vendor" in database "app"; not pruned`},
 		},
 		{
 			name:    "connected database",
@@ -326,9 +329,12 @@ func TestComputePruneProtection(t *testing.T) {
 				c.CurrentDatabase = "conn_db"
 				return c
 			}(),
-			dialect:   postgres.Dialect{},
-			want:      []string{`DROP DATABASE "legacy"`},
-			wantWarns: []string{},
+			dialect: postgres.Dialect{},
+			want:    []string{`DROP DATABASE "legacy"`},
+			wantWarns: []string{
+				`database "conn_db" is the database dbfence is connected to; not pruned`,
+				`user "admin" is the connected user; not pruned`,
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -347,3 +353,4 @@ func TestComputePruneProtection(t *testing.T) {
 		})
 	}
 }
+
