@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/driver/mysql"
 	"github.com/mazrean/dbfence/internal/driver/postgres"
@@ -354,3 +355,64 @@ func TestComputePruneProtection(t *testing.T) {
 	}
 }
 
+// TestComputeConnectedUserDefaultRoles checks that SET DEFAULT ROLE for
+// the connected MySQL account keeps the roles whose memberships dbfence
+// does not revoke, so that later sessions still have their privileges.
+func TestComputeConnectedUserDefaultRoles(t *testing.T) {
+	t.Parallel()
+	dba := model.RoleID{Name: "dba", Host: "%"}
+	role := func(n string) model.RoleID { return model.RoleID{Name: n, Host: "%"} }
+	tests := []struct {
+		opts     map[model.RoleID]model.MembershipOptions
+		name     string
+		memberOf []model.RoleID
+		want     []string
+		current  model.RoleState
+	}{
+		{
+			name:     "empty member_of keeps every default role",
+			memberOf: []model.RoleID{},
+			current: model.RoleState{ID: dba, Login: true, MemberOf: []model.RoleID{role("dbarole")}, DefaultRoles: []model.RoleID{role("dbarole")},
+				MemberOptions: map[model.RoleID]model.MembershipState{role("dbarole"): {Inherit: true, Set: true}}},
+			want: []string{},
+		},
+		{
+			name:     "subset keeps the undeclared role active",
+			memberOf: []model.RoleID{role("dbarole")},
+			opts:     map[model.RoleID]model.MembershipOptions{role("dbarole"): {Admin: new(false)}},
+			current: model.RoleState{ID: dba, Login: true, MemberOf: []model.RoleID{role("dbarole"), role("extra")},
+				DefaultRoles: []model.RoleID{role("dbarole"), role("extra")},
+				MemberOptions: map[model.RoleID]model.MembershipState{
+					role("dbarole"): {Admin: true, Inherit: true, Set: true}, role("extra"): {Inherit: true, Set: true},
+				}},
+			want: []string{},
+		},
+		{
+			name:     "a newly declared role is added to the kept ones",
+			memberOf: []model.RoleID{role("extra")},
+			current: model.RoleState{ID: dba, Login: true, MemberOf: []model.RoleID{role("dbarole")}, DefaultRoles: []model.RoleID{role("dbarole")},
+				MemberOptions: map[model.RoleID]model.MembershipState{role("dbarole"): {Inherit: true, Set: true}}},
+			want: []string{
+				`GRANT 'extra'@'%' TO 'dba'@'%'`,
+				`SET DEFAULT ROLE 'dbarole'@'%', 'extra'@'%' TO 'dba'@'%'`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{Engine: model.EngineMySQL, Roles: []model.Role{
+				{ID: dba, Login: new(true), MemberOf: tt.memberOf, MemberOptions: tt.opts},
+				{ID: role("dbarole")}, {ID: role("extra")},
+			}}
+			cur := &model.Current{CurrentUser: dba, Roles: []model.RoleState{tt.current, {ID: role("dbarole")}, {ID: role("extra")}}}
+			p, err := diff.Compute(desired, cur, mysql.Dialect{}, diff.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+		})
+	}
+}

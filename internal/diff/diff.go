@@ -289,9 +289,27 @@ func (df *differ) roles() {
 			df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", df.show(r.ID), df.show(m)), df.d.RevokeMembership(r.ID, m))
 		}
 		if s, ok := df.d.(DefaultRoleSetter); ok {
+			if self {
+				r = keepDefaultRoles(r, cur)
+			}
 			df.add(phaseMembership, plan.ActionUpdate, "default roles of "+df.roleResource(r.ID), s.SetDefaultRoles(r, cur))
 		}
 	}
+}
+
+// keepDefaultRoles returns r with the memberships the connected user
+// keeps (see roles) and its current default roles added to MemberOf, so
+// that SET DEFAULT ROLE does not deactivate the roles it gets its
+// privileges from in later sessions.
+func keepDefaultRoles(r model.Role, cur model.RoleState) model.Role {
+	kept := slices.Clone(r.MemberOf)
+	for _, m := range slices.Concat(cur.MemberOf, cur.DefaultRoles) {
+		if !slices.Contains(kept, m) {
+			kept = append(kept, m)
+		}
+	}
+	r.MemberOf = kept
+	return r
 }
 
 // membershipOptions converges the declared options of the existing
