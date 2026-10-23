@@ -2,7 +2,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -116,15 +118,32 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 
 func hclFiles(path string) ([]string, error) {
 	st, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("configuration file %s not found (use -f/--file or DBFENCE_FILE): %w", path, err)
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read configuration %s: %w", path, err)
 	}
 	if !st.IsDir() {
 		return []string{path}, nil
 	}
-	files, err := filepath.Glob(filepath.Join(path, "*.hcl"))
+	// os.ReadDir instead of filepath.Glob: the directory name must not be
+	// interpreted as a pattern.
+	entries, err := os.ReadDir(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read configuration directory %s: %w", path, err)
+	}
+	var files []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".hcl") {
+			continue
+		}
+		f := filepath.Join(path, e.Name())
+		// Stat follows symlinks, so a link to a file still counts.
+		if fi, err := os.Stat(f); err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		files = append(files, f)
 	}
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no *.hcl files in %s", path)
@@ -133,13 +152,67 @@ func hclFiles(path string) ([]string, error) {
 	return files, nil
 }
 
+// diagError renders the error diagnostics. The leading "Error: " of the
+// first one is dropped because the CLI prefixes errors with it already.
 func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
+	diags = dropCascades(errorsOnly(diags))
+	// gohcl decodes attributes in map order; report in source order.
+	slices.SortStableFunc(diags, func(a, b *hcl.Diagnostic) int {
+		switch {
+		case a.Subject == nil || b.Subject == nil:
+			return cmpBool(a.Subject != nil, b.Subject != nil)
+		case a.Subject.Filename != b.Subject.Filename:
+			return strings.Compare(a.Subject.Filename, b.Subject.Filename)
+		default:
+			return a.Subject.Start.Byte - b.Subject.Start.Byte
+		}
+	})
 	var sb strings.Builder
 	w := hcl.NewDiagnosticTextWriter(&sb, p.Files(), 0, false)
 	if err := w.WriteDiagnostics(diags); err != nil {
 		return diags
 	}
-	return fmt.Errorf("invalid configuration:\n%s", strings.TrimRight(sb.String(), "\n"))
+	return errors.New(strings.TrimPrefix(strings.TrimRight(sb.String(), "\n"), "Error: "))
+}
+
+// cmpBool orders false before true.
+func cmpBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	default:
+		return -1
+	}
+}
+
+func errorsOnly(diags hcl.Diagnostics) hcl.Diagnostics {
+	var out hcl.Diagnostics
+	for _, d := range diags {
+		if d.Severity == hcl.DiagError {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// dropCascades removes the "value must be known" diagnostics gohcl emits
+// when converting the placeholder of an expression that already failed.
+func dropCascades(diags hcl.Diagnostics) hcl.Diagnostics {
+	isCascade := func(d *hcl.Diagnostic) bool {
+		return d.Summary == "Unsuitable value type" && strings.Contains(d.Detail, "value must be known") && d.Context != nil
+	}
+	var out hcl.Diagnostics
+	for _, d := range diags {
+		if isCascade(d) && slices.ContainsFunc(diags, func(o *hcl.Diagnostic) bool {
+			return o != d && !isCascade(o) && o.Subject != nil && d.Context.Overlaps(*o.Subject)
+		}) {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // resource is a labeled block awaiting full decode.
