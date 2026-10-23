@@ -170,7 +170,7 @@ func TestWriterRedactsEscapedForms(t *testing.T) {
 		name, secret, printed, leaked string
 	}{
 		{name: "backslash-escaped SQL literal", secret: `Ab\Cd9xYz`, printed: `'Ab\\Cd9xYz'`, leaked: "Cd9xYz"},
-		{name: "JSON with bidi control and quote", secret: "Qw\"er‮Ty7u", printed: jsonOf("Qw\"er‮Ty7u"), leaked: "Ty7u"},
+		{name: "JSON with bidi control and quote", secret: "Qw\"er\u202eTy7u", printed: jsonOf("Qw\"er\u202eTy7u"), leaked: "Ty7u"},
 		{name: "SQL literal with control and quote", secret: "Mn'bv\x01Cx5z", printed: "'Mn''bv\x01Cx5z'", leaked: "Cx5z"},
 		{name: "multi-line with control before newline", secret: "Lk8jHg\x01\nFd3sAa", printed: "Lk8jHg\x01\nFd3sAa", leaked: "Lk8jHg"},
 		{name: "multi-line with control after newline", secret: "Po9iUy\n\x02Tr4eWq", printed: "Po9iUy\n\x02Tr4eWq", leaked: "Tr4eWq"},
