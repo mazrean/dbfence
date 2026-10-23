@@ -201,6 +201,8 @@ Without `urlencode`, a password containing `@ : / ? # % +` or a space produces a
 
 A subset of the cty standard library is also available: `abs`, `base64decode`, `base64encode`, `chomp`, `coalesce`, `concat`, `contains`, `csvdecode`, `distinct`, `flatten`, `format`, `formatlist`, `join`, `jsondecode`, `jsonencode`, `keys`, `length`, `lookup`, `lower`, `merge`, `regex`, `replace`, `split`, `substr`, `tolist`, `tomap`, `tonumber`, `toset`, `tostring`, `trimspace`, `upper` and `values`. `lookup(map, key, default)` requires all three arguments.
 
+Results of `env`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate`, and every value computed from them, are treated as secrets: when a function fails on such a value (for example `tonumber(env("PW"))`), its error is replaced by `the error is not shown because the arguments include a secret value`.
+
 Each secret is fetched once per run. Secret payloads and `base64decode` results must be valid UTF-8, and strings are NFC-normalised (a password in decomposed Unicode form reaches the server composed).
 
 ### Passwords
