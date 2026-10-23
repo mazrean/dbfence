@@ -152,7 +152,7 @@ func TestLoadErrors(t *testing.T) {
 		{"grant undeclared role", pg + `database "d" {}` + "\n" + "grant {\nrole = \"x\"\ndatabase = \"d\"\nprivileges = [\"CONNECT\"]\n}", `role "x", which is not declared`},
 		{"invalid privilege", pg + `role "r" {}` + "\n" + `database "d" {}` + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"SELECT\"]\n}", `privilege "SELECT" is not valid`},
 		{"empty privileges", pg + `role "r" {}` + "\n" + `database "d" {}` + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = []\n}", "privileges must not be empty"},
-		{"duplicate privilege", pg + `role "r" {}` + "\n" + `database "d" {}` + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"CONNECT\"]\n}" + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"ALL\"]\n}", "granted more than once"},
+		{"duplicate privilege", pg + `role "r" {}` + "\n" + `database "d" {}` + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"CONNECT\"]\n}" + "\n" + "grant {\nrole = \"r\"\ndatabase = \"d\"\nprivileges = [\"ALL\"]\n}", "already granted"},
 		{"bad ignore regexp", pg + `ignore { roles = ["("] }`, "Invalid ignore pattern"},
 		{"unknown block", pg + `table "t" {}`, "Unsupported block type"},
 	}
@@ -210,6 +210,114 @@ func TestExpandPrivileges(t *testing.T) {
 	}
 	if diff := cmp.Diff([]string{"CREATE TEMPORARY TABLES", "SELECT"}, got); diff != "" {
 		t.Error(diff)
+	}
+}
+
+func TestLoadDirectoryEntries(t *testing.T) {
+	t.Parallel()
+	conn := "connection {\n engine = \"postgres\"\n dsn = \"x\"\n}"
+	tests := []struct {
+		setup func(t *testing.T, dir string)
+		name  string
+		roles int
+	}{
+		{
+			name:  "glob metacharacters in directory name",
+			setup: func(t *testing.T, dir string) { write(t, filepath.Join(dir, "a.hcl"), conn+"\nrole \"r\" {}") },
+			roles: 1,
+		},
+		{
+			name: "subdirectory named *.hcl is skipped",
+			setup: func(t *testing.T, dir string) {
+				write(t, filepath.Join(dir, "a.hcl"), conn)
+				if err := os.Mkdir(filepath.Join(dir, "old.hcl"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlink to a file counts",
+			setup: func(t *testing.T, dir string) {
+				write(t, filepath.Join(dir, "a.hcl"), conn)
+				target := filepath.Join(t.TempDir(), "roles.txt")
+				write(t, target, `role "r" {}`)
+				if err := os.Symlink(target, filepath.Join(dir, "b.hcl")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			roles: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := filepath.Join(t.TempDir(), "g[1]*?")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(t, dir)
+			cfg, err := Load(dir, funcs.NewRegistry(t.Context()).Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Desired.Roles) != tt.roles {
+				t.Errorf("roles = %v, want %d", cfg.Desired.Roles, tt.roles)
+			}
+		})
+	}
+}
+
+func TestLoadMissingFile(t *testing.T) {
+	t.Parallel()
+	_, err := Load(filepath.Join(t.TempDir(), "dbfence.hcl"), nil)
+	if err == nil || !strings.Contains(err.Error(), "not found (use -f/--file or DBFENCE_FILE)") {
+		t.Errorf("Load(missing) error = %v", err)
+	}
+}
+
+// TestLoadDiagnosticOutput checks the rendered error: no "Error:" header on
+// the first diagnostic (the CLI adds it) and no cascaded diagnostics.
+func TestLoadDiagnosticOutput(t *testing.T) {
+	t.Parallel()
+	const pg = "connection {\n engine = \"postgres\"\n dsn = \"x\"\n}\n"
+	tests := []struct {
+		name, src, prefix string
+		count             int
+	}{
+		{"unset env", "connection {\n engine = \"postgres\"\n dsn = env(\"NOPE\")\n}", "Invalid function argument", 1},
+		{"unknown reference", pg + `database "d" { owner = role.nope.name }`, "Unsupported attribute", 1},
+		{
+			"two unknown references",
+			pg + "role \"r\" {}\ngrant {\n role = role.nope.id\n database = databse.app.name\n privileges = [\"CONNECT\"]\n}",
+			"Unsupported attribute", 2,
+		},
+		{"password env", pg + `user "u" { password = env("NOPE") }`, "Invalid function argument", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := load(t, tt.src)
+			if err == nil {
+				t.Fatal("Load() succeeded")
+			}
+			msg := err.Error()
+			if !strings.HasPrefix(msg, tt.prefix) {
+				t.Errorf("error does not start with %q:\n%s", tt.prefix, msg)
+			}
+			if got := 1 + strings.Count(msg, "Error: "); got != tt.count {
+				t.Errorf("%d diagnostics, want %d:\n%s", got, tt.count, msg)
+			}
+			if strings.Contains(msg, "value must be known") {
+				t.Errorf("cascaded diagnostic in:\n%s", msg)
+			}
+		})
+	}
+}
+
+func write(t *testing.T, path, src string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
