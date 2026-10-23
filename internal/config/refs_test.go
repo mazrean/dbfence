@@ -54,5 +54,17 @@ func TestLoadReferenceErrors(t *testing.T) {
 			want:  []string{"Unsupported attribute", `attribute named "ap"`},
 			count: 1,
 		},
+		{
+			name:  "name references another block",
+			src:   pgConn + "database \"app\" {}\nrole \"r\" {\n  name = \"${database.app.name}_owner\"\n}\n",
+			want:  []string{"References not allowed", "name cannot reference other blocks", "dbfence.hcl line 7"},
+			count: 1,
+		},
+		{
+			name:  "host references another block",
+			src:   myConn + "role \"a\" {}\nrole \"r\" { host = role.a.host }\n",
+			want:  []string{"host cannot reference other blocks"},
+			count: 1,
+		},
 	})
 }

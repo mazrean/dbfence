@@ -431,7 +431,7 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 	r.attrs = attrs
 	if a, ok := attrs["name"]; ok {
 		r.nameRange = a.Range
-		diags = append(diags, gohcl.DecodeExpression(a.Expr, ctx, &r.name)...)
+		diags = append(diags, decodeLiteral(a, ctx, &r.name)...)
 	}
 	if a, ok := attrs["host"]; ok {
 		if b.Type != "role" && b.Type != "user" {
@@ -440,7 +440,7 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 		if engine != model.EngineMySQL {
 			return r, append(diags, errAt(a.Range, "Unsupported attribute", `"host" is only supported for mysql.`))
 		}
-		diags = append(diags, gohcl.DecodeExpression(a.Expr, ctx, &r.host)...)
+		diags = append(diags, decodeLiteral(a, ctx, &r.host)...)
 		if r.host == "" && !diags.HasErrors() {
 			diags = append(diags, errAt(a.Range, "Empty host", `host must not be empty; use "%" for any host.`))
 		}
@@ -456,6 +456,16 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 		return r, append(diags, errAt(r.nameRange, "Empty name", "Object names must not be empty."))
 	}
 	return r, append(diags, checkName(r, engine)...)
+}
+
+// decodeLiteral decodes name and host, which are resolved before any
+// block can be referenced.
+func decodeLiteral(a *hcl.Attribute, ctx *hcl.EvalContext, dst *string) hcl.Diagnostics {
+	if len(a.Expr.Variables()) > 0 {
+		return hcl.Diagnostics{errAt(a.Expr.Range(), "References not allowed",
+			fmt.Sprintf("%s cannot reference other blocks; only literals and functions are allowed.", a.Name))}
+	}
+	return gohcl.DecodeExpression(a.Expr, ctx, dst)
 }
 
 // refValue is the value exposed to expressions as <type>.<label>.
