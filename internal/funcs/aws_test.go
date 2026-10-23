@@ -1,6 +1,7 @@
 package funcs
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,7 +9,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/sivchari/kumo"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -101,7 +104,14 @@ func putSecret(t *testing.T, endpoint, name, value string, create bool) {
 	var err error
 	if create {
 		_, err = c.CreateSecret(t.Context(), &secretsmanager.CreateSecretInput{Name: aws.String(name), SecretString: aws.String(value)})
-	} else {
+		// The emulator keeps state for the whole process, so with -count>1
+		// the secret may already exist from an earlier run.
+		if _, exists := errors.AsType[*smtypes.ResourceExistsException](err); exists {
+			err = nil
+			create = false
+		}
+	}
+	if !create {
 		_, err = c.PutSecretValue(t.Context(), &secretsmanager.PutSecretValueInput{SecretId: aws.String(name), SecretString: aws.String(value)})
 	}
 	if err != nil {
@@ -116,7 +126,7 @@ func seed(t *testing.T, endpoint string) {
 	putSecret(t, endpoint, "rotating", "v1", true)
 
 	c := s3.NewFromConfig(awsConfig(endpoint), func(o *s3.Options) { o.UsePathStyle = true })
-	if _, err := c.CreateBucket(t.Context(), &s3.CreateBucketInput{Bucket: aws.String("tfstate")}); err != nil {
+	if _, err := c.CreateBucket(t.Context(), &s3.CreateBucketInput{Bucket: aws.String("tfstate")}); err != nil && !bucketExists(err) {
 		t.Fatalf("create bucket: %v", err)
 	}
 	body, err := testdata.ReadFile("testdata/terraform.tfstate")
@@ -128,4 +138,12 @@ func seed(t *testing.T, endpoint string) {
 	}); err != nil {
 		t.Fatalf("put tfstate: %v", err)
 	}
+}
+
+func bucketExists(err error) bool {
+	if _, ok := errors.AsType[*s3types.BucketAlreadyOwnedByYou](err); ok {
+		return true
+	}
+	_, ok := errors.AsType[*s3types.BucketAlreadyExists](err)
+	return ok
 }
