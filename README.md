@@ -132,7 +132,7 @@ A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:330
   - `name` overrides the label. Use it, with an identifier-safe label, for names with upper case, spaces or quotes, because only such labels can be referenced (`user.<label>.name`).
   - `password`, `login` and `member_of` work on both engines.
   - PostgreSQL only: `superuser`, `createdb`, `createrole`, `inherit`, `replication`, `bypassrls` and `connection_limit` (-1 or more).
-  - MySQL only: `host` (default `"%"`, lower-cased, must not be empty) and `auth_plugin` (letters, digits and `_`). On MySQL a non-login role is a locked account. `auth_plugin` works without a password for passwordless plugins; a login account with neither gets a warning.
+  - MySQL only: `host` (default `"%"`, lower-cased, must not be empty or contain `@`) and `auth_plugin` (letters, digits and `_`). On MySQL a non-login role is a locked account. `auth_plugin` works without a password for passwordless plugins; a login account with neither gets a warning.
   - Attributes you leave out are not managed, except `login`: it is always managed, and defaults to `false` for `role` (NOLOGIN / ACCOUNT LOCK) and `true` for `user`. Declaring an existing login account as a `role` without `login = true` disables its login.
   - `name` and `host` accept only literals and functions, not references to other blocks.
   - Names are checked against the engine limits: 63 bytes on PostgreSQL; 32 characters for MySQL users, 64 for databases and 255 for hosts. PostgreSQL role names `public` (in any case), `none` and `pg_*` are reserved.

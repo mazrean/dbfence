@@ -458,8 +458,14 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 			return r, append(diags, errAt(a.Range, "Unsupported attribute", `"host" is only supported for mysql.`))
 		}
 		diags = append(diags, decodeLiteral(a, ctx, &r.host)...)
-		if r.host == "" && !diags.HasErrors() {
+		switch {
+		case diags.HasErrors():
+		case r.host == "":
 			diags = append(diags, errAt(a.Range, "Empty host", `host must not be empty; use "%" for any host.`))
+		case strings.Contains(r.host, "@"):
+			// Ids are name@host split at the last "@" (names may contain
+			// one), so role.<label>.id would name another account.
+			diags = append(diags, errAt(a.Range, "Invalid host", `host must not contain "@"; role ids are written name@host.`))
 		}
 		// MySQL stores host names in lower case.
 		r.host = strings.ToLower(r.host)

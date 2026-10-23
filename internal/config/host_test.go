@@ -52,3 +52,30 @@ func TestLoadMySQLEmptyHost(t *testing.T) {
 		},
 	})
 }
+
+// TestLoadMySQLHostWithAt checks that a host containing "@" is rejected:
+// ids are name@host split at the last "@", so .id would name another
+// account.
+func TestLoadMySQLHostWithAt(t *testing.T) {
+	t.Parallel()
+	runDiagCases(t, []diagCase{
+		{
+			name:  "role host in member_of",
+			src:   myConn + "role \"ro\" {\n  host = \"a@b\"\n}\nuser \"u\" {\n  member_of = [role.ro.id]\n}\n",
+			want:  []string{"Invalid host", `host must not contain "@"`, "dbfence.hcl line 6"},
+			count: 1,
+		},
+		{
+			name:  "user host in grant role",
+			src:   myConn + "user \"u\" {\n  host = \"a@B\"\n}\ndatabase \"d\" {}\ngrant {\n  role       = user.u.id\n  database   = database.d.name\n  privileges = [\"SELECT\"]\n}\n",
+			want:  []string{"Invalid host", `host must not contain "@"`, "dbfence.hcl line 6"},
+			count: 1,
+		},
+		{
+			name:  "host from a function",
+			src:   myConn + "user \"u\" {\n  host = format(\"%s@%s\", \"a\", \"b\")\n}\n",
+			want:  []string{"Invalid host", "dbfence.hcl line 6"},
+			count: 1,
+		},
+	})
+}
