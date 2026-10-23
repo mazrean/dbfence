@@ -144,6 +144,12 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 			}
 		}
 	}
+	// Names read from the server are untrusted: objects dbfence would
+	// have to name but does not manage are left out from here on.
+	if _, err := cur.DropUntrusted(model.EnginePostgres); err != nil {
+		return nil, fmt.Errorf("inspect: %w", err)
+	}
+	cur.Warnings = append(cur.Warnings, st.unmanagedOwnerMembershipWarnings(cur)...)
 	if !st.superuser {
 		cur.Warnings = append(cur.Warnings, st.ownerWarnings(cur)...)
 		cur.Warnings = append(cur.Warnings, st.pruneWarnings(cur)...)
@@ -414,6 +420,8 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 			switch {
 			case !prunable(role):
 				return nil
+			case unmanagedName(model.NameDatabase, db):
+				why = "not managed by dbfence"
 			case matches(ignoreDBs, db) && !slices.ContainsFunc(st.desired.Databases, func(d model.Database) bool { return d.Name == db }):
 				why = "ignored"
 			case !st.connectable[db]:
@@ -436,6 +444,40 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 			role, strings.Join(blocked[role], ", ")))
 	}
 	return warns, nil
+}
+
+// unmanagedName reports whether dbfence does not manage an object named
+// name because of the name itself (model.CheckName). Inspect removes such
+// objects from model.Current; the state keeps them, so that grants and
+// memberships depending on them are still known, and the statements that
+// would name one of them are skipped with a warning instead.
+func unmanagedName(kind model.NameKind, name string) bool {
+	return model.CheckName(model.EnginePostgres, kind, name) != ""
+}
+
+// unmanagedRole reports whether role is a role (or grantor) that
+// unmanagedName excludes. "" is no role.
+func unmanagedRole(role string) bool { return unmanagedName(model.NameRole, role) }
+
+// unmanagedOwnerMembershipWarnings names the memberships that
+// revokeOwnerMemberships would revoke before pruning a role, but cannot
+// because they name a role dbfence does not manage, so DROP ROLE may fail.
+func (st *state) unmanagedOwnerMembershipWarnings(cur *model.Current) []string {
+	ignore := compileIgnore(st.desired.Ignore.Roles)
+	var warns []string
+	for _, r := range cur.Roles {
+		if !st.prunable(r.ID.Name, ignore) {
+			continue
+		}
+		for _, e := range st.ownerMemberships(r.ID.Name) {
+			if unmanagedRole(e.role) || unmanagedRole(e.grantor) {
+				warns = append(warns, fmt.Sprintf("role %q has the privileges of the owner of objects it granted privileges on through a membership that names a role dbfence does not manage, which is not revoked, so dropping it with --prune may fail at DROP ROLE; revoke that membership manually first",
+					r.ID.Name))
+				break
+			}
+		}
+	}
+	return warns
 }
 
 func compileIgnore(patterns []string) []*regexp.Regexp {
@@ -638,7 +680,7 @@ func otherSchemaDatabases(desired *model.Desired, cur *model.Current, connectabl
 	ignoreDBs := compileIgnore(desired.Ignore.Databases)
 	var out []string
 	for _, db := range cur.Databases {
-		if !connectable[db.Name] ||
+		if !connectable[db.Name] || unmanagedName(model.NameDatabase, db.Name) ||
 			slices.ContainsFunc(desired.Databases, func(d model.Database) bool { return d.Name == db.Name }) ||
 			slices.ContainsFunc(ignoreDBs, func(re *regexp.Regexp) bool { return re.MatchString(db.Name) }) {
 			continue

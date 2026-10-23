@@ -89,7 +89,8 @@ func (st *state) revokeOwnerMemberships(role string) []plan.Statement {
 	var out []plan.Statement
 	var done []string
 	for _, e := range st.ownerMemberships(role) {
-		if !st.canManageMembership(e.role, e.grantor) || (st.version < pg16 && slices.Contains(done, e.role)) {
+		// unmanagedOwnerMembershipWarnings names those skipped here.
+		if unmanagedRole(e.role) || unmanagedRole(e.grantor) || !st.canManageMembership(e.role, e.grantor) || (st.version < pg16 && slices.Contains(done, e.role)) {
 			continue
 		}
 		done = append(done, e.role)
@@ -207,8 +208,12 @@ func (st *state) inheritOptions(r model.Role) ([]plan.Statement, []string) {
 	var warns []string
 	for _, e := range st.members {
 		role := model.RoleID{Name: e.role}
-		if e.member != r.ID.Name || e.inherit == *r.Inherit ||
+		if e.member != r.ID.Name || e.inherit == *r.Inherit || unmanagedRole(e.role) ||
 			(r.MemberOf != nil && !slices.Contains(r.MemberOf, role)) || r.MemberOptions[role].Inherit != nil {
+			continue
+		}
+		if unmanagedRole(e.grantor) {
+			warns = append(warns, unmanagedGrantorWarning(fmt.Sprintf("membership of %q in %q has inherit = %v", e.member, e.role, e.inherit)))
 			continue
 		}
 		by, ok := st.grantedBy(e.grantor)
@@ -233,6 +238,14 @@ func (st *state) grantedBy(grantor string) (plan.Fragment, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// unmanagedGrantorWarning explains a change to a grant skipped because
+// its grantor is a role dbfence does not manage: changing the grant would
+// have to name the grantor. The grantor is not shown; Inspect warns about
+// the role itself.
+func unmanagedGrantorWarning(what string) string {
+	return what + ", but its grantor is a role dbfence does not manage (see its warning), so it is not changed; handle it manually"
 }
 
 // grantedBy renders GRANTED BY grantor.
@@ -275,6 +288,10 @@ func (st *state) alterMembership(member, role string, want model.MembershipOptio
 			opts.Set = want.Set
 		}
 		if !(revokeAdmin && e.admin) && opts == (model.MembershipOptions{}) {
+			continue
+		}
+		if unmanagedRole(e.grantor) {
+			warns = append(warns, unmanagedGrantorWarning(fmt.Sprintf("options of the membership of %q in %q differ from the configuration", member, role)))
 			continue
 		}
 		by, ok := st.grantedBy(e.grantor)
@@ -473,6 +490,14 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 	var warns []string
 	for _, g := range grantors {
 		ps := byGrantor[g]
+		if unmanagedRole(g) {
+			what := strings.Join(ps, ", ")
+			if optionOnly {
+				what = "grant option for " + what
+			}
+			warns = append(warns, unmanagedGrantorWarning(fmt.Sprintf("%s on %s granted to %s differs from the configuration", what, objectLabel(obj), Grantee(grantee))))
+			continue
+		}
 		if g != "" && !st.canSet(g) {
 			what := strings.Join(ps, ", ")
 			if optionOnly {
@@ -584,6 +609,10 @@ func (st *state) revokeMembership(member, role string) ([]plan.Statement, []stri
 		if st.losesMembership(e.grantor, role) {
 			// The plan revokes the grantor's membership with CASCADE,
 			// which removes this grant as well.
+			continue
+		}
+		if unmanagedRole(e.grantor) {
+			warns = append(warns, unmanagedGrantorWarning(fmt.Sprintf("membership of %q in %q differs from the configuration", member, role)))
 			continue
 		}
 		if !st.canManageMembership(role, e.grantor) {

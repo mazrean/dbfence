@@ -24,6 +24,9 @@ import (
 // connection; Statement.Database is always empty.
 type Driver struct {
 	db *sql.DB
+	// keepDefaultRoles lists the accounts whose default roles include one
+	// dbfence does not manage (see SetDefaultRoles).
+	keepDefaultRoles map[model.RoleID]bool
 	Dialect
 }
 
@@ -175,6 +178,9 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	if err := d.inspectDBPrivileges(ctx, cur, desired); err != nil {
 		return nil, err
 	}
+	if err := d.dropUntrusted(cur, desired); err != nil {
+		return nil, err
+	}
 	if w := defaultRolesWarning(desired, cur); w != "" {
 		cur.Warnings = append(cur.Warnings, w)
 	}
@@ -184,6 +190,41 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	}
 	cur.Warnings = append(cur.Warnings, roleWarnings(desired, cur, plugins)...)
 	return cur, nil
+}
+
+// dropUntrusted removes the accounts and databases whose names dbfence
+// does not manage from cur (model.Current.DropUntrusted). SET DEFAULT
+// ROLE replaces all default roles, so the default roles of an account
+// that has one of them are left alone.
+func (d *Driver) dropUntrusted(cur *model.Current, desired *model.Desired) error {
+	d.keepDefaultRoles = map[model.RoleID]bool{}
+	for _, r := range cur.Roles {
+		if slices.ContainsFunc(r.DefaultRoles, func(id model.RoleID) bool { return model.CheckRoleID(model.EngineMySQL, id) != "" }) {
+			d.keepDefaultRoles[r.ID] = true
+		}
+	}
+	if _, err := cur.DropUntrusted(model.EngineMySQL); err != nil {
+		return fmt.Errorf("inspect: %w", err)
+	}
+	if desired == nil {
+		return nil
+	}
+	for _, r := range desired.Roles {
+		if r.MemberOf != nil && d.keepDefaultRoles[r.ID] {
+			cur.Warnings = append(cur.Warnings, fmt.Sprintf("default roles of %q include an account dbfence does not manage (see its warning), so they are not set; handle them manually", model.Account(r.ID)))
+		}
+	}
+	return nil
+}
+
+// SetDefaultRoles implements diff.DefaultRoleSetter. The default roles of
+// an account that has one dbfence does not manage are not changed:
+// SET DEFAULT ROLE would remove it without naming it.
+func (d *Driver) SetDefaultRoles(r model.Role, cur model.RoleState) []plan.Statement {
+	if d.keepDefaultRoles[r.ID] {
+		return nil
+	}
+	return d.Dialect.SetDefaultRoles(r, cur)
 }
 
 // defaultRolesWarning explains the fallback when mysql.default_roles
