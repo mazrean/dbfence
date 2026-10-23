@@ -273,55 +273,52 @@ func TestDropRoleSkipsProviderDatabases(t *testing.T) {
 
 func TestPasswordStatements(t *testing.T) {
 	t.Parallel()
-	scram, err := password.SCRAMVerifierWithSalt("s3cret", []byte("0123456789abcdef"), password.SCRAMIterations)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Created by PostgreSQL 17 for the password "\uFF21\uFF22\uFF23" (see
+	// TestMatchPostgresServerVerifiers in internal/password).
+	const pw = "\uFF21\uFF22\uFF23"
+	const scram = "SCRAM-SHA-256$4096:hVrMMCRfbsmjKeiJO5B7cA==$bVbgkf3p1OpovgfV8hRTE0GymDA+Ha8HXo/RB0QIogU=:ViLbPN9ZenbZHybk4BJ5LLpa0nQYA/oONvEnDxw8WrA="
+	md5 := password.PostgresMD5("app", "s3cret")
 	tests := []struct {
-		name     string
-		password string
-		stored   string
-		wantSQL  string
-		// wantSet is whether AlterRole sets the password.
-		wantSet bool
+		name       string
+		password   string
+		stored     string
+		encryption string
+		wantSQL    string
 	}{
-		{name: "scram match", password: "s3cret", stored: scram},
-		{name: "scram mismatch", password: "other", stored: scram, wantSet: true},
-		{name: "md5 of the same password is upgraded", password: "s3cret", stored: password.PostgresMD5("app", "s3cret"), wantSet: true},
-		{name: "no password stored", password: "s3cret", wantSet: true},
+		{name: "scram match", password: pw, stored: scram},
+		{name: "scram mismatch", password: "other", stored: scram, wantSQL: `ALTER ROLE "app" WITH PASSWORD 'other'`},
+		{name: "md5 of the same password is upgraded", password: "s3cret", stored: md5, wantSQL: `ALTER ROLE "app" WITH PASSWORD 's3cret'`},
+		{name: "md5 is kept under password_encryption = md5", password: "s3cret", stored: md5, encryption: "md5"},
+		{name: "md5 mismatch under password_encryption = md5", password: "other", stored: md5, encryption: "md5", wantSQL: `ALTER ROLE "app" WITH PASSWORD 'other'`},
+		{name: "scram is kept under password_encryption = md5", password: pw, stored: scram, encryption: "md5"},
+		{name: "no password stored", password: "s3cret", wantSQL: `ALTER ROLE "app" WITH PASSWORD 's3cret'`},
 		{name: "empty password matches no password", password: ""},
-		{name: "empty password clears a stored one", password: "", stored: scram, wantSet: true, wantSQL: `ALTER ROLE "app" WITH PASSWORD NULL`},
-		{name: "verifier-looking password is hashed", password: "md5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", stored: "md5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", wantSet: true},
+		{name: "empty password clears a stored one", password: "", stored: scram, wantSQL: `ALTER ROLE "app" WITH PASSWORD NULL`},
+		{name: "backslash is sent as an escape string", password: `a\b'c`, wantSQL: `ALTER ROLE "app" WITH PASSWORD E'a\\b''c'`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := model.Role{ID: pg("app"), Password: &tt.password}
-			stmts, warns := Dialect{}.AlterRole(r, model.RoleState{ID: r.ID, PasswordReadable: true, PasswordHash: []byte(tt.stored)}, false)
+			d := Dialect{PasswordEncryption: tt.encryption}
+			stmts, warns := d.AlterRole(r, model.RoleState{ID: r.ID, PasswordReadable: true, PasswordHash: []byte(tt.stored)}, false)
 			if len(warns) > 0 {
 				t.Errorf("warnings: %v", warns)
 			}
-			if got := len(stmts) == 1; got != tt.wantSet {
-				t.Fatalf("set password = %v, want %v (%v)", got, tt.wantSet, stmts)
-			}
-			if !tt.wantSet {
+			if tt.wantSQL == "" {
+				if len(stmts) != 0 {
+					t.Fatalf("password set: %v", stmts)
+				}
 				return
 			}
-			sql := stmts[0].SQL()
-			if tt.wantSQL != "" && sql != tt.wantSQL {
-				t.Errorf("SQL = %s, want %s", sql, tt.wantSQL)
+			if len(stmts) != 1 {
+				t.Fatalf("statements = %v, want one", stmts)
 			}
-			if tt.password != "" {
-				v := strings.TrimSuffix(strings.TrimPrefix(sql, `ALTER ROLE "app" WITH PASSWORD '`), "'")
-				if !strings.HasPrefix(v, "SCRAM-SHA-256$") {
-					t.Fatalf("password not sent as a SCRAM verifier: %s", sql)
-				}
-				if ok, err := password.MatchPostgres(v, "app", tt.password); err != nil || !ok {
-					t.Errorf("sent verifier does not match the password: %v %v", ok, err)
-				}
+			if got := stmts[0].SQL(); got != tt.wantSQL {
+				t.Errorf("SQL = %s, want %s", got, tt.wantSQL)
 			}
-			if strings.Contains(stmts[0].Display(false), "SCRAM") {
-				t.Errorf("verifier not redacted: %s", stmts[0].Display(false))
+			if tt.password != "" && strings.Contains(stmts[0].Display(false), tt.password) {
+				t.Errorf("password not redacted: %s", stmts[0].Display(false))
 			}
 		})
 	}
@@ -330,17 +327,15 @@ func TestPasswordStatements(t *testing.T) {
 func TestCreateRolePassword(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, password, wantPrefix string
-		iterations                 int
+		name, password, want string
 	}{
-		{name: "scram", password: "first'pw", wantPrefix: `CREATE ROLE "a" WITH PASSWORD 'SCRAM-SHA-256$4096:`},
-		{name: "server scram_iterations", password: "first'pw", iterations: 32768, wantPrefix: `CREATE ROLE "a" WITH PASSWORD 'SCRAM-SHA-256$32768:`},
-		{name: "empty", password: "", wantPrefix: `CREATE ROLE "a" WITH PASSWORD NULL`},
+		{"plaintext", "first'pw", `CREATE ROLE "a" WITH PASSWORD 'first''pw'`},
+		{"empty", "", `CREATE ROLE "a" WITH PASSWORD NULL`},
 	}
 	for _, tt := range tests {
-		stmts := Dialect{SCRAMIterations: tt.iterations}.CreateRole(model.Role{ID: pg("a"), Password: &tt.password})
-		if got := stmts[0].SQL(); !strings.HasPrefix(got, tt.wantPrefix) || (tt.password != "" && strings.Contains(got, tt.password)) {
-			t.Errorf("%s: SQL = %s", tt.name, got)
+		stmts := Dialect{}.CreateRole(model.Role{ID: pg("a"), Password: &tt.password})
+		if got := stmts[0].SQL(); got != tt.want {
+			t.Errorf("%s: SQL = %s, want %s", tt.name, got, tt.want)
 		}
 	}
 }

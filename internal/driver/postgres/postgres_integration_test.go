@@ -194,11 +194,11 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
-	t.Run("passwords are sent as SCRAM verifiers", func(t *testing.T) {
+	t.Run("passwords are hashed by the server", func(t *testing.T) {
 		pw := func(s string) *string { return &s }
 		login := true
 		d := s.open(t, "postgres")
-		for _, p := range []string{`it's\'; SELECT 1; --`, "md5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""} {
+		for _, p := range []string{`it's\'; SELECT 1; --`, "\u00E4\u00A0x", ""} {
 			desired := &model.Desired{Engine: model.EnginePostgres, Roles: []model.Role{{ID: pg("pwuser"), Login: &login, Password: pw(p)}}}
 			converge(t, d, desired, diff.Options{})
 			if p == "" {

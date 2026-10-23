@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +27,7 @@ const sqlstateInsufficientPrivilege = "42501"
 // Driver is a PostgreSQL driver. Statements on other databases use a
 // separate connection with the database name replaced.
 type Driver struct {
+	Dialect
 	cfg   *pgx.ConnConfig
 	db    *sql.DB
 	conns map[string]*sql.DB
@@ -35,8 +35,7 @@ type Driver struct {
 	// override Dialect use it to render grantor-aware statements.
 	st      *state
 	notices noticeLog
-	Dialect
-	mu sync.Mutex
+	mu      sync.Mutex
 }
 
 // defaultConnectTimeout bounds connection attempts when the DSN does not
@@ -57,31 +56,11 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 		_ = d.db.Close()
 		return nil, fmt.Errorf("connect to postgres: %w", dedupLines(err))
 	}
-	iter, err := scramIterations(ctx, d.db)
-	if err != nil {
+	if err = d.db.QueryRowContext(ctx, "SELECT current_setting('password_encryption')").Scan(&d.PasswordEncryption); err != nil {
 		_ = d.db.Close()
-		return nil, err
+		return nil, fmt.Errorf("read password_encryption: %w", err)
 	}
-	d.SCRAMIterations = iter
 	return d, nil
-}
-
-// scramIterations reads scram_iterations, the work factor the server uses
-// for the verifiers it computes itself. It is 0 before PostgreSQL 16,
-// which has no such setting and always uses 4096.
-func scramIterations(ctx context.Context, db *sql.DB) (int, error) {
-	var v sql.NullString
-	if err := db.QueryRowContext(ctx, "SELECT current_setting('scram_iterations', true)").Scan(&v); err != nil {
-		return 0, fmt.Errorf("read scram_iterations: %w", err)
-	}
-	if !v.Valid || v.String == "" {
-		return 0, nil
-	}
-	n, err := strconv.Atoi(v.String)
-	if err != nil || n < 1 {
-		return 0, fmt.Errorf("read scram_iterations: unexpected value %q", v.String)
-	}
-	return n, nil
 }
 
 // dedupLinesError drops repeated timeouts from the text of a connect
@@ -274,10 +253,10 @@ func (d *Driver) Close() error {
 
 // Dialect renders PostgreSQL SQL. It is usable without a connection.
 type Dialect struct {
-	// SCRAMIterations is the server's scram_iterations (PostgreSQL 16+),
-	// used for the verifiers dbfence computes. Zero means 4096, the
-	// count before PostgreSQL 16.
-	SCRAMIterations int
+	// PasswordEncryption is the session's password_encryption: the kind
+	// of verifier the server computes for a new password. Empty means
+	// scram-sha-256, the default.
+	PasswordEncryption string
 }
 
 // Ident quotes an identifier.
@@ -372,36 +351,31 @@ func (d Dialect) CreateRole(r model.Role) []plan.Statement {
 		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
 	}
 	if r.Password != nil {
-		parts = append(parts, passwordClause(*r.Password, d.SCRAMIterations)...)
+		parts = append(parts, passwordClause(*r.Password)...)
 	}
 	return []plan.Statement{plan.SQL("", parts...)}
 }
 
-// passwordClause renders the PASSWORD option. The password is sent as a
-// SCRAM-SHA-256 verifier computed here, so the plaintext never reaches
-// the server, its logs or pg_stat_statements, and a declared password
-// that looks like a verifier is still hashed. PostgreSQL clears an empty
-// password, so "" is rendered as NULL.
-func passwordClause(pw string, iter int) []any {
+// passwordClause renders the PASSWORD option. The plaintext is sent, so
+// that the server hashes it with its own settings (password_encryption,
+// scram_iterations) and password check modules such as passwordcheck can
+// inspect it. PostgreSQL clears an empty password, so "" is rendered as
+// NULL.
+func passwordClause(pw string) []any {
 	if pw == "" {
 		return []any{" PASSWORD NULL"}
 	}
-	v, err := password.SCRAMVerifier(pw, iter)
-	if err != nil {
-		// Only reachable when crypto/pbkdf2 rejects its input (FIPS-only
-		// mode); the server then hashes the password itself.
-		v = pw
-	}
-	return []any{" PASSWORD ", plan.Secret(Literal(v))}
+	return []any{" PASSWORD ", plan.Secret(Literal(pw))}
 }
 
 // passwordMatches reports whether the stored verifier already holds pw.
-// md5 verifiers never match, so that they are upgraded to SCRAM.
-func passwordMatches(verifier, user, pw string) (bool, error) {
+// An md5 verifier counts as a mismatch unless the server itself produces
+// md5 verifiers, so that setting the password again upgrades it to SCRAM.
+func (d Dialect) passwordMatches(verifier, user, pw string) (bool, error) {
 	switch {
 	case pw == "":
 		return verifier == "", nil
-	case strings.HasPrefix(verifier, "md5"):
+	case password.PostgresVerifierKind(verifier) == password.VerifierMD5 && d.PasswordEncryption != string(password.VerifierMD5):
 		return false, nil
 	default:
 		return password.MatchPostgres(verifier, user, pw)
@@ -440,7 +414,7 @@ func (d Dialect) alterRole(r model.Role, cur model.RoleState, force, groupedUnre
 		case !cur.PasswordReadable:
 			warns = append(warns, fmt.Sprintf("cannot read the password verifier of role %q (superuser required); password not compared, use --force-password to set it", r.ID))
 		default:
-			ok, err := passwordMatches(string(cur.PasswordHash), r.ID.Name, *r.Password)
+			ok, err := d.passwordMatches(string(cur.PasswordHash), r.ID.Name, *r.Password)
 			switch {
 			case err != nil:
 				warns = append(warns, fmt.Sprintf("cannot compare the password of role %q: %v; use --force-password to set it", r.ID, err))
@@ -457,7 +431,7 @@ func (d Dialect) alterRole(r model.Role, cur model.RoleState, force, groupedUnre
 		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
 	}
 	if setPassword {
-		parts = append(parts, passwordClause(*r.Password, d.SCRAMIterations)...)
+		parts = append(parts, passwordClause(*r.Password)...)
 	}
 	return []plan.Statement{plan.SQL("", parts...)}, warns
 }

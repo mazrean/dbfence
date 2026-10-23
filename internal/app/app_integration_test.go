@@ -428,31 +428,57 @@ user "dba" {
 	}
 }
 
-// TestPostgresSCRAMIterations checks that verifiers computed by dbfence use
-// the server's scram_iterations instead of the default 4096.
-func TestPostgresSCRAMIterations(t *testing.T) {
+// TestPostgresServerSideHashing checks that passwords are hashed by the
+// server with its own settings, and that md5 verifiers converge under
+// password_encryption = md5 and are upgraded once it is scram-sha-256.
+func TestPostgresServerSideHashing(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, model.EnginePostgres, postgresContainer)
-	h.exec("ALTER ROLE postgres SET scram_iterations = 8192")
+	verifier := func() string {
+		t.Helper()
+		got := h.query("SELECT rolpassword FROM pg_authid WHERE rolname = 'dbf_it_hash'")
+		if len(got) != 1 {
+			t.Fatalf("rolpassword rows = %q", got)
+		}
+		return got[0]
+	}
+	login := func() {
+		t.Helper()
+		u, err := sql.Open("pgx", strings.Replace(h.dsn, "postgres:postgres@", "dbf_it_hash:hashpw@", 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = u.Close() }()
+		if err = u.PingContext(t.Context()); err != nil {
+			t.Errorf("log in with the declared password: %v", err)
+		}
+	}
 	h.write(`
 user "app" {
-  name     = "dbf_it_iter"
-  password = "iterpw"
+  name     = "dbf_it_hash"
+  password = "hashpw"
 }
 `)
+
+	h.exec("ALTER ROLE postgres SET scram_iterations = 8192")
+	h.exec("ALTER ROLE postgres SET password_encryption = 'md5'")
 	h.apply(app.Options{})
 	h.assertConverged(app.Options{})
-	if got := h.query("SELECT rolpassword FROM pg_authid WHERE rolname = 'dbf_it_iter'"); len(got) != 1 || !strings.HasPrefix(got[0], "SCRAM-SHA-256$8192:") {
-		t.Fatalf("verifier = %q, want 8192 iterations", got)
+	if v := verifier(); !strings.HasPrefix(v, "md5") {
+		t.Fatalf("verifier = %q, want md5 under password_encryption = md5", v)
 	}
-	u, err := sql.Open("pgx", strings.Replace(h.dsn, "postgres:postgres@", "dbf_it_iter:iterpw@", 1))
-	if err != nil {
-		t.Fatal(err)
+	// No login check here: the image's pg_hba.conf requires scram-sha-256.
+
+	h.exec("ALTER ROLE postgres RESET password_encryption")
+	if n, out := h.plan(app.Options{}); n != 1 {
+		t.Fatalf("plan after switching to scram-sha-256: %d statements, want the password upgrade:\n%s", n, out)
 	}
-	defer func() { _ = u.Close() }()
-	if err = u.PingContext(t.Context()); err != nil {
-		t.Errorf("log in with the declared password: %v", err)
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if v := verifier(); !strings.HasPrefix(v, "SCRAM-SHA-256$8192:") {
+		t.Fatalf("verifier = %q, want SCRAM with the server's scram_iterations", v)
 	}
+	login()
 }
 
 // TestMySQLDatabasePattern manages a wildcard grant declared with
