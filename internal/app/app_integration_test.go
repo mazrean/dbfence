@@ -267,6 +267,20 @@ grant {
 	if got := h.query("SELECT has_database_privilege('dbf_it_ro', 'dbf_it_app', 'CONNECT')::text || has_database_privilege('dbf_it_app', 'dbf_it_app', 'CONNECT')::text"); len(got) != 1 || got[0] != "falsetrue" {
 		t.Errorf("CONNECT of dbf_it_ro, dbf_it_app = %v, want falsetrue", got)
 	}
+
+	// Membership options in the object form of member_of.
+	h.write(strings.Replace(config("second"), `member_of = [role.ro.name]`,
+		"inherit = false\n  member_of = [{ role = role.ro.name, admin = true, inherit = true, set = false }]", 1))
+	if n, out := h.plan(app.Options{}); n != 3 || !strings.Contains(out, `GRANT "dbf_it_ro" TO "dbf_it_app" WITH ADMIN TRUE, INHERIT TRUE, SET FALSE`) ||
+		!strings.Contains(out, `declares inherit = true, but the role has inherit = false`) {
+		t.Fatalf("membership options plan: %d\n%s", n, out)
+	}
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if got := h.query(`SELECT bool_or(admin_option)::text || bool_or(inherit_option)::text || bool_or(set_option)::text FROM pg_auth_members
+		WHERE roleid = 'dbf_it_ro'::regrole AND member = 'dbf_it_app'::regrole`); len(got) != 1 || got[0] != "truetruefalse" {
+		t.Errorf("membership options = %v, want truetruefalse", got)
+	}
 }
 
 func TestMySQLIntegration(t *testing.T) {
@@ -302,6 +316,34 @@ func TestMySQLIntegration(t *testing.T) {
 	}
 	h.apply(app.Options{Prune: true})
 	h.assertConverged(app.Options{Prune: true})
+
+	// ADMIN OPTION in the object form of member_of. Dropping it revokes
+	// and grants the role again, which keeps it a default role.
+	withAdmin := func(v bool) string {
+		return strings.Replace(mysqlConfig("second"), "member_of   = [role.ro.id]", fmt.Sprintf("member_of   = [{ role = role.ro.id, admin = %v }]", v), 1)
+	}
+	state := func() string {
+		got := h.query("SELECT CONCAT(e.WITH_ADMIN_OPTION, COUNT(d.USER)) FROM mysql.role_edges e LEFT JOIN mysql.default_roles d ON d.USER = e.TO_USER AND d.DEFAULT_ROLE_USER = e.FROM_USER WHERE e.TO_USER = 'dbf_it_app' GROUP BY e.WITH_ADMIN_OPTION")
+		return strings.Join(got, ",")
+	}
+	h.write(withAdmin(true))
+	if n, out := h.plan(app.Options{}); n != 1 || !strings.Contains(out, "GRANT 'dbf_it_ro'@'%' TO 'dbf_it_app'@'%' WITH ADMIN OPTION") {
+		t.Fatalf("admin plan: %d\n%s", n, out)
+	}
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if got := state(); got != "Y1" {
+		t.Errorf("admin option, default roles = %s, want Y1", got)
+	}
+	h.write(withAdmin(false))
+	if n, out := h.plan(app.Options{}); n != 3 || !strings.Contains(out, "SET DEFAULT ROLE 'dbf_it_ro'@'%' TO 'dbf_it_app'@'%'") {
+		t.Fatalf("drop admin plan: %d\n%s", n, out)
+	}
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if got := state(); got != "N1" {
+		t.Errorf("admin option, default roles = %s, want N1", got)
+	}
 }
 
 func mysqlConfig(pw string) string {

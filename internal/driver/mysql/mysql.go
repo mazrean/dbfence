@@ -287,22 +287,32 @@ func (d *Driver) inspectMySQLUser(ctx context.Context, cur *model.Current) error
 }
 
 func (d *Driver) inspectRoleEdges(ctx context.Context, cur *model.Current) error {
-	err := query(ctx, d.db, `SELECT FROM_USER, LOWER(FROM_HOST), TO_USER, LOWER(TO_HOST) FROM mysql.role_edges`,
+	err := query(ctx, d.db, `SELECT FROM_USER, LOWER(FROM_HOST), TO_USER, LOWER(TO_HOST), WITH_ADMIN_OPTION FROM mysql.role_edges`,
 		func(rows *sql.Rows) error {
 			var role, member model.RoleID
-			if err := rows.Scan(&role.Name, &role.Host, &member.Name, &member.Host); err != nil {
+			var admin string
+			if err := rows.Scan(&role.Name, &role.Host, &member.Name, &member.Host, &admin); err != nil {
 				return err
 			}
 			for i := range cur.Roles {
-				if cur.Roles[i].ID == member {
-					cur.Roles[i].MemberOf = append(cur.Roles[i].MemberOf, role)
+				r := &cur.Roles[i]
+				if r.ID != member {
+					continue
 				}
+				r.MemberOf = append(r.MemberOf, role)
+				if r.MemberOptions == nil {
+					r.MemberOptions = map[model.RoleID]model.MembershipState{}
+				}
+				// MySQL has no INHERIT or SET options; granted roles are
+				// usable once active.
+				r.MemberOptions[role] = model.MembershipState{Admin: admin == "Y", Inherit: true, Set: true}
 			}
 			return nil
 		})
 	if isAccessDenied(err) {
 		for i := range cur.Roles {
 			cur.Roles[i].MemberOf = nil
+			cur.Roles[i].MemberOptions = nil
 		}
 		cur.Unreadable.Memberships = true
 		return nil
@@ -746,15 +756,41 @@ func (d Dialect) DropRole(id model.RoleID, _ []string) []plan.Statement {
 }
 
 // GrantMembership implements diff.Dialect. SetDefaultRoles activates the role.
-func (d Dialect) GrantMembership(member, role model.RoleID) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "GRANT "+d.Account(role)+" TO "+d.Account(member))}
+func (d Dialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement {
+	q := "GRANT " + d.Account(role) + " TO " + d.Account(member)
+	if opts.Admin != nil && *opts.Admin {
+		q += " WITH ADMIN OPTION"
+	}
+	return []plan.Statement{plan.SQL("", q)}
+}
+
+// AlterMembership implements diff.Dialect. MySQL cannot revoke only the
+// ADMIN OPTION, so the role is revoked and granted again; that also
+// removes it from the default roles, which SetDefaultRoles restores.
+func (d Dialect) AlterMembership(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string) {
+	if want.Admin == nil || *want.Admin == have.Admin {
+		return nil, nil
+	}
+	if *want.Admin {
+		return d.GrantMembership(member, role, want), nil
+	}
+	return append(d.RevokeMembership(member, role), d.GrantMembership(member, role, want)...), nil
+}
+
+// losesAdmin reports whether AlterMembership revokes and grants role again
+// to drop the ADMIN OPTION of r.
+func losesAdmin(r model.Role, cur model.RoleState, role model.RoleID) bool {
+	admin := r.MemberOptions[role].Admin
+	return admin != nil && !*admin && cur.MemberOptions[role].Admin
 }
 
 // SetDefaultRoles implements diff.DefaultRoleSetter. Declared memberships
 // are the default roles, so they are active without SET ROLE.
 func (d Dialect) SetDefaultRoles(r model.Role, cur model.RoleState) []plan.Statement {
 	want := model.SortRoleIDs(slices.Clone(r.MemberOf))
-	have := model.SortRoleIDs(slices.Clone(cur.DefaultRoles))
+	have := model.SortRoleIDs(slices.DeleteFunc(slices.Clone(cur.DefaultRoles), func(id model.RoleID) bool {
+		return losesAdmin(r, cur, id)
+	}))
 	if !cur.DefaultRolesUnknown && slices.Equal(want, have) {
 		return nil
 	}

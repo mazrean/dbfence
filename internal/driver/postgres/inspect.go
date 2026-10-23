@@ -67,7 +67,7 @@ type aclEntry struct {
 // memberEntry is one pg_auth_members row.
 type memberEntry struct {
 	role, member, grantor string
-	admin, inherit        bool
+	admin, inherit, set   bool
 }
 
 // Inspect implements driver.Driver.
@@ -90,6 +90,11 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		return nil, fmt.Errorf("current user: %w", err)
 	}
 	cur.CurrentUser = model.RoleID{Name: st.user}
+	warns, err := checkMembershipOptions(desired, st.version)
+	if err != nil {
+		return nil, err
+	}
+	cur.Warnings = append(cur.Warnings, warns...)
 
 	steps := []func(context.Context, *model.Current, *state) error{
 		d.inspectDatabases, d.inspectRoles, d.inspectMembership, d.inspectDatabaseACL,
@@ -129,6 +134,25 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	}
 	d.st = st
 	return cur, nil
+}
+
+// checkMembershipOptions rejects inherit and set membership options
+// before PostgreSQL 16, and warns where a membership's inherit option
+// disagrees with the inherit attribute of its member.
+func checkMembershipOptions(desired *model.Desired, version int) ([]string, error) {
+	var warns []string
+	for _, r := range desired.Roles {
+		for _, m := range r.MemberOf {
+			o := r.MemberOptions[m]
+			if version < pg16 && (o.Inherit != nil || o.Set != nil) {
+				return nil, fmt.Errorf("membership of %q in %q declares inherit or set, which need PostgreSQL 16 or later (server_version_num %d)", r.ID, m, version)
+			}
+			if o.Inherit != nil && r.Inherit != nil && *o.Inherit != *r.Inherit {
+				warns = append(warns, fmt.Sprintf("membership of %q in %q declares inherit = %v, but the role has inherit = %v: the membership option wins, and the role's inherit only applies to its other memberships", r.ID, m, *o.Inherit, *r.Inherit))
+			}
+		}
+	}
+	return warns, nil
 }
 
 // canSet reports whether the connected user may make role an owner:
@@ -293,11 +317,13 @@ func (d *Driver) inspectPasswords(ctx context.Context, cur *model.Current) error
 }
 
 func (d *Driver) inspectMembership(ctx context.Context, cur *model.Current, st *state) error {
-	inherit := "true"
+	// Before PostgreSQL 16 the options do not exist: membership always
+	// allows SET ROLE, and inheritance is the member's rolinherit.
+	options := "true, true"
 	if st.version >= pg16 {
-		inherit = "am.inherit_option"
+		options = "am.inherit_option, am.set_option"
 	}
-	return query(ctx, d.db, `SELECT m.rolname, r.rolname, coalesce(g.rolname, ''), am.admin_option, `+inherit+`
+	return query(ctx, d.db, `SELECT m.rolname, r.rolname, coalesce(g.rolname, ''), am.admin_option, `+options+`
 		FROM pg_auth_members am
 		JOIN pg_roles r ON r.oid = am.roleid
 		JOIN pg_roles m ON m.oid = am.member
@@ -305,15 +331,26 @@ func (d *Driver) inspectMembership(ctx context.Context, cur *model.Current, st *
 		ORDER BY 1, 2, 3`,
 		func(rows *sql.Rows) error {
 			var e memberEntry
-			if err := rows.Scan(&e.member, &e.role, &e.grantor, &e.admin, &e.inherit); err != nil {
+			if err := rows.Scan(&e.member, &e.role, &e.grantor, &e.admin, &e.inherit, &e.set); err != nil {
 				return err
 			}
 			st.members = append(st.members, e)
 			for i := range cur.Roles {
 				r := &cur.Roles[i]
-				if r.ID.Name == e.member && !slices.Contains(r.MemberOf, model.RoleID{Name: e.role}) {
-					r.MemberOf = append(r.MemberOf, model.RoleID{Name: e.role})
+				if r.ID.Name != e.member {
+					continue
 				}
+				id := model.RoleID{Name: e.role}
+				if !slices.Contains(r.MemberOf, id) {
+					r.MemberOf = append(r.MemberOf, id)
+				}
+				if r.MemberOptions == nil {
+					r.MemberOptions = map[model.RoleID]model.MembershipState{}
+				}
+				// Several grantors: an option holds if any grant has it.
+				o := r.MemberOptions[id]
+				o.Admin, o.Inherit, o.Set = o.Admin || e.admin, o.Inherit || e.inherit, o.Set || e.set
+				r.MemberOptions[id] = o
 			}
 			return nil
 		})

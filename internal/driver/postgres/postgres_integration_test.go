@@ -365,6 +365,86 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("membership options converge", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE o_mgr", "CREATE ROLE o_grp", "CREATE ROLE o_u", "CREATE ROLE o_dep",
+			"GRANT o_grp TO o_mgr WITH ADMIN OPTION")
+		d := s.open(t, "postgres")
+		yes, no := true, false
+		desired := func(opts model.MembershipOptions) *model.Desired {
+			return &model.Desired{
+				Engine: model.EnginePostgres,
+				Roles: []model.Role{
+					{ID: pg("o_grp")},
+					{ID: pg("o_u"), Inherit: &yes, MemberOf: []model.RoleID{pg("o_grp")}, MemberOptions: map[model.RoleID]model.MembershipOptions{pg("o_grp"): opts}},
+					{ID: pg("o_dep"), MemberOf: []model.RoleID{pg("o_grp")}, MemberOptions: map[model.RoleID]model.MembershipOptions{pg("o_grp"): {Set: &no}}},
+				},
+				Ignore: model.Ignore{Roles: []string{".*"}},
+			}
+		}
+		options := func() string {
+			return strings.Join(s.queryStrings(t, `SELECT m.rolname || ':' || g.rolname || ':' || am.admin_option || am.inherit_option || am.set_option
+				FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member JOIN pg_roles g ON g.oid = am.grantor
+				WHERE am.roleid = 'o_grp'::regrole AND m.rolname <> 'o_mgr' ORDER BY 1`), ",")
+		}
+
+		converge(t, d, desired(model.MembershipOptions{Admin: &yes, Inherit: &no, Set: &no}), diff.Options{})
+		if got, want := options(), "o_dep:postgres:falsetruefalse,o_u:postgres:truefalsefalse"; got != want {
+			t.Errorf("after create: %s, want %s", got, want)
+		}
+
+		// Drift: o_u passes o_grp on with its ADMIN OPTION, and a second
+		// grantor's grant inherits.
+		s.exec(t, "REVOKE o_grp FROM o_dep", "SET ROLE o_u; GRANT o_grp TO o_dep WITH SET FALSE; RESET ROLE",
+			"SET ROLE o_mgr; GRANT o_grp TO o_u WITH ADMIN TRUE, INHERIT TRUE, SET TRUE; RESET ROLE")
+		out := converge(t, d, desired(model.MembershipOptions{Admin: &no, Inherit: &yes, Set: &yes}), diff.Options{})
+		for _, want := range []string{
+			`REVOKE ADMIN OPTION FOR "o_grp" FROM "o_u" GRANTED BY "postgres" CASCADE`,
+			`REVOKE ADMIN OPTION FOR "o_grp" FROM "o_u" GRANTED BY "o_mgr" CASCADE`,
+			`GRANT "o_grp" TO "o_u" WITH INHERIT TRUE, SET TRUE GRANTED BY "postgres"`,
+			`GRANT "o_grp" TO "o_dep" WITH SET FALSE`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("plan lacks %s:\n%s", want, out)
+			}
+		}
+		if got, want := options(), "o_dep:postgres:falsetruefalse,o_u:o_mgr:falsetruetrue,o_u:postgres:falsetruetrue"; got != want {
+			t.Errorf("after drift: %s, want %s", got, want)
+		}
+
+		// The string form manages no options (and without the role's
+		// inherit attribute, nothing manages INHERIT).
+		s.exec(t, "GRANT o_grp TO o_u WITH INHERIT FALSE GRANTED BY o_mgr")
+		plain := desired(model.MembershipOptions{})
+		plain.Roles[1].Inherit = nil
+		if r, err := planFor(t, d, plain, diff.Options{}); err != nil || r.n != 0 {
+			t.Errorf("string form plan (%v):\n%s", err, r.text)
+		}
+	})
+
+	t.Run("membership inherit that disagrees with the role warns", func(t *testing.T) {
+		d := s.open(t, "postgres")
+		no, yes := false, true
+		desired := &model.Desired{
+			Engine: model.EnginePostgres,
+			Roles: []model.Role{
+				{ID: pg("mi_grp")}, {ID: pg("mi_other")},
+				{ID: pg("mi_u"), Inherit: &no, MemberOf: []model.RoleID{pg("mi_grp"), pg("mi_other")}, MemberOptions: map[model.RoleID]model.MembershipOptions{pg("mi_grp"): {Inherit: &yes}}},
+			},
+			Ignore: model.Ignore{Roles: []string{".*"}},
+		}
+		converge(t, d, desired, diff.Options{})
+		cur, err := d.Inspect(t.Context(), desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w := strings.Join(cur.Warnings, "\n"); !strings.Contains(w, `membership of "mi_u" in "mi_grp" declares inherit = true, but the role has inherit = false`) {
+			t.Errorf("warnings: %s", w)
+		}
+		if got := s.queryStrings(t, "SELECT pg_has_role('mi_u', 'mi_grp', 'USAGE')::text || pg_has_role('mi_u', 'mi_other', 'USAGE')::text"); got[0] != "truefalse" {
+			t.Errorf("mi_u inherits mi_grp, mi_other = %s, want truefalse", got[0])
+		}
+	})
+
 	t.Run("non-superuser admin limits are reported in plan", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE n_admin LOGIN CREATEROLE CREATEDB PASSWORD 'pw'", "CREATE ROLE n_alice LOGIN", "CREATE ROLE n_ghost")
 		d := s.open(t, "n_admin")

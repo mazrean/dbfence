@@ -62,6 +62,8 @@ func (d *Driver) AlterRole(r model.Role, cur model.RoleState, force bool) ([]pla
 // inheritOptions aligns the INHERIT option of the existing memberships of
 // r with its declared inherit attribute. From PostgreSQL 16 on rolinherit
 // is only the default for new grants; each grant carries its own option.
+// Memberships that declare their own inherit option are left to
+// AlterMembership.
 func (st *state) inheritOptions(r model.Role) ([]plan.Statement, []string) {
 	if r.Inherit == nil || st.version < pg16 {
 		return nil, nil
@@ -69,22 +71,96 @@ func (st *state) inheritOptions(r model.Role) ([]plan.Statement, []string) {
 	var stmts []plan.Statement
 	var warns []string
 	for _, e := range st.members {
+		role := model.RoleID{Name: e.role}
 		if e.member != r.ID.Name || e.inherit == *r.Inherit ||
-			(r.MemberOf != nil && !slices.Contains(r.MemberOf, model.RoleID{Name: e.role})) {
+			(r.MemberOf != nil && !slices.Contains(r.MemberOf, role)) || r.MemberOptions[role].Inherit != nil {
 			continue
 		}
-		q := "GRANT " + Ident(e.role) + " TO " + Ident(e.member) + " WITH INHERIT " + flag(*r.Inherit, "TRUE", "FALSE")
-		switch {
-		case e.grantor == "":
-		case st.superuser || e.grantor == st.user:
-			q += " GRANTED BY " + Ident(e.grantor)
-		default:
+		by, ok := st.grantedBy(e.grantor)
+		if !ok {
 			warns = append(warns, fmt.Sprintf("membership of %q in %q granted by %q has inherit = %v, but %q may not change it", e.member, e.role, e.grantor, e.inherit, st.user))
 			continue
 		}
-		stmts = append(stmts, plan.SQL("", q))
+		stmts = append(stmts, plan.SQL("", grantMembership(e.member, e.role, model.MembershipOptions{Inherit: r.Inherit})+by))
 	}
 	return stmts, warns
+}
+
+// grantedBy returns the GRANTED BY clause that changes the grant made by
+// grantor, or false when the connected user may not act as grantor.
+func (st *state) grantedBy(grantor string) (string, bool) {
+	switch {
+	case grantor == "":
+		return "", true
+	case st.superuser || grantor == st.user:
+		return " GRANTED BY " + Ident(grantor), true
+	default:
+		return "", false
+	}
+}
+
+// AlterMembership implements diff.Dialect. From PostgreSQL 16 on each
+// grantor's grant of a membership carries its own options, so each grant
+// is changed.
+func (d *Driver) AlterMembership(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string) {
+	if d.st == nil || d.st.version < pg16 {
+		return d.Dialect.AlterMembership(member, role, want, have)
+	}
+	return d.st.alterMembership(member.Name, role.Name, want, have)
+}
+
+// alterMembership changes the options of every grant of the membership of
+// member in role (PostgreSQL 16+). Revoking ADMIN OPTION cascades to the
+// memberships member granted with it; declared ones are granted again.
+func (st *state) alterMembership(member, role string, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string) {
+	revokeAdmin := want.Admin != nil && !*want.Admin && have.Admin
+	var dependents []string
+	if revokeAdmin {
+		dependents = st.memberDependents(member, role)
+	}
+	var out []plan.Statement
+	var warns []string
+	for _, e := range st.members {
+		if e.role != role || e.member != member || st.losesMembership(e.grantor, role) {
+			// A grant whose grantor loses the membership or its ADMIN
+			// OPTION is removed by CASCADE and granted again if declared.
+			continue
+		}
+		var opts model.MembershipOptions
+		if want.Inherit != nil && *want.Inherit != e.inherit {
+			opts.Inherit = want.Inherit
+		}
+		if want.Set != nil && *want.Set != e.set {
+			opts.Set = want.Set
+		}
+		if !(revokeAdmin && e.admin) && opts == (model.MembershipOptions{}) {
+			continue
+		}
+		by, ok := st.grantedBy(e.grantor)
+		if !ok {
+			warns = append(warns, fmt.Sprintf("options of the membership of %q in %q granted by %q differ from the configuration, but %q may not change them", member, role, e.grantor, st.user))
+			continue
+		}
+		if revokeAdmin && e.admin {
+			q := "REVOKE ADMIN OPTION FOR " + Ident(role) + " FROM " + Ident(member) + by
+			if len(dependents) > 0 {
+				q = cascadeNote("memberships", dependents) + q + " CASCADE"
+			}
+			out = append(out, plan.SQL("", q))
+		}
+		if opts != (model.MembershipOptions{}) {
+			out = append(out, plan.SQL("", grantMembership(member, role, opts)+by))
+		}
+	}
+	if want.Admin != nil && *want.Admin && !have.Admin {
+		// The new grant may be a separate row (another grantor), so it
+		// carries the declared INHERIT and SET options too.
+		out = append(out, plan.SQL("", grantMembership(member, role, want)))
+	}
+	if revokeAdmin {
+		out = append(out, st.regrantMembers(role, dependents)...)
+	}
+	return out, warns
 }
 
 // Revoke implements diff.Dialect. Each grantor's grant is revoked.
@@ -290,21 +366,44 @@ func (st *state) revokeMembership(member, role string) []plan.Statement {
 	if !revoked {
 		out = Dialect{}.RevokeMembership(model.RoleID{Name: member}, model.RoleID{Name: role})
 	}
+	return append(out, st.regrantMembers(role, dependents)...)
+}
+
+// regrantMembers grants role again to the dependents that declare the
+// membership, which they lose through CASCADE.
+func (st *state) regrantMembers(role string, dependents []string) []plan.Statement {
+	id := model.RoleID{Name: role}
+	var out []plan.Statement
 	for _, dep := range dependents {
-		if slices.ContainsFunc(st.desired.Roles, func(r model.Role) bool {
-			return r.ID.Name == dep && slices.Contains(r.MemberOf, model.RoleID{Name: role})
-		}) {
-			out = append(out, Dialect{}.GrantMembership(model.RoleID{Name: dep}, model.RoleID{Name: role})...)
+		i := slices.IndexFunc(st.desired.Roles, func(r model.Role) bool {
+			return r.ID.Name == dep && slices.Contains(r.MemberOf, id)
+		})
+		if i >= 0 {
+			out = append(out, Dialect{}.GrantMembership(model.RoleID{Name: dep}, id, st.desired.Roles[i].MemberOptions[id])...)
 		}
 	}
 	return out
 }
 
 // losesMembership reports whether the plan revokes the membership of the
-// declared role grantor in role.
+// declared role grantor in role, or its ADMIN OPTION on role, with
+// CASCADE. The connected user keeps both (see diff).
 func (st *state) losesMembership(grantor, role string) bool {
+	if grantor == st.user {
+		return false
+	}
+	id := model.RoleID{Name: role}
 	return slices.ContainsFunc(st.desired.Roles, func(r model.Role) bool {
-		return r.ID.Name == grantor && r.MemberOf != nil && !slices.Contains(r.MemberOf, model.RoleID{Name: role})
+		if r.ID.Name != grantor || r.MemberOf == nil {
+			return false
+		}
+		if !slices.Contains(r.MemberOf, id) {
+			return true
+		}
+		admin := r.MemberOptions[id].Admin
+		return admin != nil && !*admin && slices.ContainsFunc(st.members, func(e memberEntry) bool {
+			return e.member == grantor && e.role == role && e.admin
+		})
 	})
 }
 

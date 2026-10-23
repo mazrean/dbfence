@@ -131,23 +131,51 @@ func (d *simDialect) DropRole(id model.RoleID, databases []string) []plan.Statem
 	})
 }
 
-func (d *simDialect) GrantMembership(member, role model.RoleID) []plan.Statement {
+func (d *simDialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement {
 	return d.op(func(cur *model.Current) error {
 		i := roleIndex(cur, member)
 		if i < 0 || roleIndex(cur, role) < 0 {
 			return fmt.Errorf("grant %q to %q: role missing", role, member)
 		}
-		if !slices.Contains(cur.Roles[i].MemberOf, role) {
-			cur.Roles[i].MemberOf = append(cur.Roles[i].MemberOf, role)
+		r := &cur.Roles[i]
+		if !slices.Contains(r.MemberOf, role) {
+			r.MemberOf = append(r.MemberOf, role)
+			// A new grant inherits by default if the member does.
+			setMemberOptions(r, role, model.MembershipState{Inherit: r.Inherit, Set: true}, opts)
 		}
 		return nil
 	})
+}
+
+func setMemberOptions(r *model.RoleState, role model.RoleID, st model.MembershipState, opts model.MembershipOptions) {
+	if opts.Admin != nil {
+		st.Admin = *opts.Admin
+	}
+	if opts.Inherit != nil {
+		st.Inherit = *opts.Inherit
+	}
+	if opts.Set != nil {
+		st.Set = *opts.Set
+	}
+	if r.MemberOptions == nil {
+		r.MemberOptions = map[model.RoleID]model.MembershipState{}
+	}
+	r.MemberOptions[role] = st
+}
+
+func (d *simDialect) AlterMembership(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string) {
+	return d.op(func(cur *model.Current) error {
+		r := &cur.Roles[roleIndex(cur, member)]
+		setMemberOptions(r, role, r.MemberOptions[role], want)
+		return nil
+	}), nil
 }
 
 func (d *simDialect) RevokeMembership(member, role model.RoleID) []plan.Statement {
 	return d.op(func(cur *model.Current) error {
 		i := roleIndex(cur, member)
 		cur.Roles[i].MemberOf = slices.DeleteFunc(cur.Roles[i].MemberOf, func(m model.RoleID) bool { return m == role })
+		delete(cur.Roles[i].MemberOptions, role)
 		return nil
 	})
 }
@@ -347,6 +375,13 @@ func convergeDesired(dbOwner, apiOwner string) *model.Desired {
 	}
 }
 
+// withOptions declares options on the membership of app in readonly.
+func withOptions(admin, inherit, set *bool) *model.Desired {
+	d := convergeDesired("app_owner", "app_owner")
+	d.Roles[2].MemberOptions = map[model.RoleID]model.MembershipOptions{pgID("readonly"): {Admin: admin, Inherit: inherit, Set: set}}
+	return d
+}
+
 func emptyCurrent() *model.Current {
 	return &model.Current{
 		CurrentUser:     pgID("admin"),
@@ -392,6 +427,11 @@ func TestComputeConverges(t *testing.T) {
 			},
 		},
 		{name: "prune keeps referenced roles", current: legacy, steps: []*model.Desired{withLegacy()}, opts: diff.Options{Prune: true}},
+		{
+			name:    "membership options",
+			current: emptyCurrent,
+			steps:   []*model.Desired{withOptions(new(true), new(false), nil), withOptions(new(false), new(true), new(false)), withOptions(nil, nil, nil)},
+		},
 		{name: "empty", current: emptyCurrent, steps: []*model.Desired{{Engine: model.EnginePostgres}}, opts: diff.Options{Prune: true}},
 	}
 	for _, tt := range tests {

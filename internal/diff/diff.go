@@ -4,6 +4,7 @@ package diff
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -35,7 +36,12 @@ type Dialect interface {
 	AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.Statement, []string)
 	// DropRole drops id. databases lists existing databases that survive the plan.
 	DropRole(id model.RoleID, databases []string) []plan.Statement
-	GrantMembership(member, role model.RoleID) []plan.Statement
+	// GrantMembership grants role to member with the declared options.
+	GrantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement
+	// AlterMembership converges the options of the existing membership of
+	// member in role to the declared want. It is called only when a
+	// declared option differs from have.
+	AlterMembership(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string)
 	RevokeMembership(member, role model.RoleID) []plan.Statement
 
 	CreateDatabase(db model.Database) []plan.Statement
@@ -256,9 +262,12 @@ func (df *differ) roles() {
 		// unknown memberships are re-granted, which is idempotent.
 		unknown := (u.Memberships && exists) || (u.Roles && !exists)
 		for _, m := range want {
+			opts := r.MemberOptions[m]
 			if unknown || !slices.Contains(have, m) {
-				df.add(phaseMembership, plan.ActionGrant, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.GrantMembership(r.ID, m))
+				df.add(phaseMembership, plan.ActionGrant, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.GrantMembership(r.ID, m, opts))
+				continue
 			}
+			df.membershipOptions(r.ID, m, opts, cur.MemberOptions[m])
 		}
 		for _, m := range model.SortRoleIDs(slices.Clone(have)) {
 			if unknown || slices.Contains(want, m) {
@@ -276,8 +285,20 @@ func (df *differ) roles() {
 	}
 }
 
+// membershipOptions converges the declared options of the existing
+// membership of member in role.
+func (df *differ) membershipOptions(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) {
+	differs := func(w *bool, h bool) bool { return w != nil && *w != h }
+	if !differs(want.Admin, have.Admin) && !differs(want.Inherit, have.Inherit) && !differs(want.Set, have.Set) {
+		return
+	}
+	stmts, warns := df.d.AlterMembership(member, role, want, have)
+	df.warnings = append(df.warnings, warns...)
+	df.add(phaseMembership, plan.ActionUpdate, fmt.Sprintf("options of membership of %q in %q", member, role), stmts)
+}
+
 // protectCurrentUser drops the attribute changes of r that would lock
-// the connected user out or strip its superuser status.
+// the connected user out or strip its superuser status or ADMIN OPTION.
 func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Role {
 	if r.Login != nil && !*r.Login {
 		if cur.Login || cur.AttributesUnknown {
@@ -289,6 +310,15 @@ func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Ro
 		df.warn("not removing superuser from the connected user %q: dbfence may rely on it", r.ID)
 		r.Superuser = nil
 	}
+	opts := maps.Clone(r.MemberOptions)
+	for _, m := range r.MemberOf {
+		if o := opts[m]; o.Admin != nil && !*o.Admin && cur.MemberOptions[m].Admin {
+			df.warn("not revoking ADMIN OPTION on %q from the connected user %q: dbfence may rely on it", m, r.ID)
+			o.Admin = nil
+			opts[m] = o
+		}
+	}
+	r.MemberOptions = opts
 	return r
 }
 

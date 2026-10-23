@@ -402,8 +402,53 @@ func (Dialect) DropRole(id model.RoleID, databases []string) []plan.Statement {
 }
 
 // GrantMembership implements diff.Dialect.
-func (Dialect) GrantMembership(member, role model.RoleID) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "GRANT "+Ident(role.Name)+" TO "+Ident(member.Name))}
+func (Dialect) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement {
+	if opts.Admin != nil && !*opts.Admin {
+		// A new grant has no ADMIN OPTION; GRANT cannot express FALSE
+		// before PostgreSQL 16.
+		opts.Admin = nil
+	}
+	return []plan.Statement{plan.SQL("", grantMembership(member.Name, role.Name, opts))}
+}
+
+// grantMembership renders GRANT role TO member with the declared
+// options. ADMIN alone uses WITH ADMIN OPTION, which every version
+// accepts; INHERIT and SET need the PostgreSQL 16 option list.
+func grantMembership(member, role string, opts model.MembershipOptions) string {
+	q := "GRANT " + Ident(role) + " TO " + Ident(member)
+	if opts.Inherit == nil && opts.Set == nil {
+		if opts.Admin != nil && *opts.Admin {
+			q += " WITH ADMIN OPTION"
+		}
+		return q
+	}
+	var list []string
+	for _, o := range []struct {
+		v    *bool
+		name string
+	}{{opts.Admin, "ADMIN"}, {opts.Inherit, "INHERIT"}, {opts.Set, "SET"}} {
+		if o.v != nil {
+			list = append(list, o.name+" "+flag(*o.v, "TRUE", "FALSE"))
+		}
+	}
+	return q + " WITH " + strings.Join(list, ", ")
+}
+
+// AlterMembership implements diff.Dialect. Without inspected grants, the
+// options are changed on the grant of the connected user.
+func (Dialect) AlterMembership(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string) {
+	var out []plan.Statement
+	if want.Admin != nil && !*want.Admin && have.Admin {
+		out = append(out, plan.SQL("", "REVOKE ADMIN OPTION FOR "+Ident(role.Name)+" FROM "+Ident(member.Name)))
+	}
+	grant := model.MembershipOptions{Inherit: want.Inherit, Set: want.Set}
+	if want.Admin != nil && *want.Admin && !have.Admin {
+		grant.Admin = want.Admin
+	}
+	if grant != (model.MembershipOptions{}) {
+		out = append(out, plan.SQL("", grantMembership(member.Name, role.Name, grant)))
+	}
+	return out, nil
 }
 
 // RevokeMembership implements diff.Dialect.
