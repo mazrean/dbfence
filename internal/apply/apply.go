@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/mazrean/dbfence/internal/plan"
 )
@@ -25,7 +26,10 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 	for _, c := range p.Changes {
 		for _, s := range c.Statements {
 			n++
-			if _, err := fmt.Fprintf(w, "[%d/%d] %s%s\n", n, total, onDatabase(s.Database, "", " "), s.Display(showSecrets)); err != nil {
+			// Comments explaining the statement, such as a CASCADE, go on
+			// their own lines before the progress line.
+			comments, stmt := splitComments(s.Display(showSecrets))
+			if _, err := fmt.Fprintf(w, "%s[%d/%d] %s%s\n", comments, n, total, onDatabase(s.Database, "", " "), stmt); err != nil {
 				return err
 			}
 			if err := ex.Exec(ctx, s.Database, s.SQL()); err != nil {
@@ -59,6 +63,21 @@ func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int,
 	}
 	return fmt.Errorf("%s %s: %s failed: %s (%d of %s applied; run plan to see the remaining changes)",
 		c.Action, c.Resource, at, msg, n-1, plan.Count(total, "statement"))
+}
+
+// splitComments splits the leading "--" comment lines off text. comments
+// keeps their line breaks.
+func splitComments(text string) (comments, rest string) {
+	rest = text
+	for strings.HasPrefix(rest, "--") {
+		line, after, ok := strings.Cut(rest, "\n")
+		if !ok {
+			break
+		}
+		comments += line + "\n"
+		rest = after
+	}
+	return comments, rest
 }
 
 // isCancellation reports whether err only says that ctx was cancelled or

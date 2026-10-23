@@ -132,3 +132,19 @@ func TestRunErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestRunPrintsCommentsBeforeTheStatement(t *testing.T) {
+	t.Parallel()
+	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionRevoke, Resource: `CONNECT on database "app" from "a"`, Statements: []plan.Statement{
+		plan.SQL("app", "-- CASCADE: one\n-- two\nREVOKE CONNECT ON DATABASE \"app\" FROM \"a\" CASCADE"),
+		plan.SQL("", "-- only a comment"),
+	}}}}
+	var out strings.Builder
+	if err := Run(t.Context(), &recorder{}, p, &out, false); err != nil {
+		t.Fatal(err)
+	}
+	want := "-- CASCADE: one\n-- two\n[1/2] (on database \"app\") REVOKE CONNECT ON DATABASE \"app\" FROM \"a\" CASCADE\n[2/2] -- only a comment\n"
+	if out.String() != want {
+		t.Errorf("output =\n%s\nwant\n%s", out.String(), want)
+	}
+}
