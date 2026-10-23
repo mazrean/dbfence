@@ -146,6 +146,11 @@ func parseConfig(dsn string) (*pgx.ConnConfig, error) {
 	// Literals are rendered for standard_conforming_strings = on; a startup
 	// parameter overrides role and database defaults.
 	cfg.RuntimeParams["standard_conforming_strings"] = "on"
+	// Quoting assumes UTF-8: in a client encoding such as SJIS or BIG5 a
+	// quote or backslash byte can be the second byte of a multibyte
+	// character. Pinning it also keeps a DSN, role or database default
+	// from changing it.
+	cfg.RuntimeParams["client_encoding"] = "UTF8"
 	return cfg, nil
 }
 

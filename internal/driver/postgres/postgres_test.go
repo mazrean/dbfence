@@ -83,6 +83,8 @@ func TestParseConfigDefaults(t *testing.T) {
 		{"default timeout", "postgres://u@h/db?options=-c%20standard_conforming_strings%3Doff", defaultConnectTimeout},
 		{"explicit timeout", "postgres://u@h/db?connect_timeout=3", 3 * time.Second},
 		{"keyword form", "host=h user=u", defaultConnectTimeout},
+		{"client encoding overridden", "postgres://u@h/db?client_encoding=SQL_ASCII", defaultConnectTimeout},
+		{"client encoding in keyword form", "host=h user=u client_encoding=LATIN1", defaultConnectTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -96,6 +98,9 @@ func TestParseConfigDefaults(t *testing.T) {
 			}
 			if got := cfg.Copy().RuntimeParams["standard_conforming_strings"]; got != "on" {
 				t.Errorf("standard_conforming_strings = %q, want on (also on per-database copies)", got)
+			}
+			if got := cfg.Copy().RuntimeParams["client_encoding"]; got != "UTF8" {
+				t.Errorf("client_encoding = %q, want UTF8 (also on per-database copies)", got)
 			}
 		})
 	}
