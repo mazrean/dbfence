@@ -58,7 +58,7 @@ REVOKE CONNECT, TEMPORARY ON DATABASE "app" FROM PUBLIC;
 
 - Each change starts with `-- [create|update|grant|revoke|drop] <resource>`. Statements that must run in another database are preceded by `-- (on database "x")`.
 - Unmanaged roles are reported as `unmanaged user "x"` when they can log in, and `unmanaged role "x"` otherwise.
-- A PostgreSQL revoke that cascades is preceded by `-- CASCADE: privileges on <object> that "<grantor>" granted to ... are revoked too; declared ones are granted again` (or `memberships in "<role>" that ...`).
+- A PostgreSQL revoke that cascades is preceded by `-- CASCADE: privileges on <object> that "<grantor>" granted to ... are revoked too; declared ones are granted again` (or `memberships in "<role>" that ...`). Such explanatory comment lines are only printed; they are not part of the SQL sent to the server.
 - When something is dropped, the summary is followed by `-- DESTRUCTIVE: this plan drops N objects: ...`.
 - An empty plan prints `-- No changes. The server matches the configuration.`, or, when there are warnings, `-- No changes to apply. See the N warnings above ...`.
 - Warnings are also written to stderr as `warning: ...`, so they stay visible when stdout is redirected.
