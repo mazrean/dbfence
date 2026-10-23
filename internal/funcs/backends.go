@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -115,18 +116,32 @@ func redactURL(loc string) (string, *strings.Replacer) {
 	// url.Redacted. The bare query, fragment and password are a backstop.
 	olds := []string{loc, u.String()}
 	olds = append(olds, strings.Replace(u.Redacted(), ":xxxxx@", ":***@", 1), u.Redacted())
+	// Each part is also replaced in its Go-quoted form, because errors
+	// such as net/http's print the URL with %q.
 	var pairs []string
+	add := func(old, repl string) {
+		pairs = append(pairs, old, repl)
+		if q := goQuoted(old); q != old {
+			pairs = append(pairs, q, goQuoted(repl))
+		}
+	}
 	for _, o := range olds {
-		pairs = append(pairs, o, safe)
+		add(o, safe)
 	}
 	if u.RawQuery != "" {
-		pairs = append(pairs, u.RawQuery, "REDACTED")
+		add(u.RawQuery, "REDACTED")
 	}
 	if u.Fragment != "" {
-		pairs = append(pairs, u.EscapedFragment(), "REDACTED")
+		add(u.EscapedFragment(), "REDACTED")
 	}
 	if pw, ok := u.User.Password(); ok && pw != "" {
-		pairs = append(pairs, pw, "xxxxx")
+		add(pw, "xxxxx")
 	}
 	return safe, strings.NewReplacer(pairs...)
+}
+
+// goQuoted returns s as it appears inside a %q-formatted string.
+func goQuoted(s string) string {
+	q := strconv.Quote(s)
+	return q[1 : len(q)-1]
 }

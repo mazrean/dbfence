@@ -19,7 +19,7 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
 
-	secrets := []string{"pa55word", "X-Amz-Signature=SIG", "SIG", "frag", "p%zz"}
+	secrets := []string{"pa55word", "X-Amz-Signature=SIG", "SIG", "frag", "p%zz", "T0KEN"}
 	tests := []struct {
 		name    string
 		url     string
@@ -31,6 +31,12 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 			url:     "https://user:pa55word@127.0.0.1:1/state?X-Amz-Signature=SIG#frag",
 			address: "output.n",
 			wantErr: []string{"failed to read tfstate from https://user:xxxxx@127.0.0.1:1/state: Get \"https://user:xxxxx@127.0.0.1:1/state\""},
+		},
+		{
+			name:    "go-quoted url with a quote in the query",
+			url:     `https://127.0.0.1:1/state?token=T0KEN&label="x"`,
+			address: "output.n",
+			wantErr: []string{`Get "https://127.0.0.1:1/state"`},
 		},
 		{
 			name:    "address not found",
