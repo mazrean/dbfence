@@ -102,6 +102,7 @@ type differ struct {
 	desired  *model.Desired
 	current  *model.Current
 	ignore   ignorer
+	chain    *chain
 	changes  []change
 	warnings []string
 	opts     Options
@@ -114,6 +115,7 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 		return nil, err
 	}
 	df := &differ{d: d, opts: opts, desired: desired, current: sortedCurrent(current), ignore: ig, warnings: slices.Clone(current.Warnings)}
+	df.chain = newChain(df.current)
 	if !current.Unreadable.Roles {
 		if err := df.checkReferences(); err != nil {
 			return nil, err
@@ -291,7 +293,13 @@ func (df *differ) roles() {
 				df.addWarned(phaseMembership, plan.ActionGrant, fmt.Sprintf("membership of %q in %q", r.ID, m), stmts, warns)
 				continue
 			}
-			df.membershipOptions(r.ID, m, opts, cur.MemberOptions[m])
+			if !df.membershipOptions(r.ID, m, opts, cur.MemberOptions[m]) {
+				// Not revoked and granted again: SetDefaultRoles must not
+				// count on it.
+				r.MemberOptions = maps.Clone(r.MemberOptions)
+				opts.Admin = nil
+				r.MemberOptions[m] = opts
+			}
 		}
 		for _, m := range model.SortRoleIDs(slices.Clone(have)) {
 			if unknown || slices.Contains(want, m) {
@@ -302,6 +310,11 @@ func (df *differ) roles() {
 				continue
 			}
 			stmts, warns := df.d.RevokeMembership(r.ID, m)
+			if lost, ok := df.chain.cut(stmts); !ok {
+				df.warn("not revoking membership of %q in %q: the connected user %q is a member of %q through it, and dbfence may rely on it",
+					df.show(r.ID), df.show(m), df.show(df.current.CurrentUser), df.show(lost))
+				continue
+			}
 			df.addWarned(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", df.show(r.ID), df.show(m)), stmts, warns)
 		}
 		if s, ok := df.d.(DefaultRoleSetter); ok {
@@ -335,15 +348,25 @@ func keepDefaultRoles(r model.Role, cur model.RoleState) model.Role {
 }
 
 // membershipOptions converges the declared options of the existing
-// membership of member in role.
-func (df *differ) membershipOptions(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) {
+// membership of member in role. It returns false when the change is not
+// planned because it would revoke a membership the connected user relies
+// on (see chain).
+func (df *differ) membershipOptions(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) bool {
 	differs := func(w *bool, h bool) bool { return w != nil && *w != h }
 	if !differs(want.Admin, have.Admin) && !differs(want.Inherit, have.Inherit) && !differs(want.Set, have.Set) {
-		return
+		return true
 	}
 	stmts, warns := df.d.AlterMembership(member, role, want, have)
 	df.warnings = append(df.warnings, warns...)
+	if lost, ok := df.chain.cut(stmts); !ok {
+		// MySQL drops the ADMIN OPTION by revoking the role and
+		// granting it again; apply may stop in between.
+		df.warn("not changing the options of membership of %q in %q: that revokes the membership and grants it again, and the connected user %q is a member of %q through it; dbfence may rely on it",
+			df.show(member), df.show(role), df.show(df.current.CurrentUser), df.show(lost))
+		return false
+	}
 	df.add(phaseMembership, plan.ActionUpdate, fmt.Sprintf("options of membership of %q in %q", member, role), stmts)
+	return true
 }
 
 // protectCurrentUser drops the attribute changes of r that would lock

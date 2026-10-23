@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/plan"
@@ -57,7 +58,13 @@ func Verify(p *plan.Plan, cur *model.Current, desired *model.Desired, opts Optio
 	}
 	c := &checker{cur: cur, desired: desired, opts: opts, ignore: ig, reassigned: map[plan.Target]bool{}}
 	c.dropped = c.droppedDatabases(p)
-	c.relied = c.reliedOn()
+	c.edges = map[membership]bool{}
+	for _, r := range cur.Roles {
+		for _, m := range r.MemberOf {
+			c.edges[membership{r.ID, m}] = true
+		}
+	}
+	c.relied = c.reachable()
 	c.referenced = c.referencedRoles()
 	var out []Violation
 	for _, ch := range p.Changes {
@@ -79,8 +86,10 @@ type checker struct {
 	// reassigned holds the roles and databases of the REASSIGN OWNED
 	// statements checked so far.
 	reassigned map[plan.Target]bool
-	dropped    []string
-	ignore     ignorer
+	// edges are the memberships after the statements checked so far.
+	edges   map[membership]bool
+	dropped []string
+	ignore  ignorer
 }
 
 func (c *checker) check(s plan.Statement) []string {
@@ -101,15 +110,20 @@ func (c *checker) check(s plan.Statement) []string {
 		if t.Role == c.cur.CurrentUser {
 			return c.lockOut(s.RoleChange())
 		}
+	case plan.KindGrantMembership:
+		c.edges[membership{t.Grantee, t.Role}] = true
 	case plan.KindRevokeMembership:
 		if t.Grantee == c.cur.CurrentUser {
 			return []string{fmt.Sprintf("revokes a membership or ADMIN OPTION of the connected user %q in %q", t.Grantee, t.Role)}
+		}
+		if !t.Option {
+			return c.revokeRelied(t.Grantee, t.Role)
 		}
 	case plan.KindSetDefaultRole:
 		if t.Role == c.cur.CurrentUser {
 			return c.narrowsDefaultRoles(s.DefaultRoles())
 		}
-	case plan.KindOther, plan.KindGrant, plan.KindRevoke, plan.KindGrantMembership,
+	case plan.KindOther, plan.KindGrant, plan.KindRevoke,
 		plan.KindCreateDatabase, plan.KindAlterDatabase, plan.KindCreateSchema, plan.KindAlterSchema:
 		// Nothing they do can drop a protected object or lock the
 		// connected user out.
@@ -341,24 +355,43 @@ func (c *checker) droppedDatabases(p *plan.Plan) []string {
 	return out
 }
 
-// reliedOn returns the roles granted to the connected user, directly or
-// transitively.
-func (c *checker) reliedOn() map[model.RoleID]bool {
+// membership is a membership of member in role.
+type membership struct{ member, role model.RoleID }
+
+// reachable returns the roles granted to the connected user, directly or
+// transitively, through c.edges.
+func (c *checker) reachable() map[model.RoleID]bool {
 	seen := map[model.RoleID]bool{}
 	for queue := []model.RoleID{c.cur.CurrentUser}; len(queue) > 0; queue = queue[1:] {
-		for _, r := range c.cur.Roles {
-			if r.ID != queue[0] {
-				continue
-			}
-			for _, m := range r.MemberOf {
-				if !seen[m] {
-					seen[m] = true
-					queue = append(queue, m)
-				}
+		for e := range c.edges {
+			if e.member == queue[0] && !seen[e.role] {
+				seen[e.role] = true
+				queue = append(queue, e.role)
 			}
 		}
 	}
 	return seen
+}
+
+// revokeRelied records the revoke of the membership of member in role and
+// checks that the connected user still has every role it had before the
+// plan: a revoke of another role's membership on its chain takes away
+// the roles it reaches only through it.
+func (c *checker) revokeRelied(member, role model.RoleID) []string {
+	before := c.reachable()
+	delete(c.edges, membership{member, role})
+	after := c.reachable()
+	var lost []string
+	for id := range c.relied {
+		if before[id] && !after[id] {
+			lost = append(lost, fmt.Sprintf("%q", id))
+		}
+	}
+	if len(lost) == 0 {
+		return nil
+	}
+	slices.Sort(lost)
+	return []string{fmt.Sprintf("revokes the membership of %q in %q, through which the connected user %q has %s", member, role, c.cur.CurrentUser, strings.Join(lost, ", "))}
 }
 
 // referencedRoles returns the roles the configuration refers to: member_of

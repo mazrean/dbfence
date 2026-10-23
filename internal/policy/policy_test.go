@@ -85,6 +85,10 @@ func revokeMembership(member, role model.RoleID, adminOnly bool) plan.Statement 
 	return plan.New("", plan.KindRevokeMembership, plan.MembershipTarget(member, role).WithOption(adminOnly), plan.Keyword("REVOKE x FROM y"))
 }
 
+func grantMembership(member, role model.RoleID) plan.Statement {
+	return plan.New("", plan.KindGrantMembership, plan.MembershipTarget(member, role), plan.Keyword("GRANT x TO y"))
+}
+
 func zero() *int { n := 0; return &n }
 
 func TestVerify(t *testing.T) {
@@ -209,6 +213,32 @@ func TestVerify(t *testing.T) {
 		{name: "lock out of another role", stmts: []plan.Statement{alterRole(pg("app"), plan.RoleChange{DisablesLogin: true, ConnectionLimit: zero()})}},
 		{name: "membership of the connected user", stmts: []plan.Statement{revokeMembership(pg("admin"), pg("ops"), false)}, want: []string{`connected user "admin" in "ops"`}},
 		{name: "admin option of the connected user", stmts: []plan.Statement{revokeMembership(pg("admin"), pg("ops"), true)}, want: []string{"ADMIN OPTION"}},
+		{
+			name:  "membership on the chain of the connected user",
+			stmts: []plan.Statement{revokeMembership(pg("ops"), pg("base"), false)},
+			want:  []string{`revokes the membership of "ops" in "base", through which the connected user "admin" has "base"`},
+		},
+		{name: "admin option on the chain of the connected user", stmts: []plan.Statement{revokeMembership(pg("ops"), pg("base"), true)}},
+		{
+			name:  "membership on the chain after another path is granted",
+			stmts: []plan.Statement{grantMembership(pg("admin"), pg("base")), revokeMembership(pg("ops"), pg("base"), false)},
+		},
+		{
+			name:  "membership on the chain revoked and granted again",
+			stmts: []plan.Statement{revokeMembership(pg("ops"), pg("base"), false), grantMembership(pg("ops"), pg("base"))},
+			want:  []string{`through which the connected user "admin" has "base"`},
+		},
+		{
+			name: "the last of two paths of the connected user",
+			current: func() *model.Current {
+				c := pgCurrent()
+				c.Roles[0].MemberOf = append(c.Roles[0].MemberOf, pg("app"))
+				c.Roles[3].MemberOf = []model.RoleID{pg("base")}
+				return c
+			}(),
+			stmts: []plan.Statement{revokeMembership(pg("ops"), pg("base"), false), revokeMembership(pg("app"), pg("base"), false)},
+			want:  []string{`revokes the membership of "app" in "base"`},
+		},
 		{name: "membership in the connected user", stmts: []plan.Statement{revokeMembership(pg("app"), pg("admin"), false)}},
 		{name: "drop of an unmanaged name", stmts: []plan.Statement{dropRole(pg("evil\n"))}, want: []string{"does not exist", `names role "evil\n", which dbfence does not manage`}},
 		{

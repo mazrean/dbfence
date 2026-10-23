@@ -45,6 +45,8 @@ func TestVerifyDialectStatements(t *testing.T) {
 	withoutReassign := func(stmts []plan.Statement) []plan.Statement {
 		return slices.DeleteFunc(stmts, func(s plan.Statement) bool { return s.Kind() == plan.KindReassign })
 	}
+	no := false
+	first := func(stmts []plan.Statement, _ []string) []plan.Statement { return stmts }
 	unknownDefaults := myCurrent()
 	unknownDefaults.Roles[0].DefaultRoles, unknownDefaults.Roles[0].DefaultRolesUnknown = nil, true
 	tests := []struct {
@@ -89,6 +91,22 @@ func TestVerifyDialectStatements(t *testing.T) {
 			pg:    true,
 			stmts: withoutReassign(pgd.DropRole(pg("stray"), []string{"app"})),
 			want:  []string{`drops the objects role "stray" owns in database "app"`},
+		},
+		{
+			name:  "revoke on the chain of the connected user",
+			pg:    true,
+			stmts: first(pgd.RevokeMembership(pg("ops"), pg("base"))),
+			want:  []string{`revokes the membership of "ops" in "base", through which the connected user "admin" has "base"`},
+		},
+		{
+			name: "mysql admin option dropped on the chain of the connected account",
+			current: &model.Current{CurrentUser: my("dbfence"), Roles: []model.RoleState{
+				{ID: my("dbfence"), MemberOf: []model.RoleID{my("ops")}, DefaultRoles: []model.RoleID{my("ops")}},
+				{ID: my("ops"), MemberOf: []model.RoleID{my("dba_role")}},
+				{ID: my("dba_role")},
+			}},
+			stmts: first(myd.AlterMembership(my("ops"), my("dba_role"), model.MembershipOptions{Admin: &no}, model.MembershipState{Admin: true})),
+			want:  []string{`revokes the membership of "ops"@"%" in "dba_role"@"%"`},
 		},
 		{name: "drop role", pg: true, stmts: pgd.DropRole(pg("stray"), []string{"app", "postgres"})},
 	}
