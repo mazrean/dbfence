@@ -113,9 +113,12 @@ func (d *Driver) Close() error { return d.db.Close() }
 func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Current, error) {
 	cur := &model.Current{}
 	var user string
-	if err := d.db.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&user); err != nil {
+	var database sql.NullString
+	if err := d.db.QueryRowContext(ctx, "SELECT CURRENT_USER(), DATABASE()").Scan(&user, &database); err != nil {
 		return nil, fmt.Errorf("current user: %w", err)
 	}
+	// The database named in the DSN is never pruned.
+	cur.CurrentDatabase = d.declaredName(database.String, desired)
 	if name, host, ok := strings.CutLast(user, "@"); ok {
 		// Host names are case-insensitive; the server reports them in lower case.
 		cur.CurrentUser = model.RoleID{Name: name, Host: strings.ToLower(host)}

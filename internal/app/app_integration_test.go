@@ -372,6 +372,61 @@ grant {
 `, pw)
 }
 
+// TestMySQLConnectedAccount runs dbfence as an account that gets its
+// privileges from a default role, connected to a database named in the
+// DSN: --prune keeps both, and SET DEFAULT ROLE keeps the role active.
+func TestMySQLConnectedAccount(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	for _, q := range []string{
+		"CREATE ROLE 'dbf_dbarole'@'%'",
+		"GRANT ALL PRIVILEGES ON *.* TO 'dbf_dbarole'@'%' WITH GRANT OPTION",
+		"CREATE USER 'dbf_dba'@'%' IDENTIFIED BY 'dbapw'",
+		"GRANT 'dbf_dbarole'@'%' TO 'dbf_dba'@'%'",
+		"SET DEFAULT ROLE ALL TO 'dbf_dba'@'%'",
+		"CREATE DATABASE dbf_conn",
+	} {
+		h.exec(q)
+	}
+	h.dsn = strings.Replace(h.dsn, "root:root@", "dbf_dba:dbapw@", 1) + "dbf_conn"
+	h.write(`
+user "dba" {
+  name      = "dbf_dba"
+  password  = "dbapw"
+  member_of = []
+}
+`)
+	_, out := h.plan(app.Options{Prune: true})
+	for _, w := range []string{
+		`not revoking membership of the connected user "dbf_dba"@"%" in "dbf_dbarole"@"%"`,
+		`database "dbf_conn" is the database dbfence is connected to; not pruned`,
+	} {
+		if !strings.Contains(out, w) {
+			t.Errorf("plan lacks %q:\n%s", w, out)
+		}
+	}
+	if strings.Contains(out, "SET DEFAULT ROLE") || strings.Contains(out, "DROP DATABASE `dbf_conn`") {
+		t.Fatalf("plan changes the connected account or database:\n%s", out)
+	}
+	h.apply(app.Options{Prune: true})
+	h.assertConverged(app.Options{Prune: true})
+
+	dba, err := sql.Open("mysql", h.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dba.Close() }()
+	var role string
+	if err := dba.QueryRowContext(t.Context(), "SELECT CURRENT_ROLE()").Scan(&role); err != nil || role != "`dbf_dbarole`@`%`" {
+		t.Errorf("CURRENT_ROLE() of a new session = %q, %v; want the role kept active", role, err)
+	}
+
+	h.write("")
+	if _, out := h.plan(app.Options{Prune: true}); !strings.Contains(out, `user "dbf_dba"@"%" is the connected user; not pruned`) {
+		t.Errorf("plan lacks the connected user warning:\n%s", out)
+	}
+}
+
 // TestMySQLWithoutSystemTableAccess runs dbfence as an account that may
 // not read mysql.user, mysql.db or mysql.role_edges.
 func TestMySQLWithoutSystemTableAccess(t *testing.T) {
