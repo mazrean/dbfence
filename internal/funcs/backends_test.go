@@ -24,7 +24,7 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
 
-	secrets := []string{"pa55word", "X-Amz-Signature=SIG", "SIG", "frag", "p%zz", "T0KEN"}
+	secrets := []string{"pa55word", "X-Amz-Signature=SIG", "SIG", "frag", "p%zz", "T0KEN", "@"}
 	tests := []struct {
 		name    string
 		url     string
@@ -35,7 +35,25 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 			name:    "unreachable",
 			url:     "https://user:pa55word@127.0.0.1:1/state?X-Amz-Signature=SIG#frag",
 			address: "output.n",
-			wantErr: []string{"failed to read tfstate from https://user:xxxxx@127.0.0.1:1/state: Get \"https://user:xxxxx@127.0.0.1:1/state\""},
+			wantErr: []string{"failed to read tfstate from https://127.0.0.1:1/state: Get \"https://127.0.0.1:1/state\""},
+		},
+		{
+			name:    "unreachable with a token as the username",
+			url:     "https://ghp_T0KENVALUE@127.0.0.1:1/state",
+			address: "output.n",
+			wantErr: []string{"failed to read tfstate from https://127.0.0.1:1/state: Get \"https://127.0.0.1:1/state\""},
+		},
+		{
+			name:    "escaped token as the username",
+			url:     "https://ghp%2DT0KEN@127.0.0.1:1/state",
+			address: "output.n",
+			wantErr: []string{"failed to read tfstate from https://127.0.0.1:1/state"},
+		},
+		{
+			name:    "address not found with a token as the username",
+			url:     "http://ghp_T0KENVALUE@" + host + "/state",
+			address: "output.nope",
+			wantErr: []string{"not found in http://" + host + "/state"},
 		},
 		{
 			name:    "go-quoted url with a quote in the query",
@@ -47,7 +65,7 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 			name:    "address not found",
 			url:     "http://user:pa55word@" + host + "/state?X-Amz-Signature=SIG",
 			address: "aws_db_instance.nope.address",
-			wantErr: []string{"not found in http://user:xxxxx@" + host + "/state"},
+			wantErr: []string{"not found in http://" + host + "/state"},
 		},
 		{
 			name:    "unparsable url",
