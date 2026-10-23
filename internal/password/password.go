@@ -25,6 +25,9 @@ var ErrUnsupported = errors.New("unsupported password verifier")
 const (
 	PluginNative       = "mysql_native_password"
 	PluginCachingSHA2  = "caching_sha2_password"
+	PluginSHA256       = "sha256_password"
+	sha256Prefix       = "$5$"
+	sha256Rounds       = 5000
 	cachingSHA2Prefix  = "$A$"
 	cachingSHA2SaltLen = 20
 	sha256CryptDigest  = 43
@@ -46,6 +49,11 @@ func MatchMySQL(plugin string, authString []byte, password string) (bool, error)
 			return password == "", nil
 		}
 		return matchCachingSHA2(authString, password)
+	case PluginSHA256:
+		if len(authString) == 0 {
+			return password == "", nil
+		}
+		return matchSHA256(authString, password)
 	default:
 		return false, fmt.Errorf("%w: mysql plugin %q", ErrUnsupported, plugin)
 	}
@@ -73,6 +81,19 @@ func matchCachingSHA2(authString []byte, password string) (bool, error) {
 	digest := authString[header+cachingSHA2SaltLen:]
 	got := SHA256Crypt([]byte(password), salt, int(iter)*cachingSHA2RoundsUnit)
 	return subtle.ConstantTimeCompare(got, digest) == 1, nil
+}
+
+// matchSHA256 checks sha256_password's "$5$<20 byte salt>$<43 byte digest>"
+// (SHA256Crypt with the default 5000 rounds).
+func matchSHA256(authString []byte, password string) (bool, error) {
+	const header = len(sha256Prefix) + cachingSHA2SaltLen
+	if len(authString) != header+1+sha256CryptDigest ||
+		!bytes.HasPrefix(authString, []byte(sha256Prefix)) || authString[header] != '$' {
+		return false, fmt.Errorf("%w: malformed sha256_password string", ErrUnsupported)
+	}
+	salt := authString[len(sha256Prefix):header]
+	got := SHA256Crypt([]byte(password), salt, sha256Rounds)
+	return subtle.ConstantTimeCompare(got, authString[header+1:]) == 1, nil
 }
 
 // SHA256Crypt implements the SHA-256 based crypt by Ulrich Drepper
