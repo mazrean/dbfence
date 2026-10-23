@@ -82,6 +82,7 @@ func TestFunctions(t *testing.T) {
 		{"gcp invalid utf-8", `gcp_secretmanager("projects/p/secrets/binary")`, cty.NilVal, `"projects/p/secrets/binary/versions/latest" is not valid UTF-8`},
 		{"tonumber", `tonumber("12")`, cty.NumberIntVal(12), ""},
 		{"tonumber invalid", `tonumber("x")`, cty.NilVal, "cannot convert value to number"},
+		{"tonumber object", `tonumber({a = 1})`, cty.NilVal, "cannot convert object to number"},
 		{"jsondecode", `jsondecode("{\"a\":1}").a`, cty.NumberIntVal(1), ""},
 		{"jsondecode invalid", `jsondecode("{x")`, cty.NilVal, "not valid JSON"},
 	}
