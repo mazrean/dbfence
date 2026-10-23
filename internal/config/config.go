@@ -246,7 +246,10 @@ type decodedDatabase struct {
 type decodedRole struct {
 	role model.Role
 	typ  string
-	res  resource
+	// hostless lists MySQL member_of entries written without a host,
+	// which therefore default to %.
+	hostless []model.RoleID
+	res      resource
 }
 
 type decodedSchema struct {
@@ -376,7 +379,7 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 			role, dd := decodeRole(r, typ, ctx, engine)
 			diags = append(diags, dd...)
 			if !dd.HasErrors() {
-				dec.roles = append(dec.roles, decodedRole{typ: typ, res: r, role: role})
+				dec.roles = append(dec.roles, role)
 			}
 		}
 	}
@@ -506,11 +509,12 @@ func decodeDatabase(r resource, ctx *hcl.EvalContext, engine model.Engine) (mode
 	}, diags
 }
 
-func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engine) (model.Role, hcl.Diagnostics) {
+func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engine) (decodedRole, hcl.Diagnostics) {
+	out := decodedRole{typ: typ, res: r}
 	var blk roleBlock
 	diags := gohcl.DecodeBody(r.block.Body, ctx, &blk)
 	if diags.HasErrors() {
-		return model.Role{}, diags
+		return out, diags
 	}
 	diags = append(diags, checkEngineOnly(r, engine, map[string]bool{
 		"superuser": blk.Superuser != nil, "createdb": blk.CreateDB != nil, "createrole": blk.CreateRole != nil,
@@ -538,17 +542,32 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 	}
 	if blk.MemberOf != nil {
 		role.MemberOf = []model.RoleID{}
+		rng := attrRange(r.attrs, "member_of", r.block.DefRange)
+		seen := map[model.RoleID]bool{}
 		for _, m := range *blk.MemberOf {
 			id := ParseRoleID(m, engine)
-			if engine == model.EngineMySQL && id.Host == "" {
-				diags = append(diags, errAt(attrRange(r.attrs, "member_of", r.block.DefRange), "Empty host",
+			switch {
+			case engine == model.EngineMySQL && id.Host == "":
+				diags = append(diags, errAt(rng, "Empty host",
 					fmt.Sprintf(`member_of entry %q has an empty host; use "name@%%" or role.<label>.id.`, m)))
+			case id == role.ID:
+				diags = append(diags, errAt(rng, "Membership cycle", fmt.Sprintf("role %q cannot be a member of itself.", id)))
+			case seen[id]:
+				diags = append(diags, errAt(rng, "Duplicate membership", fmt.Sprintf("member_of lists role %q more than once.", id)))
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if engine == model.EngineMySQL && !strings.Contains(m, "@") {
+				out.hostless = append(out.hostless, id)
 			}
 			role.MemberOf = append(role.MemberOf, id)
 		}
 		model.SortRoleIDs(role.MemberOf)
 	}
-	return role, diags
+	out.role = role
+	return out, diags
 }
 
 // ParseRoleID parses "name" or, for MySQL, "name@host" (host defaults to %

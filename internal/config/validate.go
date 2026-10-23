@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -33,6 +35,8 @@ func validate(d *decoded) hcl.Diagnostics {
 		}
 		roles[r.role.ID] = r.res
 	}
+
+	diags = append(diags, validateMemberships(d, roles)...)
 
 	schemas := map[[2]string]resource{}
 	for _, s := range d.schemas {
@@ -73,7 +77,7 @@ func validateGrants(d *decoded, dbs map[string]resource, roles map[model.RoleID]
 		}
 		if _, ok := roles[g.grantee]; !ok {
 			diags = append(diags, errAt(attrRange(g.attrs, "role", g.block.DefRange), "Undeclared role",
-				fmt.Sprintf("grant targets role %q, which is not declared.", g.grantee)))
+				fmt.Sprintf("grant targets role %q, which is not declared.%s", g.grantee, otherHosts(roles, g.grantee, "user"))))
 		}
 
 		// MySQL keeps WITH GRANT OPTION per account and database, not per
@@ -116,4 +120,84 @@ func validateGrants(d *decoded, dbs map[string]resource, roles map[model.RoleID]
 		}
 	}
 	return diags
+}
+
+// validateMemberships rejects membership cycles among declared roles and,
+// on MySQL, host-less member_of entries that miss the declared account.
+func validateMemberships(d *decoded, roles map[model.RoleID]resource) hcl.Diagnostics {
+	var diags hcl.Diagnostics
+	byID := map[model.RoleID]*decodedRole{}
+	for i := range d.roles {
+		if _, dup := byID[d.roles[i].role.ID]; !dup {
+			byID[d.roles[i].role.ID] = &d.roles[i]
+		}
+	}
+	for _, r := range d.roles {
+		for _, id := range r.hostless {
+			if _, ok := roles[id]; !ok {
+				if hint := otherHosts(roles, id, "role"); hint != "" {
+					diags = append(diags, errAt(attrRange(r.res.attrs, "member_of", r.res.block.DefRange), "Undeclared role",
+						fmt.Sprintf("member_of entry %q resolves to %q, which is not declared.%s", id.Name, id, hint)))
+				}
+			}
+		}
+	}
+
+	const (
+		unvisited = iota
+		visiting
+		done
+	)
+	state := map[model.RoleID]int{}
+	var path []model.RoleID
+	var visit func(r *decodedRole)
+	visit = func(r *decodedRole) {
+		state[r.role.ID] = visiting
+		path = append(path, r.role.ID)
+		for _, m := range r.role.MemberOf {
+			parent, ok := byID[m]
+			if !ok || m == r.role.ID {
+				continue
+			}
+			switch state[m] {
+			case unvisited:
+				visit(parent)
+			case visiting:
+				start := slices.Index(path, m)
+				names := make([]string, 0, len(path)-start+1)
+				for _, id := range slices.Concat(path[start:], []model.RoleID{m}) {
+					names = append(names, strconv.Quote(id.String()))
+				}
+				diags = append(diags, errAt(attrRange(r.res.attrs, "member_of", r.res.block.DefRange), "Membership cycle",
+					fmt.Sprintf("role memberships form a cycle: %s.", strings.Join(names, " -> "))))
+			}
+		}
+		path = path[:len(path)-1]
+		state[r.role.ID] = done
+	}
+	for i := range d.roles {
+		if state[d.roles[i].role.ID] == unvisited {
+			visit(&d.roles[i])
+		}
+	}
+	return diags
+}
+
+// otherHosts hints at declared MySQL accounts with the same name as id but
+// another host.
+func otherHosts(roles map[model.RoleID]resource, id model.RoleID, ref string) string {
+	if id.Host == "" {
+		return ""
+	}
+	var found []string
+	for other, res := range roles {
+		if other.Name == id.Name && other != id {
+			found = append(found, fmt.Sprintf("%q (%s %q)", other, res.block.Type, res.block.Labels[0]))
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	slices.Sort(found)
+	return fmt.Sprintf(" Declared accounts named %q: %s; reference one with %s.<label>.id.", id.Name, strings.Join(found, ", "), ref)
 }
