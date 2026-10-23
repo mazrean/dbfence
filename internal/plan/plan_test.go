@@ -118,6 +118,20 @@ func TestStatementRedact(t *testing.T) {
 			leak:   []string{"abcd", "efgh"},
 		},
 		{
+			name:   "postgres escape string, escaped echo",
+			secret: `E'back\\slash'`,
+			msg:    `ERROR: syntax error at or near "E'back\\slash'" (SQLSTATE 42601)`,
+			want:   `ERROR: syntax error at or near "E'<redacted>'" (SQLSTATE 42601)`,
+			leak:   []string{"back", "slash"},
+		},
+		{
+			name:   "postgres escape string, unescaped echo",
+			secret: `E'back\\slash'`,
+			msg:    `ERROR: invalid value 'back\slash'`,
+			want:   `ERROR: invalid value '<redacted>'`,
+			leak:   []string{"back", "slash"},
+		},
+		{
 			name:   "postgres syntax error token",
 			secret: "'hunter2'",
 			msg:    `ERROR: syntax error at or near "'hunter2'" (SQLSTATE 42601)`,

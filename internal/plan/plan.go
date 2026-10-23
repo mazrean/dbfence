@@ -77,8 +77,12 @@ func (s Statement) Redact(text string) string {
 }
 
 // secretValues returns the forms in which the value of the literal sec may
-// be echoed between single quotes: escaped as written and unescaped.
+// be echoed between single quotes: escaped as written and unescaped. An
+// escape string introducer (PostgreSQL E'...') is not part of the value.
 func secretValues(sec string) []string {
+	if len(sec) > 1 && (sec[0] == 'E' || sec[0] == 'e') && sec[1] == '\'' {
+		sec = sec[1:]
+	}
 	inner := strings.TrimSuffix(strings.TrimPrefix(sec, "'"), "'")
 	if inner == "" {
 		return nil
