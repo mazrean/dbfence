@@ -49,8 +49,12 @@ func TestVerifyDialectStatements(t *testing.T) {
 	first := func(stmts []plan.Statement, _ []string) []plan.Statement { return stmts }
 	inheriting := pgCurrent()
 	inheriting.Roles[0].MemberOptions = map[model.RoleID]model.MembershipState{pg("ops"): {Inherit: true, Set: true}}
+	// admin -> ops -> base, every membership with INHERIT and SET.
+	chained := pgCurrent()
+	chained.Roles[0].MemberOptions = map[model.RoleID]model.MembershipState{pg("ops"): {Inherit: true, Set: true}}
+	chained.Roles[1].MemberOptions = map[model.RoleID]model.MembershipState{pg("base"): {Inherit: true, Set: true}}
 	unknownDefaults := myCurrent()
-	unknownDefaults.Roles[0].DefaultRoles, unknownDefaults.Roles[0].DefaultRolesUnknown = nil, true
+	unknownDefaults.Roles[0].DefaultRoles,unknownDefaults.Roles[0].DefaultRolesUnknown = nil, true
 	tests := []struct {
 		current *model.Current
 		desired *model.Desired
@@ -158,6 +162,35 @@ func TestVerifyDialectStatements(t *testing.T) {
 			pg:      true,
 			current: inheriting,
 			stmts:   first(pgd.AlterMembership(pg("ops"), pg("base"), model.MembershipOptions{Inherit: &no}, model.MembershipState{Inherit: true})),
+		},
+		{
+			name:    "inherit and set false on a membership along the chain of the connected user",
+			pg:      true,
+			current: chained,
+			stmts:   first(pgd.AlterMembership(pg("ops"), pg("base"), model.MembershipOptions{Inherit: &no, Set: &no}, model.MembershipState{Inherit: true, Set: true})),
+			want: []string{
+				`sets INHERIT FALSE on the membership of "ops" in "base", through which the connected user "admin" has its roles`,
+				`sets SET FALSE on the membership of "ops" in "base", through which the connected user "admin" has its roles`,
+			},
+		},
+		{
+			name:    "inherit false on a new membership of a role along the chain",
+			pg:      true,
+			current: chained,
+			stmts:   first(pgd.GrantMembership(pg("ops"), pg("app"), model.MembershipOptions{Inherit: &no, Set: &no})),
+		},
+		{
+			name:    "noinherit on a role along the chain of the connected user",
+			pg:      true,
+			current: chained,
+			stmts:   first(pgd.AlterRole(model.Role{ID: pg("ops"), Inherit: &no}, model.RoleState{ID: pg("ops"), Inherit: true}, false)),
+			want:    []string{`sets NOINHERIT on "ops", through which the connected user "admin" has its roles`},
+		},
+		{
+			name:    "noinherit on the end of the chain of the connected user",
+			pg:      true,
+			current: chained,
+			stmts:   first(pgd.AlterRole(model.Role{ID: pg("base"), Inherit: &no}, model.RoleState{ID: pg("base"), Inherit: true}, false)),
 		},
 		{name: "drop role", pg: true, stmts: pgd.DropRole(pg("stray"), []string{"app", "postgres"})},
 	}

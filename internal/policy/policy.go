@@ -110,10 +110,13 @@ func (c *checker) check(s plan.Statement) []string {
 		if t.Role == c.cur.CurrentUser {
 			return c.lockOut(s.RoleChange())
 		}
+		if c.relied[t.Role] {
+			return c.noInheritOnChain(t.Role, s.RoleChange())
+		}
 	case plan.KindGrantMembership:
 		c.edges[membership{t.Grantee, t.Role}] = true
-		if t.Grantee == c.cur.CurrentUser {
-			return c.narrowsMembership(t.Role, s.RoleChange())
+		if t.Grantee == c.cur.CurrentUser || c.relied[t.Grantee] {
+			return c.narrowsMembership(t.Grantee, t.Role, s.RoleChange())
 		}
 	case plan.KindRevokeMembership:
 		if t.Grantee == c.cur.CurrentUser {
@@ -342,16 +345,18 @@ func (c *checker) narrowsDefaultRoles(set []model.RoleID) []string {
 	return out
 }
 
-// narrowsMembership checks a GRANT of role to the connected user: it may
-// not turn off INHERIT or SET on a membership the connected user has, or
-// may have when memberships are unreadable, since it would lose the
-// privileges of role or the right to SET ROLE to it.
-func (c *checker) narrowsMembership(role model.RoleID, ch plan.RoleChange) []string {
+// narrowsMembership checks a GRANT of role to member, the connected user
+// or a role granted to it: it may not turn off INHERIT or SET on a
+// membership member has, or (for the connected user) may have when
+// memberships are unreadable. The connected user would lose the
+// privileges of role or the right to SET ROLE to it, since PostgreSQL 16
+// needs INHERIT, or SET, on every membership along the chain.
+func (c *checker) narrowsMembership(member, role model.RoleID, ch plan.RoleChange) []string {
 	if !ch.DisablesInherit && !ch.DisablesSet {
 		return nil
 	}
 	id := c.cur.CurrentUser
-	i := slices.IndexFunc(c.cur.Roles, func(r model.RoleState) bool { return r.ID == id })
+	i := slices.IndexFunc(c.cur.Roles, func(r model.RoleState) bool { return r.ID == member })
 	var have model.MembershipState
 	switch {
 	case i < 0 || c.cur.Unreadable.Roles || c.cur.Unreadable.Memberships:
@@ -359,14 +364,34 @@ func (c *checker) narrowsMembership(role model.RoleID, ch plan.RoleChange) []str
 	case slices.Contains(c.cur.Roles[i].MemberOf, role):
 		have = c.cur.Roles[i].MemberOptions[role]
 	}
+	what := fmt.Sprintf("the membership of the connected user %q in %q", id, role)
+	if member != id {
+		what = fmt.Sprintf("the membership of %q in %q, through which the connected user %q has its roles", member, role, id)
+	}
 	var out []string
 	if ch.DisablesInherit && have.Inherit {
-		out = append(out, fmt.Sprintf("sets INHERIT FALSE on the membership of the connected user %q in %q", id, role))
+		out = append(out, "sets INHERIT FALSE on "+what)
 	}
 	if ch.DisablesSet && have.Set {
-		out = append(out, fmt.Sprintf("sets SET FALSE on the membership of the connected user %q in %q", id, role))
+		out = append(out, "sets SET FALSE on "+what)
 	}
 	return out
+}
+
+// noInheritOnChain checks a CREATE or ALTER of role, which is granted to
+// the connected user: NOINHERIT on it stops the privileges of the roles
+// it is a member of with INHERIT from reaching the connected user (and
+// from PostgreSQL 16 on, dbfence turns INHERIT off on those memberships
+// too).
+func (c *checker) noInheritOnChain(role model.RoleID, ch plan.RoleChange) []string {
+	if !ch.DisablesInherit {
+		return nil
+	}
+	i := slices.IndexFunc(c.cur.Roles, func(r model.RoleState) bool { return r.ID == role })
+	if i < 0 || !slices.ContainsFunc(c.cur.Roles[i].MemberOf, func(m model.RoleID) bool { return c.cur.Roles[i].MemberOptions[m].Inherit }) {
+		return nil
+	}
+	return []string{fmt.Sprintf("sets NOINHERIT on %q, through which the connected user %q has its roles", role, c.cur.CurrentUser)}
 }
 
 func (c *checker) superuser() bool {

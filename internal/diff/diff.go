@@ -263,6 +263,9 @@ func (df *differ) roles() {
 		cur, exists := df.currentRole(r.ID)
 		// The connected user exists even when the role list is unreadable.
 		self := r.ID == df.current.CurrentUser
+		if !self && df.chain.relied[r.ID] {
+			r = df.protectChainRole(r, cur)
+		}
 		if self {
 			r = df.protectCurrentUser(r, cur)
 			if cur.RetainedPassword && r.Password != nil {
@@ -407,10 +410,44 @@ func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Ro
 		}
 		r.Inherit = nil
 	}
-	// A membership that may exist keeps INHERIT and SET when it has them.
+	opts := maps.Clone(r.MemberOptions)
+	for _, m := range r.MemberOf {
+		if o := opts[m]; o.Admin != nil && !*o.Admin && cur.MemberOptions[m].Admin {
+			df.warn("not revoking ADMIN OPTION on %q from the connected user %q: dbfence may rely on it", m, r.ID)
+			o.Admin = nil
+			opts[m] = o
+		}
+	}
+	r.MemberOptions = opts
 	u := df.current.Unreadable
 	_, exists := df.currentRole(r.ID)
-	unknown := u.Roles || u.Memberships || !exists
+	return df.keepInheritAndSet(r, cur, u.Roles || u.Memberships || !exists,
+		func(m model.RoleID) string { return fmt.Sprintf("the membership of the connected user %q in %q", r.ID, m) })
+}
+
+// protectChainRole drops the changes of r, a role granted to the
+// connected user, that would take the privileges of the roles it is a
+// member of, or SET ROLE to them, away from the connected user: NOINHERIT
+// on r while it has a membership with INHERIT, and INHERIT FALSE or SET
+// FALSE on such a membership (PostgreSQL 16 needs them on every
+// membership along the chain).
+func (df *differ) protectChainRole(r model.Role, cur model.RoleState) model.Role {
+	user := df.show(df.current.CurrentUser)
+	if r.Inherit != nil && !*r.Inherit {
+		if slices.ContainsFunc(cur.MemberOf, func(m model.RoleID) bool { return cur.MemberOptions[m].Inherit }) {
+			df.warn("not setting NOINHERIT on %q: the connected user %q has its roles through it, and dbfence may rely on their privileges", df.show(r.ID), user)
+			r.Inherit = nil
+		}
+	}
+	return df.keepInheritAndSet(r, cur, false, func(m model.RoleID) string {
+		return fmt.Sprintf("the membership of %q in %q, through which the connected user %q has its roles", df.show(r.ID), df.show(m), user)
+	})
+}
+
+// keepInheritAndSet drops INHERIT FALSE and SET FALSE from the declared
+// memberships of r that have, or with unknown set may have, that option.
+// what names the membership in a warning.
+func (df *differ) keepInheritAndSet(r model.Role, cur model.RoleState, unknown bool, what func(model.RoleID) string) model.Role {
 	opts := maps.Clone(r.MemberOptions)
 	for _, m := range r.MemberOf {
 		o := opts[m]
@@ -420,16 +457,12 @@ func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Ro
 		} else if !slices.Contains(cur.MemberOf, m) {
 			have = model.MembershipState{}
 		}
-		if o.Admin != nil && !*o.Admin && cur.MemberOptions[m].Admin {
-			df.warn("not revoking ADMIN OPTION on %q from the connected user %q: dbfence may rely on it", m, r.ID)
-			o.Admin = nil
-		}
 		if o.Inherit != nil && !*o.Inherit && have.Inherit {
-			df.warn("not setting inherit = false on the membership of the connected user %q in %q: dbfence may rely on its privileges", r.ID, m)
+			df.warn("not setting inherit = false on %s: dbfence may rely on its privileges", what(m))
 			o.Inherit = nil
 		}
 		if o.Set != nil && !*o.Set && have.Set {
-			df.warn("not setting set = false on the membership of the connected user %q in %q: dbfence may rely on SET ROLE to it", r.ID, m)
+			df.warn("not setting set = false on %s: dbfence may rely on SET ROLE to it", what(m))
 			o.Set = nil
 		}
 		if o != opts[m] {
