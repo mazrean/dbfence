@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    environment: Test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up mise
+        uses: jdx/mise-action@v5
+
+      - name: Run tests
+        run: mise run test:ci
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: ./coverage.out
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up mise
+        uses: jdx/mise-action@v5
+
+      - name: Run custom linter
+        run: |
+          set -o pipefail
+          mise run lint 2>&1 | tee lint-output.txt || {
+            echo "::group::Linting Issues"
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^([^:]+):([0-9]+):([0-9]+):(.*)$ ]]; then
+                file="${BASH_REMATCH[1]}"
+                line_num="${BASH_REMATCH[2]}"
+                col="${BASH_REMATCH[3]}"
+                message="${BASH_REMATCH[4]}"
+                echo "::error file=$file,line=$line_num,col=$col::$message"
+              elif [[ "$line" =~ ^([^:]+):([0-9]+):(.*)$ ]]; then
+                file="${BASH_REMATCH[1]}"
+                line_num="${BASH_REMATCH[2]}"
+                message="${BASH_REMATCH[3]}"
+                echo "::error file=$file,line=$line_num::$message"
+              else
+                echo "::error::$line"
+              fi
+            done < lint-output.txt
+            echo "::endgroup::"
+            exit 1
+          }
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up mise
+        uses: jdx/mise-action@v5
+
+      - name: Build with GoReleaser
+        run: mise run release:build
+
+      - name: Test binary execution
+        run: ./dist/kessoku_linux_amd64_v1/kessoku --version
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: kessoku-binaries
+          path: dist/
+          retention-days: 30
+
+  validate-skills:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up mise
+        uses: jdx/mise-action@v5
+
+      - name: Validate kessoku-di skill
+        run: mise run validate-skills
+
+  api-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up mise
+        uses: jdx/mise-action@v5
+
+      - name: Check API compatibility
+        run: |
+          # Run API compatibility check and capture output
+          if OUTPUT=$(mise run apicompat 2>&1); then
+            echo "No breaking API changes detected"
+          else
+            echo "$OUTPUT"
+            
+            if [ -n "${{ github.event.pull_request.number }}" ]; then
+              # Comment on PR with the results (or update existing comment)
+              gh pr comment ${{ github.event.pull_request.number }} --edit-last --create-if-none --body "## ⚠️ API Compatibility Check Failed
+            
+            Breaking changes detected in the public API:
+            
+            \`\`\`
+            $OUTPUT
+            \`\`\`
+            
+            Please review these changes and consider:
+            - Whether these breaking changes are intentional
+            - Updating the major version if breaking changes are required
+            - Providing migration guidance for users"
+            else
+              # Output to job summary for non-PR events
+              {
+                echo "## ⚠️ API Compatibility Check Failed"
+                echo ""
+                echo "Breaking changes detected in the public API:"
+                echo ""
+                echo "\`\`\`"
+                echo "$OUTPUT"
+                echo "\`\`\`"
+                echo ""
+                echo "Please review these changes and consider:"
+                echo "- Whether these breaking changes are intentional"
+                echo "- Updating the major version if breaking changes are required"
+                echo "- Providing migration guidance for users"
+              } >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

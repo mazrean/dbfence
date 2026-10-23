@@ -1,0 +1,8 @@
+name: dbfence
+version: 0.1.0
+
+dependencies:
+  apm:
+    - mazrean/apm-plackage/common
+    - mazrean/apm-plackage/go
+    - mazrean/apm-plackage/goreleaser

@@ -1,0 +1,7 @@
+
+# APM dependencies
+apm_modules/
+.mcp.json
+
+# Claude
+.claude/
