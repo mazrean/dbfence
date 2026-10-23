@@ -13,15 +13,15 @@ func TestLoadSensitiveValues(t *testing.T) {
 	cfg, err := load(t, `
 connection {
   engine = "postgres"
-  dsn    = "${env("DSN")}?sslmode=disable"
+  dsn    = "${secretenv("DSN")}?sslmode=disable"
 }
 role "owner" {
-  name = lower(env("PW"))
+  name = lower(secretenv("PW"))
 }
 user "app" {
-  password         = env("PW")
+  password         = secretenv("PW")
   member_of        = [role.owner.name]
-  connection_limit = length([env("PW"), "x"])
+  connection_limit = length([secretenv("PW"), "x"])
 }
 database "app" {
   owner = role.owner.name
@@ -29,7 +29,7 @@ database "app" {
 grant {
   role       = user.app.name
   database   = database.app.name
-  privileges = [upper("connect"), env("PRIV", "TEMPORARY")]
+  privileges = [upper("connect"), secretenv("PRIV", "TEMPORARY")]
 }
 `)
 	if err != nil {
@@ -41,7 +41,7 @@ grant {
 		t.Errorf("decoded %+v / %+v", cfg.DSN, d)
 	}
 
-	_, err = load(t, pgConn+"user \"app\" {\n  connection_limit = tonumber(env(\"PW\"))\n}\n")
+	_, err = load(t, pgConn+"user \"app\" {\n  connection_limit = tonumber(secretenv(\"PW\"))\n}\n")
 	if err == nil || !strings.Contains(err.Error(), "the arguments include a secret value") || strings.Contains(err.Error(), "secret\"") {
 		t.Errorf("err = %v, want the secret hidden", err)
 	}

@@ -60,6 +60,10 @@ func TestFunctions(t *testing.T) {
 		{"env empty is set", `env("EMPTY", "d")`, cty.StringVal(""), ""},
 		{"env default", `env("UNSET", "d")`, cty.StringVal("d"), ""},
 		{"env unset", `env("UNSET")`, cty.NilVal, `"UNSET" is not set`},
+		{"secretenv set", `secretenv("SET")`, cty.StringVal("value"), ""},
+		{"secretenv default", `secretenv("UNSET", "d")`, cty.StringVal("d"), ""},
+		{"secretenv unset", `secretenv("UNSET")`, cty.NilVal, `"UNSET" is not set`},
+		{"secretenv two defaults", `secretenv("UNSET", "a", "b")`, cty.NilVal, "secretenv accepts at most one default"},
 		{"gcp latest", `gcp_secretmanager("projects/p/secrets/s")`, cty.StringVal("payload:projects/p/secrets/s/versions/latest"), ""},
 		{"gcp version", `gcp_secretmanager("projects/p/secrets/s", "3")`, cty.StringVal("payload:projects/p/secrets/s/versions/3"), ""},
 		{"gcp full name", `gcp_secretmanager("projects/p/secrets/s/versions/2")`, cty.StringVal("payload:projects/p/secrets/s/versions/2"), ""},
@@ -131,9 +135,9 @@ func TestFunctionErrorsDoNotLeakValues(t *testing.T) {
 		name string
 		expr string
 	}{
-		{"tonumber", `tonumber(env("SECRET"))`},
-		{"jsondecode first char", `jsondecode(env("SECRET"))`},
-		{"jsondecode inner", `jsondecode("{\"a\": ${env("SECRET")}}")`},
+		{"tonumber", `tonumber(secretenv("SECRET"))`},
+		{"jsondecode first char", `jsondecode(secretenv("SECRET"))`},
+		{"jsondecode inner", `jsondecode("{\"a\": ${secretenv("SECRET")}}")`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -258,17 +262,19 @@ func TestSensitiveMarks(t *testing.T) {
 		sensitive bool
 	}{
 		{name: "literal", expr: `"x"`},
-		{name: "env", expr: `env("SET")`, sensitive: true},
-		{name: "env default", expr: `env("UNSET", "d")`, sensitive: true},
+		{name: "env is not a secret", expr: `env("SET")`},
+		{name: "secretenv", expr: `secretenv("SET")`, sensitive: true},
+		{name: "secretenv default", expr: `secretenv("UNSET", "d")`, sensitive: true},
 		{name: "gcp", expr: `gcp_secretmanager("projects/p/secrets/s")`, sensitive: true},
-		{name: "through a function", expr: `upper(env("SET"))`, sensitive: true},
-		{name: "through a template", expr: `"pre-${env("SET")}"`, sensitive: true},
-		{name: "through jsondecode and attribute access", expr: `jsondecode("{\"a\": \"${env("SET")}\"}").a`, sensitive: true},
-		{name: "through a variadic function", expr: `format("%s:%s", "u", env("SET"))`, sensitive: true},
+		{name: "through a function", expr: `upper(secretenv("SET"))`, sensitive: true},
+		{name: "through a template", expr: `"pre-${secretenv("SET")}"`, sensitive: true},
+		{name: "through jsondecode and attribute access", expr: `jsondecode("{\"a\": \"${secretenv("SET")}\"}").a`, sensitive: true},
+		{name: "through a variadic function", expr: `format("%s:%s", "u", secretenv("SET"))`, sensitive: true},
 		{name: "plain function stays plain", expr: `upper("x")`},
-		{name: "error about a secret is hidden", expr: `tonumber(env("SET"))`, wantErr: secretErrorMessage, denyErr: `"value"`},
-		{name: "error in a variadic function about a secret is hidden", expr: `format("%d", env("SET"))`, wantErr: secretErrorMessage, denyErr: `"value"`},
+		{name: "error about a secret is hidden", expr: `tonumber(secretenv("SET"))`, wantErr: secretErrorMessage, denyErr: `"value"`},
+		{name: "error in a variadic function about a secret is hidden", expr: `format("%d", secretenv("SET"))`, wantErr: secretErrorMessage, denyErr: `"value"`},
 		{name: "error about a plain value is detailed", expr: `tonumber("value")`, wantErr: `cannot convert "value" to number`},
+		{name: "error about env is detailed", expr: `tonumber(env("SET"))`, wantErr: `cannot convert "value" to number`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

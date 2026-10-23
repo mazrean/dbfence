@@ -107,11 +107,13 @@ func onceClient[T any](f func(context.Context) (T, error)) func(context.Context)
 }
 
 // Functions returns the function table including the cty stdlib. Results
-// of the secret sources are marked Sensitive, and no function reports
-// details of an error about a Sensitive argument.
+// of the secret sources (secretenv and the secret stores) are marked
+// Sensitive, and no function reports details of an error about a
+// Sensitive argument. env is not a secret source.
 func (r *Registry) Functions() map[string]function.Function {
 	fns := map[string]function.Function{
-		"env":                markSensitive(r.envFunc()),
+		"env":                r.envFunc("env", "Returns the value of an environment variable, or the default when unset."),
+		"secretenv":          markSensitive(r.envFunc("secretenv", "Returns the value of an environment variable that holds a secret, or the default when unset.")),
 		"aws_secretsmanager": markSensitive(r.awsFunc()),
 		"gcp_secretmanager":  markSensitive(r.gcpFunc()),
 		"tfstate":            markSensitive(r.tfstateFunc()),
@@ -215,15 +217,15 @@ func optionalString(args []cty.Value) (string, bool) {
 	return args[0].AsString(), true
 }
 
-func (r *Registry) envFunc() function.Function {
+func (r *Registry) envFunc(fnName, description string) function.Function {
 	return function.New(&function.Spec{
-		Description: "Returns the value of an environment variable, or the default when unset.",
+		Description: description,
 		Params:      []function.Parameter{{Name: "name", Type: cty.String}},
 		VarParam:    &function.Parameter{Name: "default", Type: cty.String, AllowNull: true},
 		Type:        function.StaticReturnType(cty.String),
 		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
 			if len(args) > maxArgs {
-				return cty.NilVal, function.NewArgErrorf(maxArgs, "env accepts at most one default")
+				return cty.NilVal, function.NewArgErrorf(maxArgs, "%s accepts at most one default", fnName)
 			}
 			name := args[0].AsString()
 			if v, ok := r.lookup(name); ok {
