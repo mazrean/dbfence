@@ -18,6 +18,7 @@ import (
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/plan"
+	"github.com/mazrean/dbfence/internal/policy"
 )
 
 // Driver inspects a server, renders SQL for it, and executes statements.
@@ -88,6 +89,10 @@ type Options struct {
 // ErrAborted is returned when apply is not confirmed.
 var ErrAborted = errors.New("apply cancelled")
 
+// ErrUnsafePlan is returned when the plan fails the independent safety
+// check (see policy.Verify). It means a bug in dbfence.
+var ErrUnsafePlan = errors.New("internal safety check failed")
+
 // Validate loads the configuration, evaluating every function.
 func (a *App) Validate(_ context.Context, o Options) error {
 	cfg, err := config.Load(o.Path, a.funcs.Functions())
@@ -107,12 +112,18 @@ func (a *App) Plan(ctx context.Context, o Options) (*plan.Plan, error) {
 		return nil, err
 	}
 	defer closeQuietly(drv)
-	return p, a.render(p, o)
+	if err = a.render(p, o); err != nil {
+		return nil, err
+	}
+	if err = p.verdict(); err != nil {
+		return nil, err
+	}
+	return p.Plan, nil
 }
 
 // render prints the plan to stdout and its warnings to stderr as well, so
 // they stay visible when stdout is redirected.
-func (a *App) render(p *plan.Plan, o Options) error {
+func (a *App) render(p *checkedPlan, o Options) error {
 	if err := p.Render(a.io.Out, o.ShowSecrets); err != nil {
 		return err
 	}
@@ -129,6 +140,9 @@ func (a *App) Apply(ctx context.Context, o Options) error {
 	if err = a.render(p, o); err != nil {
 		return err
 	}
+	if err = p.verdict(); err != nil {
+		return err
+	}
 	if p.Empty() {
 		return nil
 	}
@@ -137,7 +151,7 @@ func (a *App) Apply(ctx context.Context, o Options) error {
 			return err
 		}
 	}
-	if err = apply.Run(ctx, drv, p, a.io.Out, o.ShowSecrets); err != nil {
+	if err = apply.Run(ctx, drv, p.Plan, a.io.Out, o.ShowSecrets); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(a.io.Out, "Applied %s.\n", plan.Count(len(p.Statements()), "statement"))
@@ -205,7 +219,27 @@ func isTerminal(r io.Reader) bool {
 
 func closeQuietly(c io.Closer) { _ = c.Close() }
 
-func (a *App) compute(ctx context.Context, o Options) (*plan.Plan, Driver, error) {
+// checkedPlan is a plan with the result of the safety check run on it.
+type checkedPlan struct {
+	*plan.Plan
+	violations []policy.Violation
+}
+
+// verdict returns ErrUnsafePlan listing the violations, or nil.
+func (p *checkedPlan) verdict() error {
+	if len(p.violations) == 0 {
+		return nil
+	}
+	msgs := make([]string, len(p.violations))
+	for i, v := range p.violations {
+		msgs[i] = v.String()
+	}
+	return fmt.Errorf("%w: %s (this is a bug in dbfence; please report it)", ErrUnsafePlan, strings.Join(msgs, "; "))
+}
+
+// compute inspects the server, diffs it against the configuration and
+// runs the independent safety check on the plan.
+func (a *App) compute(ctx context.Context, o Options) (*checkedPlan, Driver, error) {
 	cfg, err := config.Load(o.Path, a.funcs.Functions())
 	if err != nil {
 		return nil, nil, err
@@ -224,5 +258,6 @@ func (a *App) compute(ctx context.Context, o Options) (*plan.Plan, Driver, error
 		_ = drv.Close()
 		return nil, nil, err
 	}
-	return p, drv, nil
+	v := policy.Verify(p, cur, cfg.Desired, policy.Options{System: drv, Prune: o.Prune})
+	return &checkedPlan{Plan: p, violations: v}, drv, nil
 }
