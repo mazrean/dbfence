@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -31,11 +33,15 @@ type Driver struct {
 	mu    sync.Mutex
 }
 
+// defaultConnectTimeout bounds connection attempts when the DSN does not
+// set connect_timeout.
+const defaultConnectTimeout = 10 * time.Second
+
 // Open connects to dsn.
 func Open(ctx context.Context, dsn string) (*Driver, error) {
-	cfg, err := pgx.ParseConfig(dsn)
+	cfg, err := parseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("parse postgres dsn: %w", err)
+		return nil, err
 	}
 	db := stdlib.OpenDB(*cfg)
 	if err := db.PingContext(ctx); err != nil {
@@ -43,6 +49,47 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
 	return &Driver{cfg: cfg, db: db, conns: map[string]*sql.DB{}}, nil
+}
+
+// parseConfig parses dsn and applies the session settings dbfence relies
+// on. Per-database connections copy the result.
+func parseConfig(dsn string) (*pgx.ConnConfig, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, parseError(err)
+	}
+	if cfg.ConnectTimeout == 0 {
+		cfg.ConnectTimeout = defaultConnectTimeout
+	}
+	// Literals are rendered for standard_conforming_strings = on; a startup
+	// parameter overrides role and database defaults.
+	cfg.RuntimeParams["standard_conforming_strings"] = "on"
+	return cfg, nil
+}
+
+// parseError describes a DSN parse failure without the DSN, which may
+// contain a password that pgx cannot reliably mask.
+func parseError(err error) error {
+	const prefix = "parse postgres dsn: invalid connection string"
+	var pce *pgconn.ParseConfigError
+	if !errors.As(err, &pce) {
+		return errors.New(prefix)
+	}
+	// Error renders "cannot parse `<dsn>`: <msg>[ (<cause>)]"; with the DSN
+	// blanked only the static message and the cause remain.
+	bare := *pce
+	bare.ConnString = ""
+	msg := strings.TrimPrefix(bare.Error(), "cannot parse ``: ")
+	cause := errors.Unwrap(pce)
+	if cause != nil {
+		msg = strings.TrimSuffix(msg, " ("+cause.Error()+")")
+	}
+	// URL errors quote the whole URL; only their inner error is safe.
+	// Other causes (keyword/value parsing) may quote parts of the input.
+	if urlErr := (*url.Error)(nil); errors.As(cause, &urlErr) {
+		msg += ": " + urlErr.Err.Error()
+	}
+	return fmt.Errorf("%s: %s", prefix, msg)
 }
 
 func (d *Driver) conn(ctx context.Context, database string) (*sql.DB, error) {
@@ -73,6 +120,32 @@ func (d *Driver) Exec(ctx context.Context, database, query string) error {
 		return err
 	}
 	_, err = c.ExecContext(ctx, query)
+	return withDetail(err)
+}
+
+// detailError adds the server's DETAIL and HINT, which often name the
+// object that blocks a statement, to a PostgreSQL error.
+type detailError struct{ pg *pgconn.PgError }
+
+func (e *detailError) Error() string {
+	var sb strings.Builder
+	sb.WriteString(e.pg.Error())
+	if e.pg.Detail != "" {
+		sb.WriteString("\nDETAIL: " + e.pg.Detail)
+	}
+	if e.pg.Hint != "" {
+		sb.WriteString("\nHINT: " + e.pg.Hint)
+	}
+	return sb.String()
+}
+
+func (e *detailError) Unwrap() error { return e.pg }
+
+func withDetail(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Detail != "" || pgErr.Hint != "") {
+		return &detailError{pg: pgErr}
+	}
 	return err
 }
 
@@ -261,8 +334,16 @@ type Dialect struct{}
 // Ident quotes an identifier.
 func Ident(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
-// Literal quotes a string literal (standard_conforming_strings = on).
-func Literal(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+// Literal quotes a string literal. A string containing a backslash is
+// rendered as an escape string, so it means the same whatever the value
+// of standard_conforming_strings.
+func Literal(s string) string {
+	q := "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	if !strings.Contains(s, `\`) {
+		return q
+	}
+	return "E" + strings.ReplaceAll(q, `\`, `\\`)
+}
 
 // IsSystemRole implements diff.Dialect.
 func (Dialect) IsSystemRole(id model.RoleID) bool {
