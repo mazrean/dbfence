@@ -18,6 +18,12 @@ func TestParseDSN(t *testing.T) {
 		{dsn: "root:pw@tcp(127.0.0.1:3306)/?timeout=3s", wantTimeout: 3 * time.Second},
 		{dsn: "mysql://root:pw@127.0.0.1:3306/db", wantErr: "user:password@tcp(host:3306)/"},
 		{dsn: "root:pw@127.0.0.1:3306/db", wantErr: "user:password@tcp(host:3306)/"},
+		{dsn: "root:p/w@tcp(127.0.0.1:3306)/", wantTimeout: defaultTimeout},
+		// The driver quotes parts of the DSN in its errors.
+		{dsn: "admin:pwS3cret/", wantErr: "invalid DSN"},
+		{dsn: "admin:pwS3/cret@tcp(db:3306)", wantErr: "invalid DSN"},
+		{dsn: "admin:S3/cr%zzpw@tcp(db:3306)", wantErr: "invalid DSN"},
+		{dsn: "admin:pwS3/cr?tls=pw@tcp(db:3306)", wantErr: "invalid DSN"},
 	}
 	for _, tt := range tests {
 		cfg, err := parseDSN(tt.dsn)

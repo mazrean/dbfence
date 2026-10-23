@@ -90,7 +90,9 @@ func parseDSN(dsn string) (*gomysql.Config, error) {
 	}
 	cfg, err := gomysql.ParseDSN(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("parse mysql dsn (%s): %w", hint, err)
+		// The driver's errors quote parts of the DSN, which can be parts
+		// of the password, so they are not passed on.
+		return nil, errors.New("parse mysql dsn: invalid DSN; " + hint + "; a password containing '/' needs the '/' before the database name")
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultTimeout
