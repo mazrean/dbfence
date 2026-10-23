@@ -202,7 +202,19 @@ func TestWithholdQuoted(t *testing.T) {
 		{name: "truncated at the end of the text", msg: "failed near '" + long[:10], leak: []string{"SECR"}},
 		{name: "backslash-escaped value", msg: `near 'a\'b'c' x`, leak: []string{"a\\'b", "c' x"}},
 		{
-			name: "detail lines are cut separately",
+			name: "multi-line secret",
+			msg:  "Error 1064 (42000): You have an error in your SQL syntax; near 'IDENTIFIED BY 'first\nSECONDLINE' xyz' at line 1",
+			want: "Error 1064 (42000): You have an error in your SQL syntax; near <withheld>" + withheldNote,
+			leak: []string{"first", "SECONDLINE", "xyz"},
+		},
+		{
+			name: "multi-line secret over a detail line",
+			msg:  "ERROR: syntax error at or near \"'pre\nTOPSECRET'\" (SQLSTATE 42601)\nDETAIL: near 'x'",
+			want: "ERROR: syntax error at or near <withheld>" + withheldNote,
+			leak: []string{"pre", "TOPSECRET", "DETAIL"},
+		},
+		{
+			name: "quote on a detail line",
 			msg:  "ERROR: password is too short (SQLSTATE 22023)\nDETAIL: near 'hunter2'",
 			want: "ERROR: password is too short (SQLSTATE 22023)\nDETAIL: near <withheld>" + withheldNote,
 			leak: []string{"hunter2"},

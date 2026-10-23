@@ -216,7 +216,7 @@ dbfence compares a declared password with the stored verifier without changing i
 
 Passwords are sent in plaintext (`PASSWORD '...'`, `IDENTIFIED BY '...'`), so that the server hashes them with its own settings (`password_encryption`, `scram_iterations`) and password policies apply (`passwordcheck` / `credcheck`, MySQL `validate_password`). As a consequence, PostgreSQL statement logging (`log_statement = ddl` or `all`, and `log_min_error_statement` for failed statements) records the password; MySQL rewrites passwords in its logs. Disable such logging for the dbfence session or role if that matters.
 
-When a statement with a password fails, the server's message is shown up to its first quote on each line, because servers quote parts of the statement in their messages. Policy rejections such as `Your password does not satisfy the current policy requirements` contain no quotes and are shown in full. `--show-secrets` shows the whole message.
+When a statement with a password fails, the server's message is shown up to its first quote, and nothing after it (later lines included), because servers quote parts of the statement in their messages. Policy rejections such as `Your password does not satisfy the current policy requirements` contain no quotes and are shown in full. `--show-secrets` shows the whole message.
 
 If the verifier can't be read (for example on RDS or Cloud SQL, where the admin is not a superuser), plan prints one warning listing the roles whose passwords are not compared. `--force-password` sets the password anyway.
 

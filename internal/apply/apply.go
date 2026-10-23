@@ -101,27 +101,20 @@ func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int,
 // withheldNote ends a message whose quoted parts were withheld.
 const withheldNote = " [the rest of the message is withheld because the statement contains a password; rerun with --show-secrets to see it]"
 
-// withholdQuoted cuts each line of a server message at its first single or
-// double quote. Servers quote parts of the failed statement in their
-// messages (MySQL: near '...'; PostgreSQL: at or near "..."), escaped,
-// unescaped or truncated in ways that matching the secret against the
-// text cannot follow. Cutting at the first quote does not depend on the
-// secret or its quoting, so nothing quoted can get through, while
+// withholdQuoted cuts a server message at its first single or double
+// quote and drops the rest, later lines included. Servers quote parts of
+// the failed statement in their messages (MySQL: near '...'; PostgreSQL:
+// at or near "..."), escaped, unescaped or truncated in ways that
+// matching the secret against the text cannot follow, and a quoted
+// secret may span lines. Cutting at the first quote does not depend on
+// the secret or its quoting, so nothing quoted can get through, while
 // messages without quotes, such as password policy rejections, are kept.
 func withholdQuoted(msg string) string {
-	lines := strings.Split(msg, "\n")
-	withheld := false
-	for i, l := range lines {
-		if j := strings.IndexAny(l, `'"`); j >= 0 {
-			lines[i] = l[:j] + "<withheld>"
-			withheld = true
-		}
+	j := strings.IndexAny(msg, `'"`)
+	if j < 0 {
+		return msg
 	}
-	out := strings.Join(lines, "\n")
-	if withheld {
-		out += withheldNote
-	}
-	return out
+	return msg[:j] + "<withheld>" + withheldNote
 }
 
 // isCancellation reports whether err only says that ctx was cancelled or
