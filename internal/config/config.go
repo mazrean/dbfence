@@ -794,7 +794,7 @@ func decodeGrantObject(b *hcl.Block, attrs hcl.Attributes, blk grantBlock, engin
 }
 
 // maxMySQLDatabasePattern is the length of mysql.db.Db.
-const maxMySQLDatabasePattern = 64
+const maxMySQLDatabasePattern = model.MySQLMaxDatabaseChars
 
 func decodeDatabasePattern(b *hcl.Block, attrs hcl.Attributes, blk grantBlock, engine model.Engine) (model.Object, hcl.Diagnostics) {
 	rng := attrRange(attrs, "database_pattern", b.DefRange)
@@ -915,12 +915,13 @@ func checkEngineOnly(r resource, engine model.Engine, pgOnly, mysqlOnly map[stri
 	return diags
 }
 
-// Identifier length limits.
+// Identifier length limits, shared with the check of names read from
+// the server (model.CheckName).
 const (
-	pgMaxIdentBytes   = 63 // NAMEDATALEN - 1
-	mysqlMaxUserChars = 32
-	mysqlMaxDBChars   = 64
-	mysqlMaxHostChars = 255
+	pgMaxIdentBytes   = model.PostgresMaxIdentBytes
+	mysqlMaxUserChars = model.MySQLMaxUserChars
+	mysqlMaxDBChars   = model.MySQLMaxDatabaseChars
+	mysqlMaxHostChars = model.MySQLMaxHostChars
 )
 
 // checkName checks the engine's identifier limits.
