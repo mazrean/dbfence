@@ -266,3 +266,5 @@ mise run test:integration   # also starts MySQL 8.4 / PostgreSQL 17 containers w
 mise run lint               # go tool lint ./...
 mise run generate           # regenerate kessoku injectors
 ```
+
+SQL statements are built only from typed fragments (`internal/plan`): SQL text is a constant `plan.Keyword`, and names, literals, privilege and charset words and numbers enter only through the engine Dialect, which quotes, escapes or validates them. A runtime string passed as SQL does not compile, and the `sqlfragment` lint rule rejects converting a non-constant to `plan.Keyword` or building quoted fragments outside `internal/driver`. Each planned statement also records what it does (`Kind`: create role, grant, drop database, ...) and its target object, plus what a role change sets (login disabled, account lock, superuser removed, connection limit), so plans can be checked without parsing SQL.

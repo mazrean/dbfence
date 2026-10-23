@@ -46,6 +46,7 @@ tools/lint/          repo linter module (+ outputsink analyzer)
 
 - Wrap errors with `fmt.Errorf("context: %w", err)`; never include secret values in errors or logs.
 - Identifiers are quoted and literals escaped only through the engine Dialect; passwords go into SQL only as `plan.Secret`.
+- SQL is built only from `plan` fragments: SQL text is a constant `plan.Keyword`, runtime values enter only as `plan.QuotedIdent`/`EscapedLiteral`/`NewToken`/`Number` made by Dialect code under `internal/driver` (lint `sqlfragment`); Dialect statements use `plan.New` with their `Kind` and `Target`.
 - One `plan.Statement` is exactly one SQL command, sent alone (`;` never chains statements); to run as another role set `AsRole`, never prepend `SET ROLE`.
 - `diff` and `plan` do no I/O; engine-specific code only in `internal/driver/<engine>` and `internal/password`.
 - All output goes through the redacting `secret.Writer` streams wired in `internal/di/di.go` (`app.IO`); never use `os.Stdout`/`os.Stderr`/`fmt.Print*`/`print` elsewhere (lint `outputsink`), and `secret.Register` every new secret source.
