@@ -58,6 +58,64 @@ func TestComputeOrder(t *testing.T) {
 	}
 }
 
+// TestComputeTemplateSchema checks that the public schema of a database
+// created by the plan is not created again.
+func TestComputeTemplateSchema(t *testing.T) {
+	t.Parallel()
+	public := model.Object{Type: model.ObjectSchema, Database: "app", Schema: "public"}
+	tests := []struct {
+		name   string
+		schema model.Schema
+		want   []string
+	}{
+		{
+			name:   "owner declared",
+			schema: model.Schema{Database: "app", Name: "public", Owner: "o"},
+			want: []string{
+				`CREATE ROLE "o" WITH NOLOGIN`,
+				`CREATE ROLE "r" WITH NOLOGIN`,
+				`CREATE DATABASE "app"`,
+				`app: ALTER SCHEMA "public" OWNER TO "o"`,
+				`app: GRANT USAGE ON SCHEMA "public" TO "r"`,
+			},
+		},
+		{
+			name:   "owner not declared",
+			schema: model.Schema{Database: "app", Name: "public"},
+			want: []string{
+				`CREATE ROLE "o" WITH NOLOGIN`,
+				`CREATE ROLE "r" WITH NOLOGIN`,
+				`CREATE DATABASE "app"`,
+				`app: GRANT USAGE ON SCHEMA "public" TO "r"`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := &model.Desired{
+				Engine:     model.EnginePostgres,
+				Roles:      []model.Role{{ID: pgID("o"), Login: new(false)}, {ID: pgID("r"), Login: new(false)}},
+				Databases:  []model.Database{{Name: "app"}},
+				Schemas:    []model.Schema{tt.schema},
+				Privileges: []model.Privilege{{Grantee: pgID("r"), Object: public, Name: "USAGE"}},
+			}
+			cur := &model.Current{
+				CurrentUser: pgID("admin"),
+				Roles:       []model.RoleState{{ID: pgID("admin"), Login: true}},
+				Databases:   []model.Database{{Name: "postgres", Owner: "admin"}},
+			}
+			p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p)); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+		})
+	}
+}
+
 // TestComputePruneProtection checks objects that --prune must keep.
 func TestComputePruneProtection(t *testing.T) {
 	t.Parallel()

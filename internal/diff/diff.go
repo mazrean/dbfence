@@ -268,6 +268,13 @@ func (df *differ) schemas() {
 	for _, s := range df.desired.Schemas {
 		res := fmt.Sprintf("schema %q in database %q", s.Name, s.Database)
 		i := slices.IndexFunc(df.current.Schemas, func(c model.Schema) bool { return c.Database == s.Database && c.Name == s.Name })
+		if i < 0 && !slices.Contains(df.current.InspectedDatabases, s.Database) && df.d.IsSystemSchema(s.Name) {
+			// The database is created by this plan (or was not inspected)
+			// and already contains the system schemas copied from its
+			// template, such as public: only its owner is converged.
+			df.add(phaseSchema, plan.ActionUpdate, res, df.d.AlterSchema(s, model.Schema{Database: s.Database, Name: s.Name}))
+			continue
+		}
 		if i < 0 {
 			df.add(phaseSchema, plan.ActionCreate, res, df.d.CreateSchema(s))
 			continue
