@@ -12,7 +12,7 @@ import (
 
 type recorder struct {
 	err    error
-	cancel context.CancelFunc
+	cancel func()
 	ran    []string
 	failAt int
 }
@@ -62,12 +62,14 @@ func TestRun(t *testing.T) {
 func TestRunErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		err       error
-		wantIs    error
-		name      string
-		want      []string
-		failAt    int
-		cancelCtx bool
+		err        error
+		wantIs     error
+		cause      error
+		name       string
+		wantSuffix string
+		want       []string
+		failAt     int
+		cancelCtx  bool
 	}{
 		{
 			name: "server error on the connection", failAt: 1,
@@ -82,18 +84,28 @@ func TestRunErrors(t *testing.T) {
 			want: []string{`interrupted during statement 2/2 (on database "app"), whose outcome is unknown (1 statement confirmed applied;`},
 		},
 		{
-			name: "connection lost", failAt: 1, err: driver.ErrBadConn, wantIs: driver.ErrBadConn,
+			name: "interrupted by a signal names it once", failAt: 1, cancelCtx: true, err: context.Canceled,
+			cause:      errors.New("interrupt signal received"),
+			wantSuffix: "run plan to see the remaining changes): interrupt signal received",
+		},
+		{
+			name: "interrupted keeps a driver error that says more", failAt: 1, cancelCtx: true, err: errors.New("read tcp: use of closed connection"),
+			wantIs:     context.Canceled,
+			wantSuffix: "run plan to see the remaining changes): read tcp: use of closed connection: context canceled",
+		},
+		{
+			name: "connection lost", failAt: 1, wantSuffix: "run plan to see the remaining changes): driver: bad connection", err: driver.ErrBadConn, wantIs: driver.ErrBadConn,
 			want: []string{"interrupted during statement 1/2, whose outcome is unknown (0 statements confirmed applied;"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
 			r := &recorder{failAt: tt.failAt, err: tt.err}
 			if tt.cancelCtx {
-				r.cancel = cancel
+				r.cancel = func() { cancel(tt.cause) }
 			}
 			var out strings.Builder
 			err := Run(ctx, r, testPlan(), &out, false)
@@ -107,6 +119,9 @@ func TestRunErrors(t *testing.T) {
 				if !strings.Contains(err.Error(), w) {
 					t.Errorf("err = %v, want substring %q", err, w)
 				}
+			}
+			if tt.wantSuffix != "" && !strings.HasSuffix(err.Error(), tt.wantSuffix) {
+				t.Errorf("err = %v, want suffix %q", err, tt.wantSuffix)
 			}
 			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
 				t.Errorf("err = %v, want errors.Is %v", err, tt.wantIs)
