@@ -363,11 +363,13 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 	dba := model.RoleID{Name: "dba", Host: "%"}
 	role := func(n string) model.RoleID { return model.RoleID{Name: n, Host: "%"} }
 	tests := []struct {
-		opts     map[model.RoleID]model.MembershipOptions
-		name     string
-		memberOf []model.RoleID
-		want     []string
-		current  model.RoleState
+		opts       map[model.RoleID]model.MembershipOptions
+		name       string
+		memberOf   []model.RoleID
+		want       []string
+		warns      []string
+		current    model.RoleState
+		unreadable model.Unreadable
 	}{
 		{
 			name:     "empty member_of keeps every default role",
@@ -397,6 +399,36 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 				`SET DEFAULT ROLE 'dbarole'@'%', 'extra'@'%' TO 'dba'@'%'`,
 			},
 		},
+		{
+			name:       "unknown memberships and default roles are not replaced",
+			memberOf:   []model.RoleID{role("extra")},
+			current:    model.RoleState{ID: dba, Login: true, DefaultRolesUnknown: true},
+			unreadable: model.Unreadable{Memberships: true},
+			want:       []string{`GRANT 'extra'@'%' TO 'dba'@'%'`},
+			warns:      []string{`not setting default roles of the connected user "dba"@"%": its current default roles are unknown and could be narrowed`},
+		},
+		{
+			name:       "unknown memberships keep the known default roles",
+			memberOf:   []model.RoleID{role("extra")},
+			current:    model.RoleState{ID: dba, Login: true, DefaultRoles: []model.RoleID{role("dbarole")}},
+			unreadable: model.Unreadable{Memberships: true},
+			want: []string{
+				`GRANT 'extra'@'%' TO 'dba'@'%'`,
+				`SET DEFAULT ROLE 'dbarole'@'%', 'extra'@'%' TO 'dba'@'%'`,
+			},
+		},
+		{
+			name:       "unreadable role list is not replaced",
+			memberOf:   []model.RoleID{role("extra")},
+			unreadable: model.Unreadable{Roles: true, RoleAttributes: true},
+			want: []string{
+				`CREATE USER IF NOT EXISTS 'dba'@'%'`,
+				`CREATE USER IF NOT EXISTS 'dbarole'@'%'`,
+				`CREATE USER IF NOT EXISTS 'extra'@'%'`,
+				`GRANT 'extra'@'%' TO 'dba'@'%'`,
+			},
+			warns: []string{`not setting default roles of the connected user "dba"@"%": its current default roles are unknown and could be narrowed`},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -405,13 +437,25 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 				{ID: dba, Login: new(true), MemberOf: tt.memberOf, MemberOptions: tt.opts},
 				{ID: role("dbarole")}, {ID: role("extra")},
 			}}
-			cur := &model.Current{CurrentUser: dba, Roles: []model.RoleState{tt.current, {ID: role("dbarole")}, {ID: role("extra")}}}
+			cur := &model.Current{CurrentUser: dba, Unreadable: tt.unreadable}
+			if !tt.unreadable.Roles {
+				cur.Roles = []model.RoleState{tt.current, {ID: role("dbarole")}, {ID: role("extra")}}
+			}
 			p, err := diff.Compute(desired, cur, mysql.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
 				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			var warns []string
+			for _, w := range p.Warnings {
+				if strings.HasPrefix(w, "not setting default roles") {
+					warns = append(warns, w)
+				}
+			}
+			if d := cmp.Diff(tt.warns, warns, cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
 			}
 		})
 	}

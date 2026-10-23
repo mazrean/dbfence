@@ -250,7 +250,8 @@ func (df *differ) roles() {
 	u := df.current.Unreadable
 	for _, r := range df.desired.Roles {
 		cur, exists := df.currentRole(r.ID)
-		self := exists && r.ID == df.current.CurrentUser
+		// The connected user exists even when the role list is unreadable.
+		self := r.ID == df.current.CurrentUser
 		if self {
 			r = df.protectCurrentUser(r, cur)
 		}
@@ -300,6 +301,12 @@ func (df *differ) roles() {
 		}
 		if s, ok := df.d.(DefaultRoleSetter); ok {
 			if self {
+				// Without its current memberships and default roles, SET
+				// DEFAULT ROLE could deactivate roles dbfence relies on.
+				if (u.Roles && !exists) || (u.Memberships && cur.DefaultRolesUnknown) {
+					df.warn("not setting default roles of the connected user %q: its current default roles are unknown and could be narrowed", df.show(r.ID))
+					continue
+				}
 				r = keepDefaultRoles(r, cur)
 			}
 			df.add(phaseMembership, plan.ActionUpdate, "default roles of "+df.roleResource(r.ID), s.SetDefaultRoles(r, cur))
