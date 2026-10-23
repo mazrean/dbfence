@@ -78,7 +78,7 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	if name, host, ok := strings.CutLast(user, "@"); ok {
 		cur.CurrentUser = model.RoleID{Name: name, Host: host}
 	}
-	for _, step := range []func(context.Context, *model.Current) error{d.inspectDatabases, d.inspectUsers, d.inspectRoleEdges} {
+	for _, step := range []func(context.Context, *model.Current) error{d.inspectDatabases, d.inspectUsers, d.inspectRoleEdges, d.inspectDefaultRoles} {
 		if err := step(ctx, cur); err != nil {
 			return nil, err
 		}
@@ -204,6 +204,30 @@ func (d *Driver) inspectRoleEdges(ctx context.Context, cur *model.Current) error
 			cur.Roles[i].MemberOf = nil
 		}
 		cur.Unreadable.Memberships = true
+		return nil
+	}
+	return err
+}
+
+func (d *Driver) inspectDefaultRoles(ctx context.Context, cur *model.Current) error {
+	err := query(ctx, d.db, `SELECT DEFAULT_ROLE_USER, DEFAULT_ROLE_HOST, USER, HOST FROM mysql.default_roles`,
+		func(rows *sql.Rows) error {
+			var role, member model.RoleID
+			if err := rows.Scan(&role.Name, &role.Host, &member.Name, &member.Host); err != nil {
+				return err
+			}
+			for i := range cur.Roles {
+				if cur.Roles[i].ID == member {
+					cur.Roles[i].DefaultRoles = append(cur.Roles[i].DefaultRoles, role)
+				}
+			}
+			return nil
+		})
+	if isAccessDenied(err) {
+		for i := range cur.Roles {
+			cur.Roles[i].DefaultRoles = nil
+			cur.Roles[i].DefaultRolesUnknown = true
+		}
 		return nil
 	}
 	return err
@@ -564,12 +588,30 @@ func (d Dialect) DropRole(id model.RoleID, _ []string) []plan.Statement {
 	return []plan.Statement{plan.SQL("", "DROP USER "+d.Account(id))}
 }
 
-// GrantMembership implements diff.Dialect. Granted roles are activated by default.
+// GrantMembership implements diff.Dialect. SetDefaultRoles activates the role.
 func (d Dialect) GrantMembership(member, role model.RoleID) []plan.Statement {
-	return []plan.Statement{
-		plan.SQL("", "GRANT "+d.Account(role)+" TO "+d.Account(member)),
-		plan.SQL("", "SET DEFAULT ROLE ALL TO "+d.Account(member)),
+	return []plan.Statement{plan.SQL("", "GRANT "+d.Account(role)+" TO "+d.Account(member))}
+}
+
+// SetDefaultRoles implements diff.DefaultRoleSetter. Declared memberships
+// are the default roles, so they are active without SET ROLE.
+func (d Dialect) SetDefaultRoles(r model.Role, cur model.RoleState) []plan.Statement {
+	want := model.SortRoleIDs(slices.Clone(r.MemberOf))
+	have := model.SortRoleIDs(slices.Clone(cur.DefaultRoles))
+	if !cur.DefaultRolesUnknown && slices.Equal(want, have) {
+		return nil
 	}
+	if len(want) == 0 {
+		if cur.DefaultRolesUnknown {
+			return nil
+		}
+		return []plan.Statement{plan.SQL("", "SET DEFAULT ROLE NONE TO "+d.Account(r.ID))}
+	}
+	roles := make([]string, 0, len(want))
+	for _, id := range want {
+		roles = append(roles, d.Account(id))
+	}
+	return []plan.Statement{plan.SQL("", "SET DEFAULT ROLE "+strings.Join(roles, ", ")+" TO "+d.Account(r.ID))}
 }
 
 // RevokeMembership implements diff.Dialect.

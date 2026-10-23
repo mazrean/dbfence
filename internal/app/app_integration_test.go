@@ -264,11 +264,13 @@ func TestMySQLIntegration(t *testing.T) {
 
 	h.exec("GRANT DELETE ON dbf_it_app.* TO 'dbf_it_app'@'%'")
 	h.exec("GRANT SELECT ON `dbf\\_it\\_app`.* TO 'dbf_it_ro'@'%' WITH GRANT OPTION")
+	h.exec("SET DEFAULT ROLE NONE TO 'dbf_it_app'@'%'")
 	h.exec("ALTER USER 'dbf_it_app'@'%' ACCOUNT LOCK")
 	h.exec("CREATE USER 'dbf_it_stray'@'%'")
 	h.exec("CREATE DATABASE dbf_it_legacy")
 	n, out := h.plan(app.Options{})
-	if n != 3 || !strings.Contains(out, "REVOKE GRANT OPTION ON `dbf\\_it\\_app`.*") || !strings.Contains(out, `unmanaged role "dbf_it_stray@%"`) || !strings.Contains(out, `unmanaged database "dbf_it_legacy"`) {
+	if n != 4 || !strings.Contains(out, "REVOKE GRANT OPTION ON `dbf\\_it\\_app`.*") ||
+		!strings.Contains(out, "SET DEFAULT ROLE 'dbf_it_ro'@'%' TO 'dbf_it_app'@'%'") || !strings.Contains(out, `unmanaged role "dbf_it_stray@%"`) || !strings.Contains(out, `unmanaged database "dbf_it_legacy"`) {
 		t.Fatalf("drift plan: %d\n%s", n, out)
 	}
 	h.apply(app.Options{Prune: true})

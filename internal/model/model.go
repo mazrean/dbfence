@@ -71,7 +71,9 @@ type RoleState struct {
 	// when the connected user cannot read verifiers.
 	PasswordHash     []byte
 	MemberOf         []RoleID
-	ConnectionLimit  int
+	// DefaultRoles are the roles activated at login (MySQL only).
+	DefaultRoles    []RoleID
+	ConnectionLimit int
 	CreateDB         bool
 	Replication      bool
 	BypassRLS        bool
@@ -83,6 +85,8 @@ type RoleState struct {
 	// AttributesUnknown is set when the account exists but its login,
 	// authentication plugin and password could not be read.
 	AttributesUnknown bool
+	// DefaultRolesUnknown is set when DefaultRoles could not be read.
+	DefaultRolesUnknown bool
 }
 
 // Schema is a PostgreSQL schema inside Database.
