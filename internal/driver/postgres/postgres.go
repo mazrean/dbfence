@@ -345,11 +345,14 @@ func Literal(s string) string {
 	return "E" + strings.ReplaceAll(q, `\`, `\\`)
 }
 
-// IsSystemRole implements diff.Dialect.
+// IsSystemRole implements diff.Dialect. Besides PostgreSQL's own roles it
+// covers the built-in roles of managed services: Amazon RDS / Aurora
+// (rdsadmin, rdsrepladmin, rdstopmgr, rds_*), Cloud SQL (cloudsql*),
+// Azure (azuresu, azure_*) and AlloyDB (alloydb*).
 func (Dialect) IsSystemRole(id model.RoleID) bool {
 	n := id.Name
-	return n == "postgres" || n == "rdsadmin" || n == "rdsrepladmin" ||
-		hasAnyPrefix(n, "pg_", "rds_", "cloudsql", "azure_", "alloydb")
+	return slices.Contains([]string{"postgres", "rdsadmin", "rdsrepladmin", "rdstopmgr"}, n) ||
+		hasAnyPrefix(n, "pg_", "rds_", "cloudsql", "azure", "alloydb")
 }
 
 // IsSystemDatabase implements diff.Dialect.
@@ -537,7 +540,55 @@ func (Dialect) CreateDatabase(db model.Database) []plan.Statement {
 	return []plan.Statement{plan.SQL("", q)}
 }
 
-func normEncoding(s string) string { return strings.ToUpper(strings.ReplaceAll(s, "-", "")) }
+// encodingAliases maps cleaned encoding names that PostgreSQL accepts
+// (src/common/encnames.c) to the cleaned canonical name.
+var encodingAliases = map[string]string{
+	"abc": "win1258", "alt": "win866", "iso88591": "latin1", "iso88592": "latin2",
+	"iso88593": "latin3", "iso88594": "latin4", "iso88599": "latin5", "iso885910": "latin6",
+	"iso885913": "latin7", "iso885914": "latin8", "iso885915": "latin9", "iso885916": "latin10",
+	"koi8": "koi8r", "mskanji": "sjis", "shiftjis": "sjis", "tcvn": "win1258", "tcvn5712": "win1258",
+	"unicode": "utf8", "vscii": "win1258", "win": "win1251", "win932": "sjis", "win936": "gbk",
+	"win949": "uhc", "win950": "big5", "windows932": "sjis", "windows936": "gbk",
+	"windows949": "uhc", "windows950": "big5",
+}
+
+// cleanName lower-cases s and drops non-alphanumerics, like PostgreSQL's
+// clean_encoding_name and glibc's codeset normalization.
+func cleanName(s string) string {
+	var sb strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if ('a' <= r && r <= 'z') || ('0' <= r && r <= '9') {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+func normEncoding(s string) string {
+	n := cleanName(s)
+	if a, ok := encodingAliases[n]; ok {
+		return a
+	}
+	if w, ok := strings.CutPrefix(n, "windows"); ok {
+		return "win" + w
+	}
+	return n
+}
+
+// normLocale normalizes the codeset of a locale name, so that
+// en_US.UTF-8 and en_US.utf8 compare equal.
+func normLocale(s string) string {
+	name, rest, ok := strings.Cut(s, ".")
+	if !ok {
+		return strings.ToLower(s)
+	}
+	codeset, modifier, hasMod := strings.Cut(rest, "@")
+	out := strings.ToLower(name) + "." + cleanName(codeset)
+	if hasMod {
+		out += "@" + strings.ToLower(modifier)
+	}
+	return out
+}
 
 // AlterDatabase implements diff.Dialect.
 func (Dialect) AlterDatabase(db, cur model.Database) ([]plan.Statement, []string) {
@@ -548,8 +599,9 @@ func (Dialect) AlterDatabase(db, cur model.Database) ([]plan.Statement, []string
 		}
 	}
 	immutable("encoding", db.Encoding, cur.Encoding, func(a, b string) bool { return normEncoding(a) == normEncoding(b) })
-	immutable("lc_collate", db.LcCollate, cur.LcCollate, strings.EqualFold)
-	immutable("lc_ctype", db.LcCtype, cur.LcCtype, strings.EqualFold)
+	sameLocale := func(a, b string) bool { return normLocale(a) == normLocale(b) }
+	immutable("lc_collate", db.LcCollate, cur.LcCollate, sameLocale)
+	immutable("lc_ctype", db.LcCtype, cur.LcCtype, sameLocale)
 	if db.Owner != "" && db.Owner != cur.Owner {
 		return []plan.Statement{plan.SQL("", "ALTER DATABASE "+Ident(db.Name)+" OWNER TO "+Ident(db.Owner))}, warns
 	}

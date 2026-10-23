@@ -152,6 +152,69 @@ func TestWithDetail(t *testing.T) {
 	}
 }
 
+func TestIsSystemRole(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"postgres", true}, {"pg_monitor", true}, {"rdsadmin", true}, {"rdsrepladmin", true},
+		{"rdstopmgr", true}, {"rds_superuser", true}, {"cloudsqlsuperuser", true},
+		{"azuresu", true}, {"azure_pg_admin", true}, {"azure_superuser", true}, {"alloydbadmin", true},
+		{"app", false}, {"rdsuser", false}, {"postgres2", false},
+	}
+	for _, tt := range tests {
+		if got := (Dialect{}).IsSystemRole(pg(tt.name)); got != tt.want {
+			t.Errorf("IsSystemRole(%q) = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestAlterDatabaseImmutableAttributes(t *testing.T) {
+	t.Parallel()
+	cur := model.Database{Name: "app", Encoding: "LATIN1", LcCollate: "en_US.utf8", LcCtype: "C"}
+	tests := []struct {
+		name     string
+		db       model.Database
+		wantWarn bool
+	}{
+		{"same", model.Database{Encoding: "LATIN1", LcCollate: "en_US.utf8", LcCtype: "C"}, false},
+		{"iso alias", model.Database{Encoding: "ISO-8859-1"}, false},
+		{"lower case alias", model.Database{Encoding: "iso_8859_1"}, false},
+		{"other encoding", model.Database{Encoding: "UTF8"}, true},
+		{"codeset spelling", model.Database{LcCollate: "en_US.UTF-8"}, false},
+		{"other locale", model.Database{LcCollate: "de_DE.utf8"}, true},
+		{"other codeset", model.Database{LcCollate: "en_US.ISO-8859-1"}, true},
+		{"C locale case", model.Database{LcCtype: "c"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.db.Name = "app"
+			_, warns := Dialect{}.AlterDatabase(tt.db, cur)
+			if got := len(warns) > 0; got != tt.wantWarn {
+				t.Errorf("warnings = %v, want warning %v", warns, tt.wantWarn)
+			}
+		})
+	}
+}
+
+func TestNormEncoding(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ a, b string }{
+		{"UTF8", "utf-8"}, {"UTF8", "unicode"}, {"EUC_JP", "euc-jp"}, {"LATIN9", "ISO-8859-15"},
+		{"WIN1252", "windows-1252"}, {"SJIS", "Shift_JIS"}, {"ISO_8859_5", "iso-8859-5"}, {"KOI8R", "koi8"},
+	}
+	for _, tt := range tests {
+		if normEncoding(tt.a) != normEncoding(tt.b) {
+			t.Errorf("%q and %q normalize differently: %q, %q", tt.a, tt.b, normEncoding(tt.a), normEncoding(tt.b))
+		}
+	}
+	if normEncoding("LATIN1") == normEncoding("LATIN2") {
+		t.Error("LATIN1 and LATIN2 normalize equally")
+	}
+}
+
 func TestPasswordStatements(t *testing.T) {
 	t.Parallel()
 	scram, err := password.SCRAMVerifierWithSalt("s3cret", []byte("0123456789abcdef"), password.SCRAMIterations)
