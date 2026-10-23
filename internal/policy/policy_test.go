@@ -179,6 +179,36 @@ func TestVerify(t *testing.T) {
 		{name: "membership of the connected user", stmts: []plan.Statement{revokeMembership(pg("admin"), pg("ops"), false)}, want: []string{`connected user "admin" in "ops"`}},
 		{name: "admin option of the connected user", stmts: []plan.Statement{revokeMembership(pg("admin"), pg("ops"), true)}, want: []string{"ADMIN OPTION"}},
 		{name: "membership in the connected user", stmts: []plan.Statement{revokeMembership(pg("app"), pg("admin"), false)}},
+		{name: "drop of an unmanaged name", stmts: []plan.Statement{dropRole(pg("evil\n"))}, want: []string{"does not exist", `names role "evil\n", which dbfence does not manage`}},
+		{
+			name:  "grant to an unmanaged grantee",
+			stmts: []plan.Statement{plan.New("", plan.KindGrant, plan.PrivilegeTarget(pg("x\x1b"), model.Object{Type: model.ObjectDatabase, Database: "app"}), plan.Keyword("GRANT x"))},
+			want:  []string{`names role "x\x1b"`},
+		},
+		{
+			name:  "membership in a role with a long name",
+			stmts: []plan.Statement{revokeMembership(pg("app"), pg(strings.Repeat("r", 64)), false)},
+			want:  []string{"64 bytes long"},
+		},
+		{
+			name:  "revoke run as an unmanaged grantor",
+			stmts: []plan.Statement{plan.New("", plan.KindRevoke, plan.PrivilegeTarget(pg("app"), model.Object{Type: model.ObjectDatabase, Database: "app"}), plan.Keyword("REVOKE x")).WithRole("g\u0085")},
+			want:  []string{`runs as role "g\u0085"`},
+		},
+		{
+			name:  "unmanaged schema and database",
+			stmts: []plan.Statement{plan.New("", plan.KindAlterSchema, plan.ObjectTarget(model.Object{Type: model.ObjectSchema, Database: "d\x00", Schema: "s\x7f"}), plan.Keyword("ALTER SCHEMA x"))},
+			want:  []string{`database "d\x00"`, `schema "s\x7f"`},
+		},
+		{
+			name:    "mysql account with an unmanaged host",
+			current: &model.Current{CurrentUser: model.RoleID{Name: "root", Host: "%"}},
+			desired: &model.Desired{Engine: model.EngineMySQL},
+			system:  mysql.Dialect{},
+			stmts: []plan.Statement{plan.New("", plan.KindGrant, plan.PrivilegeTarget(model.RoleID{Name: "u", Host: "h\n"},
+				model.Object{Type: model.ObjectDatabase, Database: "app", Pattern: strings.Repeat("p", 65)}), plan.Keyword("GRANT x"))},
+			want: []string{`its host contains control characters`, `database pattern`},
+		},
 		{
 			name:    "invalid ignore pattern",
 			desired: &model.Desired{Engine: model.EnginePostgres, Ignore: model.Ignore{Roles: []string{"("}}},

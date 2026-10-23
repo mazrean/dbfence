@@ -1,7 +1,7 @@
 // Package policy checks a finished plan against the protections dbfence
 // promises, independently of the diff logic that produced it. It reads
-// only statement metadata (Kind, Target, RoleChange), never SQL text, and
-// does no I/O.
+// only statement metadata (Kind, Target, RoleChange, AsRole), never SQL
+// text, and does no I/O.
 package policy
 
 import (
@@ -62,7 +62,7 @@ func Verify(p *plan.Plan, cur *model.Current, desired *model.Desired, opts Optio
 	var out []Violation
 	for _, ch := range p.Changes {
 		for _, s := range ch.Statements {
-			for _, reason := range c.check(s) {
+			for _, reason := range append(c.check(s), c.unmanagedNames(s)...) {
 				out = append(out, Violation{Resource: ch.Resource, Kind: s.Kind(), Reason: reason})
 			}
 		}
@@ -108,6 +108,36 @@ func (c *checker) check(s plan.Statement) []string {
 		// connected user out.
 	}
 	return nil
+}
+
+// unmanagedNames reports the names in the target of s, and the role it
+// runs as, that dbfence never manages (model.CheckName): such objects are
+// left out of the inspected state, so no statement may name them.
+func (c *checker) unmanagedNames(s plan.Statement) []string {
+	t := s.Target()
+	e := c.desired.Engine
+	var out []string
+	for _, id := range []model.RoleID{t.Role, t.Grantee} {
+		if why := model.CheckRoleID(e, id); why != "" {
+			out = append(out, fmt.Sprintf("names role %q, which dbfence does not manage: %s", id, why))
+		}
+	}
+	if why := model.CheckName(e, model.NameRole, s.AsRole); why != "" {
+		out = append(out, fmt.Sprintf("runs as role %q, which dbfence does not manage: its name %s", s.AsRole, why))
+	}
+	for _, n := range []struct {
+		what, name string
+		kind       model.NameKind
+	}{
+		{"database", t.Database, model.NameDatabase},
+		{"database pattern", t.Pattern, model.NameDatabase},
+		{"schema", t.Schema, model.NameSchema},
+	} {
+		if why := model.CheckName(e, n.kind, n.name); why != "" {
+			out = append(out, fmt.Sprintf("names %s %q, which dbfence does not manage: its name %s", n.what, n.name, why))
+		}
+	}
+	return out
 }
 
 // prunes reports a drop planned without --prune.
