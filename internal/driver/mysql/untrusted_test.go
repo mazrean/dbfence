@@ -30,7 +30,7 @@ func TestUntrustedNamesAreNotManaged(t *testing.T) {
 		CurrentUser: root,
 		Roles: []model.RoleState{
 			{ID: root, Login: true},
-			{ID: app, MemberOf: []model.RoleID{grp, bad}, MemberOptions: map[model.RoleID]model.MembershipState{grp: {}, bad: {}}, DefaultRoles: []model.RoleID{grp, bad}},
+			{ID: app, MemberOf: []model.RoleID{grp, bad}, MemberOptions: map[model.RoleID]model.MembershipState{grp: {}, bad: {}}, DefaultRoles: []model.RoleID{bad}},
 			{ID: grp},
 			{ID: bad},
 			{ID: long},
