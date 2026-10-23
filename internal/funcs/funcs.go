@@ -181,6 +181,7 @@ func stdlibFunctions() map[string]function.Function {
 		"tostring":     stdlib.MakeToFunc(cty.String),
 		"trimspace":    stdlib.TrimSpaceFunc,
 		"upper":        stdlib.UpperFunc,
+		"urlencode":    urlencodeFunc,
 		"values":       stdlib.ValuesFunc,
 	}
 }
