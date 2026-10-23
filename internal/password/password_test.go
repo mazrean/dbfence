@@ -129,3 +129,25 @@ func mustHex(t *testing.T, s string) string {
 	}
 	return string(b)
 }
+
+func TestPostgresVerifierKind(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, verifier string
+		want           VerifierKind
+	}{
+		{"null", "", VerifierNone},
+		{"md5", PostgresMD5("app", "secret"), VerifierMD5},
+		{"md5 wrong length", "md5abc", VerifierUnknown},
+		{"scram", "SCRAM-SHA-256$4096:c2FsdA==$a:b", VerifierSCRAM},
+		{"plain", "secret", VerifierUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := PostgresVerifierKind(tt.verifier); got != tt.want {
+				t.Errorf("PostgresVerifierKind() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

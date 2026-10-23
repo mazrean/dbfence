@@ -194,21 +194,50 @@ func repeat(seq []byte, n int) []byte {
 	return out
 }
 
+// VerifierKind is the hashing scheme of a PostgreSQL rolpassword. The md5
+// and SCRAM values equal the matching password_encryption setting.
+type VerifierKind string
+
+// PostgreSQL verifier kinds.
+const (
+	VerifierNone    VerifierKind = ""
+	VerifierMD5     VerifierKind = "md5"
+	VerifierSCRAM   VerifierKind = "scram-sha-256"
+	VerifierUnknown VerifierKind = "unknown"
+)
+
+// PostgresVerifierKind classifies a rolpassword value, e.g. to detect an
+// md5 verifier that should be re-hashed under password_encryption =
+// scram-sha-256.
+func PostgresVerifierKind(verifier string) VerifierKind {
+	switch {
+	case verifier == "":
+		return VerifierNone
+	case strings.HasPrefix(verifier, "SCRAM-SHA-256$"):
+		return VerifierSCRAM
+	case strings.HasPrefix(verifier, "md5") && len(verifier) == 35:
+		return VerifierMD5
+	default:
+		return VerifierUnknown
+	}
+}
+
 // MatchPostgres reports whether password matches the rolpassword
 // verifier of role user.
 func MatchPostgres(verifier, user, password string) (bool, error) {
-	switch {
-	case verifier == "":
+	switch PostgresVerifierKind(verifier) {
+	case VerifierNone:
 		// No stored password (NULL rolpassword). PostgreSQL stores an
 		// empty password this way, so only "" matches.
 		return password == "", nil
-	case strings.HasPrefix(verifier, "SCRAM-SHA-256$"):
+	case VerifierSCRAM:
 		return matchSCRAM(verifier, password)
-	case strings.HasPrefix(verifier, "md5") && len(verifier) == 35:
+	case VerifierMD5:
 		return subtle.ConstantTimeCompare([]byte(verifier), []byte(PostgresMD5(user, password))) == 1, nil
-	default:
-		return false, fmt.Errorf("%w: postgres verifier", ErrUnsupported)
+	case VerifierUnknown:
+		// Reported as unsupported below.
 	}
+	return false, fmt.Errorf("%w: postgres verifier", ErrUnsupported)
 }
 
 // PostgresMD5 returns the legacy md5 verifier.
