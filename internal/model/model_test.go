@@ -90,3 +90,25 @@ func TestCompileIgnorePattern(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountFormat(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		id   model.RoleID
+		q, s string
+	}{
+		{id: model.RoleID{Name: "app", Host: "%"}, q: `"app"@"%"`, s: "app@%"},
+		{id: model.RoleID{Name: "anon", Host: ""}, q: `"anon"@""`, s: "anon@"},
+		{id: model.RoleID{Name: "", Host: "localhost"}, q: `""@"localhost"`, s: "@localhost"},
+		{id: model.RoleID{Name: "public", Host: ""}, q: `"public"@""`, s: "public@"},
+	}
+	for _, tt := range tests {
+		a := model.Account(tt.id)
+		if got := fmt.Sprintf("%q", a); got != tt.q {
+			t.Errorf("%%q of %#v = %s, want %s", tt.id, got, tt.q)
+		}
+		if got := fmt.Sprintf("%s|%v", a, a); got != tt.s+"|"+tt.s {
+			t.Errorf("%%s of %#v = %s, want %s", tt.id, got, tt.s)
+		}
+	}
+}

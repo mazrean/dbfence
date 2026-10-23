@@ -58,6 +58,23 @@ func (id RoleID) Format(f fmt.State, verb rune) {
 	_, _ = f.Write([]byte(s))
 }
 
+// Account is a RoleID shown as a MySQL account: the host is always
+// printed, so that an account with an empty host ("name"@"") is not
+// mistaken for a PostgreSQL role.
+type Account RoleID
+
+func (a Account) String() string { return a.Name + "@" + a.Host }
+
+// Format implements fmt.Formatter. %q prints "name"@"host"; other verbs
+// print String.
+func (a Account) Format(f fmt.State, verb rune) {
+	s := a.String()
+	if verb == 'q' {
+		s = strconv.Quote(a.Name) + "@" + strconv.Quote(a.Host)
+	}
+	_, _ = f.Write([]byte(s))
+}
+
 // Database is a database (MySQL: schema).
 type Database struct {
 	Name string

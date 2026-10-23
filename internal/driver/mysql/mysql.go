@@ -276,7 +276,7 @@ func (d *Driver) inspectMySQLUser(ctx context.Context, cur *model.Current) error
 			}
 			hash, err := hex.DecodeString(auth)
 			if err != nil {
-				return fmt.Errorf("decode authentication_string of %s: %w", r.ID, err)
+				return fmt.Errorf("decode authentication_string of %s: %w", model.Account(r.ID), err)
 			}
 			r.PasswordHash = hash
 			r.PasswordReadable = true

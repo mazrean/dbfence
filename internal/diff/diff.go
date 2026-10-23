@@ -107,7 +107,7 @@ type differ struct {
 
 // Compute builds the plan converging current to desired.
 func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Options) (*plan.Plan, error) {
-	ig, err := newIgnorer(desired.Ignore)
+	ig, err := newIgnorer(desired.Ignore, desired.Engine)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,16 @@ func (df *differ) roleResource(id model.RoleID) string {
 	} else if cur, ok := df.currentRole(id); ok && cur.Login {
 		kind = "user"
 	}
-	return fmt.Sprintf("%s %q", kind, id)
+	return fmt.Sprintf("%s %q", kind, df.show(id))
+}
+
+// show returns id for plan output. On MySQL the host is always shown, so
+// that an inspected account with an empty host reads "name"@"".
+func (df *differ) show(id model.RoleID) any {
+	if df.desired.Engine == model.EngineMySQL {
+		return model.Account(id)
+	}
+	return id
 }
 
 func (df *differ) currentRole(id model.RoleID) (model.RoleState, bool) {
@@ -274,10 +283,10 @@ func (df *differ) roles() {
 				continue
 			}
 			if self {
-				df.warn("not revoking membership of the connected user %q in %q: dbfence may rely on it", r.ID, m)
+				df.warn("not revoking membership of the connected user %q in %q: dbfence may rely on it", df.show(r.ID), df.show(m))
 				continue
 			}
-			df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", r.ID, m), df.d.RevokeMembership(r.ID, m))
+			df.add(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", df.show(r.ID), df.show(m)), df.d.RevokeMembership(r.ID, m))
 		}
 		if s, ok := df.d.(DefaultRoleSetter); ok {
 			df.add(phaseMembership, plan.ActionUpdate, "default roles of "+df.roleResource(r.ID), s.SetDefaultRoles(r, cur))
@@ -651,7 +660,7 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 			continue
 		}
 		if !df.opts.Prune {
-			df.warn("unmanaged role %q (use --prune to drop it)", r.ID)
+			df.warn("unmanaged role %q (use --prune to drop it)", df.show(r.ID))
 			continue
 		}
 		df.add(phaseDropRole, plan.ActionDrop, df.roleResource(r.ID), df.d.DropRole(r.ID, surviving))
@@ -665,7 +674,7 @@ func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleI
 	case referenced[id]:
 		return "is referenced by the configuration but not declared (declare it to manage it)"
 	case reliedOn[id]:
-		return fmt.Sprintf("is granted to the connected user %q", df.current.CurrentUser)
+		return fmt.Sprintf("is granted to the connected user %q", df.show(df.current.CurrentUser))
 	}
 	// REASSIGN OWNED also reassigns databases the role owns, and DROP
 	// ROLE fails while it still owns objects, so owners of ignored
@@ -734,10 +743,11 @@ func (df *differ) currentUserRoles() map[model.RoleID]bool {
 }
 
 type ignorer struct {
+	engine                    model.Engine
 	roles, databases, schemas []*regexp.Regexp
 }
 
-func newIgnorer(ig model.Ignore) (ignorer, error) {
+func newIgnorer(ig model.Ignore, engine model.Engine) (ignorer, error) {
 	compile := func(ps []string) ([]*regexp.Regexp, error) {
 		out := make([]*regexp.Regexp, 0, len(ps))
 		for _, p := range ps {
@@ -750,7 +760,7 @@ func newIgnorer(ig model.Ignore) (ignorer, error) {
 		return out, nil
 	}
 	var (
-		i   ignorer
+		i   = ignorer{engine: engine}
 		err error
 	)
 	if i.roles, err = compile(ig.Roles); err != nil {
@@ -767,8 +777,16 @@ func matchAny(res []*regexp.Regexp, s string) bool {
 	return slices.ContainsFunc(res, func(re *regexp.Regexp) bool { return re.MatchString(s) })
 }
 
+// role matches a pattern against the role name or, for a MySQL account,
+// "name@host" (also when the host is empty).
 func (i ignorer) role(id model.RoleID) bool {
-	return matchAny(i.roles, id.Name) || (id.Host != "" && matchAny(i.roles, id.String()))
+	if matchAny(i.roles, id.Name) {
+		return true
+	}
+	if i.engine == model.EngineMySQL {
+		return matchAny(i.roles, model.Account(id).String())
+	}
+	return id.Host != "" && matchAny(i.roles, id.String())
 }
 func (i ignorer) database(name string) bool { return matchAny(i.databases, name) }
 
