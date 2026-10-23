@@ -321,6 +321,11 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 		return nil, append(diags, errAt(attrRange(connAttrs, "engine", connBlock.DefRange), "Unsupported engine",
 			fmt.Sprintf("engine must be %q or %q, got %q.", model.EngineMySQL, model.EnginePostgres, conn.Engine)))
 	}
+	if strings.TrimSpace(conn.DSN) == "" {
+		// The drivers would silently fall back to a default server.
+		return nil, append(diags, errAt(attrRange(connAttrs, "dsn", connBlock.DefRange), "Empty dsn",
+			"connection.dsn must not be empty (an env() or secret lookup may have returned an empty value)."))
+	}
 
 	// Pass 1: resolve names so blocks can reference each other.
 	vars := map[string]map[string]cty.Value{}

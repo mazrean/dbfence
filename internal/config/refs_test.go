@@ -66,5 +66,17 @@ func TestLoadReferenceErrors(t *testing.T) {
 			want:  []string{"host cannot reference other blocks"},
 			count: 1,
 		},
+		{
+			name:  "empty dsn",
+			src:   "connection {\n engine = \"mysql\"\n dsn = \"\"\n}\n",
+			want:  []string{"Empty dsn", "dbfence.hcl line 3"},
+			count: 1,
+		},
+		{
+			name:  "blank dsn from env default",
+			src:   "connection {\n engine = \"postgres\"\n dsn = env(\"NOPE\", \" \")\n}\n",
+			want:  []string{"Empty dsn"},
+			count: 1,
+		},
 	})
 }
