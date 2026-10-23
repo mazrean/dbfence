@@ -430,6 +430,11 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 			return r, append(diags, errAt(a.Range, "Unsupported attribute", `"host" is only supported for mysql.`))
 		}
 		diags = append(diags, gohcl.DecodeExpression(a.Expr, ctx, &r.host)...)
+		if r.host == "" && !diags.HasErrors() {
+			diags = append(diags, errAt(a.Range, "Empty host", `host must not be empty; use "%" for any host.`))
+		}
+		// MySQL stores host names in lower case.
+		r.host = strings.ToLower(r.host)
 	} else if engine == model.EngineMySQL && (b.Type == "role" || b.Type == "user") {
 		r.host = "%"
 	}
@@ -513,20 +518,26 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 	if blk.MemberOf != nil {
 		role.MemberOf = []model.RoleID{}
 		for _, m := range *blk.MemberOf {
-			role.MemberOf = append(role.MemberOf, ParseRoleID(m, engine))
+			id := ParseRoleID(m, engine)
+			if engine == model.EngineMySQL && id.Host == "" {
+				diags = append(diags, errAt(attrRange(r.attrs, "member_of", r.block.DefRange), "Empty host",
+					fmt.Sprintf(`member_of entry %q has an empty host; use "name@%%" or role.<label>.id.`, m)))
+			}
+			role.MemberOf = append(role.MemberOf, id)
 		}
 		model.SortRoleIDs(role.MemberOf)
 	}
 	return role, diags
 }
 
-// ParseRoleID parses "name" or, for MySQL, "name@host" (host defaults to %).
+// ParseRoleID parses "name" or, for MySQL, "name@host" (host defaults to %
+// and is lower-cased, as MySQL stores it).
 func ParseRoleID(s string, engine model.Engine) model.RoleID {
 	if engine != model.EngineMySQL {
 		return model.RoleID{Name: s}
 	}
 	if name, host, ok := strings.CutLast(s, "@"); ok {
-		return model.RoleID{Name: name, Host: host}
+		return model.RoleID{Name: name, Host: strings.ToLower(host)}
 	}
 	return model.RoleID{Name: s, Host: "%"}
 }
@@ -555,6 +566,10 @@ func decodeGrant(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (decod
 		return g, append(diags, errAt(privRange, "Invalid privilege", err.Error()))
 	}
 	g.grantee = ParseRoleID(blk.Role, engine)
+	if engine == model.EngineMySQL && g.grantee.Host == "" {
+		return g, append(diags, errAt(attrRange(g.attrs, "role", b.DefRange), "Empty host",
+			fmt.Sprintf(`role %q has an empty host; use "name@%%" or user.<label>.id.`, blk.Role)))
+	}
 	g.names = names
 	g.option = blk.WithGrantOption != nil && *blk.WithGrantOption
 	return g, diags
