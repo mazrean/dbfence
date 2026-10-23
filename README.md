@@ -203,7 +203,7 @@ Without `urlencode`, a password containing `@ : / ? # % +` or a space produces a
 
 A subset of the cty standard library is also available: `abs`, `base64decode`, `base64encode`, `chomp`, `coalesce`, `concat`, `contains`, `csvdecode`, `distinct`, `flatten`, `format`, `formatlist`, `join`, `jsondecode`, `jsonencode`, `keys`, `length`, `lookup`, `lower`, `merge`, `regex`, `replace`, `split`, `substr`, `tolist`, `tomap`, `tonumber`, `toset`, `tostring`, `trimspace`, `upper` and `values`. `lookup(map, key, default)` requires all three arguments.
 
-Results of `secretenv`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate`, and every value computed from them, are treated as secrets: when a function fails on such a value (for example `tonumber(secretenv("PW"))`), its error is replaced by `the error is not shown because the arguments include a secret value`. `env` is not: use `secretenv` for environment variables that hold passwords or DSNs.
+Results of `secretenv`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate`, and every value computed from them, are treated as secrets: when a function fails on such a value (for example `tonumber(secretenv("PW"))`), its error is replaced by `the error is not shown because the arguments include a secret value`, and a duplicate key error of a `for` expression does not show a secret-derived key. `env` is not: use `secretenv` for environment variables that hold passwords or DSNs.
 
 Each secret is fetched once per run. Secret payloads and `base64decode` results must be valid UTF-8, and strings are NFC-normalised (a password in decomposed Unicode form reaches the server composed).
 

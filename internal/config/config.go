@@ -167,7 +167,7 @@ func hclFiles(path string) ([]string, error) {
 // diagError renders the error diagnostics. The leading "Error: " of the
 // first one is dropped because the CLI prefixes errors with it already.
 func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
-	diags = dropCascades(errorsOnly(diags))
+	diags = hideSecretKeys(dropCascades(errorsOnly(diags)))
 	// gohcl decodes attributes in map order; report in source order.
 	slices.SortStableFunc(diags, func(a, b *hcl.Diagnostic) int {
 		switch {
@@ -205,6 +205,28 @@ func errorsOnly(diags hcl.Diagnostics) hcl.Diagnostics {
 		if d.Severity == hcl.DiagError {
 			out = append(out, d)
 		}
+	}
+	return out
+}
+
+// hideSecretKeys rewrites the duplicate key errors of for expressions
+// whose key is secret-derived: HCL quotes the key in Detail even when it
+// is marked. The key expression is evaluated again in the context of the
+// failing iteration to find its marks; secret lookups are cached, so this
+// does not fetch them again.
+func hideSecretKeys(diags hcl.Diagnostics) hcl.Diagnostics {
+	out := make(hcl.Diagnostics, len(diags))
+	for i, d := range diags {
+		out[i] = d
+		if d.Summary != "Duplicate object key" || d.Expression == nil || d.EvalContext == nil {
+			continue
+		}
+		if v, vd := d.Expression.Value(d.EvalContext); !vd.HasErrors() && !v.ContainsMarked() {
+			continue
+		}
+		nd := *d
+		nd.Detail = "Two different items produced the same key in this 'for' expression; the key is not shown because it is derived from a secret value. If duplicates are expected, use the ellipsis (...) after the value expression to enable grouping by key."
+		out[i] = &nd
 	}
 	return out
 }

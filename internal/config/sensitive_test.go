@@ -99,3 +99,31 @@ func TestLoadSensitiveReferences(t *testing.T) {
 		},
 	})
 }
+
+// TestLoadSensitiveDuplicateKey checks that the duplicate key error of a
+// for expression shows the key only when it is not secret-derived.
+func TestLoadSensitiveDuplicateKey(t *testing.T) {
+	t.Parallel()
+	runDiagCases(t, []diagCase{
+		{
+			name:  "plain key",
+			src:   pgConn + "user \"u\" {\n  connection_limit = length({for x in [1, 2] : \"k\" => x})\n}\n",
+			want:  []string{"Duplicate object key", `produced the key "k"`},
+			count: 1,
+		},
+		{
+			name:  "secret key",
+			src:   pgConn + "user \"u\" {\n  connection_limit = length({for x in [1, 2] : secretenv(\"PW\") => x})\n}\n",
+			want:  []string{"Duplicate object key", "produced the same key"},
+			deny:  []string{"secret\""},
+			count: 1,
+		},
+		{
+			name:  "key from a secret element",
+			src:   pgConn + "user \"u\" {\n  connection_limit = length({for k, v in {a = secretenv(\"PW\"), b = secretenv(\"PW\")} : v => k})\n}\n",
+			want:  []string{"Duplicate object key", "produced the same key"},
+			deny:  []string{"secret\""},
+			count: 1,
+		},
+	})
+}
