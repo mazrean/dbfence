@@ -322,6 +322,66 @@ func TestNonSuperuserWarnings(t *testing.T) {
 	}
 }
 
+// TestOwnerWarnings checks the warnings and the suggested GRANT for
+// owners whose role the connected user may not SET or use.
+func TestOwnerWarnings(t *testing.T) {
+	t.Parallel()
+	gdb := model.Object{Type: model.ObjectDatabase, Database: "gdb"}
+	connect := model.Privilege{Grantee: pg("gu"), Object: gdb, Name: "CONNECT"}
+	tests := []struct {
+		roles   map[string]roleAccess
+		name    string
+		want    string
+		schemas []model.Schema
+		privs   []model.Privilege
+		acl     []aclEntry
+		version int
+		exists  bool
+	}{
+		{
+			name: "SET only, nothing else needs the owner", version: 170000, roles: map[string]roleAccess{"g1": {}},
+			want: `database "gdb": "adm" cannot SET ROLE "g1", so making it the owner will fail; run GRANT "g1" TO "adm" WITH SET TRUE, INHERIT FALSE first`,
+		},
+		{
+			name: "SET and the owner's privileges", version: 170000, roles: map[string]roleAccess{"g1": {}},
+			schemas: []model.Schema{{Database: "gdb", Name: "s", Owner: "g1"}},
+			want: `database "gdb": "adm" cannot SET ROLE "g1" or use its privileges, so making it the owner and creating schemas in it or granting on it will fail; run GRANT "g1" TO "adm" WITH INHERIT TRUE, SET TRUE first` + "\n" +
+				`schema "s" in database "gdb": "adm" cannot SET ROLE "g1", so making it the owner will fail; run GRANT "g1" TO "adm" WITH SET TRUE, INHERIT FALSE first`,
+		},
+		{
+			name: "SET without INHERIT and a grant to make", version: 170000, roles: map[string]roleAccess{"g1": {set: true}}, exists: true,
+			privs: []model.Privilege{connect},
+			want:  `database "gdb": "adm" does not have the privileges of its owner "g1", so creating schemas in it or granting on it will fail; run GRANT "g1" TO "adm" WITH INHERIT TRUE first`,
+		},
+		{
+			name: "SET without INHERIT and the grant already held", version: 170000, roles: map[string]roleAccess{"g1": {set: true}}, exists: true,
+			privs: []model.Privilege{connect}, acl: []aclEntry{{obj: gdb, grantee: "gu", grantor: "g1", priv: "CONNECT"}},
+		},
+		{
+			name: "plain membership before 16", version: 150000, roles: map[string]roleAccess{"g1": {}},
+			want: `database "gdb": "adm" cannot SET ROLE "g1", so making it the owner will fail; run GRANT "g1" TO "adm" first`,
+		},
+		{name: "member with SET and INHERIT", version: 170000, roles: map[string]roleAccess{"g1": {set: true, use: true}}, privs: []model.Privilege{connect}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := &state{
+				user: "adm", version: tt.version, roles: tt.roles, owners: map[model.Object]string{}, acl: tt.acl,
+				desired: &model.Desired{Databases: []model.Database{{Name: "gdb", Owner: "g1"}}, Schemas: tt.schemas, Privileges: tt.privs},
+			}
+			cur := &model.Current{}
+			if tt.exists {
+				cur.Databases = []model.Database{{Name: "gdb", Owner: "g1"}}
+				st.owners[gdb] = "g1"
+			}
+			if got := strings.Join(st.ownerWarnings(cur), "\n"); got != tt.want {
+				t.Errorf("warnings =\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInheritOptions(t *testing.T) {
 	t.Parallel()
 	no, yes := false, true

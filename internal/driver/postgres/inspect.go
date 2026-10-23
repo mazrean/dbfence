@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -200,13 +201,43 @@ func (st *state) canSet(role string) bool {
 	return st.version >= pg16 && slices.Contains(strings.Split(strings.ReplaceAll(st.createroleSelfGrant, " ", ""), ","), "set")
 }
 
-// ownerWarnings warns about owner changes the connected user cannot make.
+// canUse reports whether the connected user has the privileges of role,
+// which creating schemas in a database it owns and granting on objects it
+// owns need (USAGE: membership with INHERIT).
+func (st *state) canUse(role string) bool {
+	if st.superuser || role == st.user {
+		return true
+	}
+	if a, ok := st.roles[role]; ok {
+		return a.use
+	}
+	// Created by the plan: PostgreSQL 16+ grants the creator INHERIT only
+	// when createrole_self_grant includes it.
+	return st.version >= pg16 && slices.Contains(strings.Split(strings.ReplaceAll(st.createroleSelfGrant, " ", ""), ","), "inherit")
+}
+
+// ownerWarnings warns about owner changes the connected user cannot make,
+// and about schemas and grants it cannot create on objects of an owner
+// whose privileges it does not have.
 func (st *state) ownerWarnings(cur *model.Current) []string {
 	var warns []string
-	check := func(what, owner, have string) {
-		if owner != "" && owner != have && !st.canSet(owner) {
-			warns = append(warns, fmt.Sprintf("%s: %q cannot SET ROLE %q, so making it the owner will fail; run GRANT %s TO %s WITH SET TRUE, INHERIT FALSE first",
-				what, st.user, owner, Ident(owner), Ident(st.user)))
+	check := func(obj model.Object, what, owner, have string, needsOwner bool) {
+		effective := cmp.Or(owner, have)
+		set := owner != "" && owner != have && !st.canSet(owner)
+		use := needsOwner && effective != "" && !st.canUse(effective)
+		if !set && !use {
+			return
+		}
+		fix := "run " + st.memberGrant(effective, set, use) + " first"
+		switch {
+		case set && use:
+			warns = append(warns, fmt.Sprintf("%s: %q cannot SET ROLE %q or use its privileges, so making it the owner and %s will fail; %s",
+				what, st.user, effective, ownerActions(obj), fix))
+		case set:
+			warns = append(warns, fmt.Sprintf("%s: %q cannot SET ROLE %q, so making it the owner will fail; %s", what, st.user, owner, fix))
+		default:
+			warns = append(warns, fmt.Sprintf("%s: %q does not have the privileges of its owner %q, so %s will fail; %s",
+				what, st.user, effective, ownerActions(obj), fix))
 		}
 	}
 	for _, db := range st.desired.Databases {
@@ -214,12 +245,62 @@ func (st *state) ownerWarnings(cur *model.Current) []string {
 		if i := slices.IndexFunc(cur.Databases, func(c model.Database) bool { return c.Name == db.Name }); i >= 0 {
 			have = cur.Databases[i].Owner
 		}
-		check(fmt.Sprintf("database %q", db.Name), db.Owner, have)
+		obj := model.Object{Type: model.ObjectDatabase, Database: db.Name}
+		needsOwner := st.plansGrants(obj, cmp.Or(db.Owner, have)) || slices.ContainsFunc(st.desired.Schemas, func(s model.Schema) bool {
+			return s.Database == db.Name && st.createsSchema(s)
+		})
+		check(obj, fmt.Sprintf("database %q", db.Name), db.Owner, have, needsOwner)
 	}
 	for _, s := range st.desired.Schemas {
-		check(fmt.Sprintf("schema %q in database %q", s.Name, s.Database), s.Owner, st.owners[model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}])
+		obj := model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}
+		have := st.owners[obj]
+		check(obj, fmt.Sprintf("schema %q in database %q", s.Name, s.Database), s.Owner, have, st.plansGrants(obj, cmp.Or(s.Owner, have)))
 	}
 	return warns
+}
+
+// ownerActions names what needs the privileges of the owner of obj.
+func ownerActions(obj model.Object) string {
+	if obj.Type == model.ObjectSchema {
+		return "granting on it"
+	}
+	return "creating schemas in it or granting on it"
+}
+
+// memberGrant renders the GRANT that lets the connected user SET ROLE to
+// role (set) and use its privileges (use). Before PostgreSQL 16 plain
+// membership gives both.
+func (st *state) memberGrant(role string, set, use bool) string {
+	q := "GRANT " + Ident(role) + " TO " + Ident(st.user)
+	if st.version < pg16 {
+		return q
+	}
+	switch {
+	case set && use:
+		return q + " WITH INHERIT TRUE, SET TRUE"
+	case set:
+		return q + " WITH SET TRUE, INHERIT FALSE"
+	default:
+		return q + " WITH INHERIT TRUE"
+	}
+}
+
+// createsSchema reports whether the plan creates s, which needs CREATE on
+// its database. Schemas of databases that were not inspected are created
+// unless they are system schemas copied from the template.
+func (st *state) createsSchema(s model.Schema) bool {
+	_, exists := st.owners[model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}]
+	return !exists && !(Dialect{}).IsSystemSchema(s.Name)
+}
+
+// plansGrants reports whether a declared privilege on obj, owned by owner,
+// is not held yet, so that the plan grants it.
+func (st *state) plansGrants(obj model.Object, owner string) bool {
+	return slices.ContainsFunc(st.desired.Privileges, func(p model.Privilege) bool {
+		return p.Object == obj && p.Grantee.Name != owner && !slices.ContainsFunc(st.acl, func(e aclEntry) bool {
+			return e.obj == obj && e.grantee == p.Grantee.Name && e.priv == p.Name && (e.grantable || !p.GrantOption)
+		})
+	})
 }
 
 // pruneWarnings warns about unmanaged roles whose objects the connected
