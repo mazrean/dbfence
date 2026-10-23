@@ -74,7 +74,7 @@ Errors are printed to stderr as `dbfence: error: ...` (configuration diagnostics
 ```hcl
 connection {
   engine = "postgres"                                   # "postgres" or "mysql"
-  dsn    = format("postgres://%s:%s@db.internal:5432/postgres", urlencode("admin"), urlencode(env("PGPASSWORD")))
+  dsn    = format("postgres://%s:%s@db.internal:5432/postgres", urlencode("admin"), urlencode(secretenv("PGPASSWORD")))
 }
 
 role "app_owner" {}                                    # role: NOLOGIN
@@ -192,6 +192,7 @@ PostgreSQL `--prune` of a role runs `REASSIGN OWNED BY ... TO CURRENT_USER` and 
 | Function | Returns |
 |---|---|
 | `env(name, [default])` | An environment variable. It is an error if the variable is unset and no default is given |
+| `secretenv(name, [default])` | Like `env`, for a variable that holds a secret such as a password or DSN: its value is treated as a secret (see below) |
 | `aws_secretsmanager(secret_id, [json_key])` | An AWS Secrets Manager secret string, or one key of a JSON secret (a string, number or boolean; use `jsondecode(aws_secretsmanager(id))` for objects and arrays). Standard AWS credentials and `AWS_ENDPOINT_URL` apply |
 | `gcp_secretmanager(name, [version])` | A GCP Secret Manager payload. `name` is `projects/<p>/secrets/<s>[/versions/<v>]` (regional `locations/` names are not supported), and `version` defaults to `latest` |
 | `tfstate(url, address)` | A value from a Terraform state on `s3://`, `gs://`, a local path, and so on. Relative paths are resolved against the configuration directory. Examples: `aws_db_instance.main.address`, `output.db_host` |
@@ -201,7 +202,7 @@ Without `urlencode`, a password containing `@ : / ? # % +` or a space produces a
 
 A subset of the cty standard library is also available: `abs`, `base64decode`, `base64encode`, `chomp`, `coalesce`, `concat`, `contains`, `csvdecode`, `distinct`, `flatten`, `format`, `formatlist`, `join`, `jsondecode`, `jsonencode`, `keys`, `length`, `lookup`, `lower`, `merge`, `regex`, `replace`, `split`, `substr`, `tolist`, `tomap`, `tonumber`, `toset`, `tostring`, `trimspace`, `upper` and `values`. `lookup(map, key, default)` requires all three arguments.
 
-Results of `env`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate`, and every value computed from them, are treated as secrets: when a function fails on such a value (for example `tonumber(env("PW"))`), its error is replaced by `the error is not shown because the arguments include a secret value`.
+Results of `secretenv`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate`, and every value computed from them, are treated as secrets: when a function fails on such a value (for example `tonumber(secretenv("PW"))`), its error is replaced by `the error is not shown because the arguments include a secret value`. `env` is not: use `secretenv` for environment variables that hold passwords or DSNs.
 
 Each secret is fetched once per run. Secret payloads and `base64decode` results must be valid UTF-8, and strings are NFC-normalised (a password in decomposed Unicode form reaches the server composed).
 
