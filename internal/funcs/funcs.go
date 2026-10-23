@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
@@ -218,6 +219,9 @@ func (r *Registry) awsFunc() function.Function {
 				if err != nil {
 					return cty.NilVal, fmt.Errorf("get secret %q: %w", id, err)
 				}
+				if !utf8.ValidString(s) {
+					return cty.NilVal, fmt.Errorf("secret %q is not valid UTF-8", id)
+				}
 				return cty.StringVal(s), nil
 			})
 			if err != nil {
@@ -282,6 +286,9 @@ func (r *Registry) gcpFunc() function.Function {
 				s, err := c.AccessSecretVersion(r.ctx, name)
 				if err != nil {
 					return cty.NilVal, fmt.Errorf("access secret %q: %w", name, err)
+				}
+				if !utf8.ValidString(s) {
+					return cty.NilVal, fmt.Errorf("secret %q is not valid UTF-8", name)
 				}
 				return cty.StringVal(s), nil
 			})

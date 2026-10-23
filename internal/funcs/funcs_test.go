@@ -16,6 +16,9 @@ type fakeGCP struct {
 
 func (f *fakeGCP) AccessSecretVersion(_ context.Context, name string) (string, error) {
 	f.names = append(f.names, name)
+	if strings.HasSuffix(name, "/binary/versions/latest") {
+		return "\xff\xfe", nil
+	}
 	return "payload:" + name, nil
 }
 
@@ -74,6 +77,8 @@ func TestFunctions(t *testing.T) {
 		{"tfstate missing", `tfstate("testdata/terraform.tfstate", "aws_db_instance.nope.address")`, cty.NilVal, "not found"},
 		{"stdlib format", `format("%s-%d", "a", 1)`, cty.StringVal("a-1"), ""},
 		{"base64", `base64decode(base64encode("x"))`, cty.StringVal("x"), ""},
+		{"base64 invalid utf-8", `base64decode("/w==")`, cty.NilVal, "not valid UTF-8"},
+		{"gcp invalid utf-8", `gcp_secretmanager("projects/p/secrets/binary")`, cty.NilVal, `"projects/p/secrets/binary/versions/latest" is not valid UTF-8`},
 		{"tonumber", `tonumber("12")`, cty.NumberIntVal(12), ""},
 		{"tonumber invalid", `tonumber("x")`, cty.NilVal, "cannot convert value to number"},
 		{"jsondecode", `jsondecode("{\"a\":1}").a`, cty.NumberIntVal(1), ""},
