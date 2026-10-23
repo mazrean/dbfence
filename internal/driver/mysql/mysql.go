@@ -40,12 +40,14 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 		return nil, fmt.Errorf("connect to mysql: %w", err)
 	}
 	var mode string
-	if err := db.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&mode); err != nil {
+	var lowerCaseNames int
+	if err := db.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode, @@lower_case_table_names").Scan(&mode, &lowerCaseNames); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("read sql_mode: %w", err)
 	}
 	d := &Driver{db: db}
 	d.NoBackslashEscapes = strings.Contains(mode, "NO_BACKSLASH_ESCAPES")
+	d.CaseInsensitiveNames = lowerCaseNames != 0
 	var partial bool
 	switch err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.partial_revokes").Scan(&partial); {
 	case mysqlErrorIn(err, errUnknownSystemVariable):
@@ -76,12 +78,16 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		return nil, fmt.Errorf("current user: %w", err)
 	}
 	if name, host, ok := strings.CutLast(user, "@"); ok {
-		cur.CurrentUser = model.RoleID{Name: name, Host: host}
+		// Host names are case-insensitive; the server reports them in lower case.
+		cur.CurrentUser = model.RoleID{Name: name, Host: strings.ToLower(host)}
 	}
 	for _, step := range []func(context.Context, *model.Current) error{d.inspectDatabases, d.inspectUsers, d.inspectRoleEdges, d.inspectDefaultRoles} {
 		if err := step(ctx, cur); err != nil {
 			return nil, err
 		}
+	}
+	for i := range cur.Databases {
+		cur.Databases[i].Name = d.declaredName(cur.Databases[i].Name, desired)
 	}
 	if err := d.inspectDBPrivileges(ctx, cur, desired); err != nil {
 		return nil, err
@@ -135,7 +141,7 @@ func (d *Driver) inspectUsers(ctx context.Context, cur *model.Current) error {
 	cur.Roles = nil
 	cur.Unreadable.RoleAttributes = true
 	var accounts []model.RoleID
-	err = query(ctx, d.db, `SELECT USER, HOST FROM information_schema.USER_ATTRIBUTES ORDER BY USER, HOST`,
+	err = query(ctx, d.db, `SELECT USER, LOWER(HOST) FROM information_schema.USER_ATTRIBUTES ORDER BY USER, HOST`,
 		func(rows *sql.Rows) error {
 			var id model.RoleID
 			if scanErr := rows.Scan(&id.Name, &id.Host); scanErr != nil {
@@ -165,7 +171,7 @@ func (d *Driver) inspectUsers(ctx context.Context, cur *model.Current) error {
 }
 
 func (d *Driver) inspectMySQLUser(ctx context.Context, cur *model.Current) error {
-	return query(ctx, d.db, `SELECT User, Host, plugin, HEX(authentication_string), account_locked
+	return query(ctx, d.db, `SELECT User, LOWER(Host), plugin, COALESCE(HEX(authentication_string), ''), account_locked
 		FROM mysql.user ORDER BY User, Host`,
 		func(rows *sql.Rows) error {
 			var r model.RoleState
@@ -186,7 +192,7 @@ func (d *Driver) inspectMySQLUser(ctx context.Context, cur *model.Current) error
 }
 
 func (d *Driver) inspectRoleEdges(ctx context.Context, cur *model.Current) error {
-	err := query(ctx, d.db, `SELECT FROM_USER, FROM_HOST, TO_USER, TO_HOST FROM mysql.role_edges`,
+	err := query(ctx, d.db, `SELECT FROM_USER, LOWER(FROM_HOST), TO_USER, LOWER(TO_HOST) FROM mysql.role_edges`,
 		func(rows *sql.Rows) error {
 			var role, member model.RoleID
 			if err := rows.Scan(&role.Name, &role.Host, &member.Name, &member.Host); err != nil {
@@ -210,7 +216,7 @@ func (d *Driver) inspectRoleEdges(ctx context.Context, cur *model.Current) error
 }
 
 func (d *Driver) inspectDefaultRoles(ctx context.Context, cur *model.Current) error {
-	err := query(ctx, d.db, `SELECT DEFAULT_ROLE_USER, DEFAULT_ROLE_HOST, USER, HOST FROM mysql.default_roles`,
+	err := query(ctx, d.db, `SELECT DEFAULT_ROLE_USER, LOWER(DEFAULT_ROLE_HOST), USER, LOWER(HOST) FROM mysql.default_roles`,
 		func(rows *sql.Rows) error {
 			var role, member model.RoleID
 			if err := rows.Scan(&role.Name, &role.Host, &member.Name, &member.Host); err != nil {
@@ -255,7 +261,7 @@ func (d *Driver) inspectDBPrivileges(ctx context.Context, cur *model.Current, de
 	for _, c := range dbPrivilegeColumns {
 		cols = append(cols, c.column)
 	}
-	q := "SELECT User, Host, Db, Grant_priv, " + strings.Join(cols, ", ") + " FROM mysql.db ORDER BY User, Host, Db"
+	q := "SELECT User, LOWER(Host), Db, Grant_priv, " + strings.Join(cols, ", ") + " FROM mysql.db ORDER BY User, Host, Db"
 	var rows []dbGrant
 	err := query(ctx, d.db, q, func(r *sql.Rows) error {
 		var g dbGrant
@@ -303,6 +309,7 @@ func (d Dialect) dbPrivileges(rows []dbGrant, desired *model.Desired) ([]model.P
 	var warns []string
 	for _, g := range rows {
 		obj := d.dbObject(g.db)
+		obj.Database = d.declaredName(obj.Database, desired)
 		if obj.Pattern != "" && !slices.ContainsFunc(desired.Databases, func(db model.Database) bool { return db.Name == obj.Database }) &&
 			slices.ContainsFunc(desired.Roles, func(r model.Role) bool { return r.ID == g.grantee }) {
 			for _, db := range desired.Databases {
@@ -376,6 +383,25 @@ func mixedGrantOptions(desired *model.Desired) []string {
 		}
 	}
 	return warns
+}
+
+// declaredName returns the declared spelling of an inspected database
+// name when the server compares database names case-insensitively.
+func (d Dialect) declaredName(name string, desired *model.Desired) string {
+	if !d.CaseInsensitiveNames || desired == nil {
+		return name
+	}
+	for _, db := range desired.Databases {
+		if db.Name == name {
+			return name
+		}
+	}
+	for _, db := range desired.Databases {
+		if strings.EqualFold(db.Name, name) {
+			return db.Name
+		}
+	}
+	return name
 }
 
 // dbObject classifies the Db column of mysql.db.
@@ -471,6 +497,9 @@ type Dialect struct {
 	// PartialRevokes reflects partial_revokes. When it is off, _ and % in
 	// database level grants are wildcards, so names are escaped.
 	PartialRevokes bool
+	// CaseInsensitiveNames is set when lower_case_table_names is not 0, so
+	// the server stores or compares database names in lower case.
+	CaseInsensitiveNames bool
 }
 
 // Ident quotes an identifier.

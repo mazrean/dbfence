@@ -25,6 +25,31 @@ func TestCreateDatabase(t *testing.T) {
 	}
 }
 
+func TestDeclaredName(t *testing.T) {
+	t.Parallel()
+	desired := &model.Desired{Databases: []model.Database{{Name: "MyApp"}, {Name: "other"}, {Name: "OTHER"}}}
+	tests := []struct {
+		name, want string
+		d          Dialect
+	}{
+		{name: "myapp", want: "myapp"},
+		{name: "myapp", d: Dialect{CaseInsensitiveNames: true}, want: "MyApp"},
+		{name: "OTHER", d: Dialect{CaseInsensitiveNames: true}, want: "OTHER"},
+		{name: "legacy", d: Dialect{CaseInsensitiveNames: true}, want: "legacy"},
+	}
+	for _, tt := range tests {
+		if got := tt.d.declaredName(tt.name, desired); got != tt.want {
+			t.Errorf("declaredName(%q, fold=%v) = %q, want %q", tt.name, tt.d.CaseInsensitiveNames, got, tt.want)
+		}
+	}
+	// Privileges stored under the lower-case name match the declaration.
+	d := Dialect{CaseInsensitiveNames: true}
+	privs, _ := d.dbPrivileges([]dbGrant{{grantee: app, db: "myapp", privs: []string{"SELECT"}}}, desired)
+	if want := dbObj("MyApp"); len(privs) != 1 || privs[0].Object != want {
+		t.Errorf("privileges = %+v, want one on %+v", privs, want)
+	}
+}
+
 func TestAlterDatabase(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
