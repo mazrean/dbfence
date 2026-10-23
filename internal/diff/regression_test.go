@@ -484,3 +484,81 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 		})
 	}
 }
+
+// TestComputePruneOtherSchemaOwners checks that --prune keeps the owners
+// of ignored schemas in undeclared databases where REASSIGN OWNED runs.
+func TestComputePruneOtherSchemaOwners(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		other     []model.Schema
+		want      []string
+		wantWarns []string
+	}{
+		{
+			name:      "ignored schema in an undeclared database",
+			other:     []model.Schema{{Database: "postgres", Name: "monitoring", Owner: "monitor"}},
+			want:      []string{`DROP DATABASE "old"`},
+			wantWarns: []string{`role "monitor" owns the ignored schema "monitoring" in database "postgres"; not pruned`},
+		},
+		{
+			name:  "schema that is not ignored",
+			other: []model.Schema{{Database: "postgres", Name: "reports", Owner: "monitor"}},
+			want: []string{
+				`DROP DATABASE "old"`,
+				`app: REASSIGN OWNED BY "monitor" TO CURRENT_USER`,
+				`app: DROP OWNED BY "monitor"`,
+				`postgres: REASSIGN OWNED BY "monitor" TO CURRENT_USER`,
+				`postgres: DROP OWNED BY "monitor"`,
+				`DROP ROLE "monitor"`,
+			},
+		},
+		{
+			name:  "ignored schema in a pruned database",
+			other: []model.Schema{{Database: "old", Name: "monitoring", Owner: "monitor"}},
+			want: []string{
+				`DROP DATABASE "old"`,
+				`app: REASSIGN OWNED BY "monitor" TO CURRENT_USER`,
+				`app: DROP OWNED BY "monitor"`,
+				`postgres: REASSIGN OWNED BY "monitor" TO CURRENT_USER`,
+				`postgres: DROP OWNED BY "monitor"`,
+				`DROP ROLE "monitor"`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{
+				Engine:    model.EnginePostgres,
+				Roles:     []model.Role{{ID: pgID("admin"), Login: new(true)}},
+				Databases: []model.Database{{Name: "app", Owner: "admin"}},
+				Ignore:    model.Ignore{Schemas: []string{"monitoring"}},
+			}
+			current := &model.Current{
+				CurrentUser:        pgID("admin"),
+				CurrentDatabase:    "postgres",
+				Roles:              []model.RoleState{{ID: pgID("admin"), Login: true}, {ID: pgID("monitor")}},
+				Databases:          []model.Database{{Name: "app", Owner: "admin"}, {Name: "old", Owner: "admin"}, {Name: "postgres", Owner: "admin"}},
+				InspectedDatabases: []string{"app"},
+				OtherSchemas:       tt.other,
+			}
+			p, err := diff.Compute(desired, current, postgres.Dialect{}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			var warns []string
+			for _, w := range p.Warnings {
+				if strings.Contains(w, `"monitor"`) {
+					warns = append(warns, w)
+				}
+			}
+			if d := cmp.Diff(tt.wantWarns, warns, cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
+			}
+		})
+	}
+}

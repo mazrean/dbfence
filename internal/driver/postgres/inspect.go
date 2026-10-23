@@ -132,6 +132,18 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		}
 		cur.InspectedDatabases = append(cur.InspectedDatabases, db.Name)
 	}
+	if len(desired.Ignore.Schemas) > 0 {
+		for _, db := range otherSchemaDatabases(desired, cur, st.connectable) {
+			ok, err := d.inspectSchemaOwners(ctx, cur, db)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				cur.Warnings = append(cur.Warnings, fmt.Sprintf("cannot connect to database %q: owners of ignored schemas there are not known", db))
+				delete(st.connectable, db)
+			}
+		}
+	}
 	if !st.superuser {
 		cur.Warnings = append(cur.Warnings, st.ownerWarnings(cur)...)
 		cur.Warnings = append(cur.Warnings, st.pruneWarnings(cur)...)
@@ -616,6 +628,52 @@ func (st *state) addACL(cur *model.Current, e aclEntry) {
 		}
 	}
 	cur.Privileges = append(cur.Privileges, p)
+}
+
+// otherSchemaDatabases returns the connectable databases that are neither
+// declared nor ignored: pruning a role runs REASSIGN OWNED there, so the
+// owners of ignored schemas in them must be known (see
+// model.Current.OtherSchemas).
+func otherSchemaDatabases(desired *model.Desired, cur *model.Current, connectable map[string]bool) []string {
+	ignoreDBs := compileIgnore(desired.Ignore.Databases)
+	var out []string
+	for _, db := range cur.Databases {
+		if !connectable[db.Name] ||
+			slices.ContainsFunc(desired.Databases, func(d model.Database) bool { return d.Name == db.Name }) ||
+			slices.ContainsFunc(ignoreDBs, func(re *regexp.Regexp) bool { return re.MatchString(db.Name) }) {
+			continue
+		}
+		out = append(out, db.Name)
+	}
+	return out
+}
+
+// inspectSchemaOwners reads the schemas and their owners of an undeclared
+// database into cur.OtherSchemas. It reports false when the database
+// cannot be connected to.
+func (d *Driver) inspectSchemaOwners(ctx context.Context, cur *model.Current, database string) (bool, error) {
+	c, err := d.conn(ctx, database)
+	if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) &&
+		slices.Contains([]string{sqlstateInsufficientPrivilege, sqlstateInvalidAuthorization, sqlstateInvalidCatalogName}, pgErr.Code) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	err = query(ctx, c, `SELECT nspname, pg_get_userbyid(nspowner) FROM pg_namespace
+		WHERE nspname NOT LIKE 'pg\_%' AND nspname <> 'information_schema' ORDER BY nspname`,
+		func(rows *sql.Rows) error {
+			s := model.Schema{Database: database}
+			if scanErr := rows.Scan(&s.Name, &s.Owner); scanErr != nil {
+				return scanErr
+			}
+			cur.OtherSchemas = append(cur.OtherSchemas, s)
+			return nil
+		})
+	if err != nil {
+		return false, fmt.Errorf("schemas of database %q: %w", database, err)
+	}
+	return true, nil
 }
 
 // inspectSchemas reads the schemas of database. It reports false when the

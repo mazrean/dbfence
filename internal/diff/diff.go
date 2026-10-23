@@ -729,7 +729,7 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 			}
 			continue
 		}
-		if reason := df.keepRole(r.ID, referenced, reliedOn); reason != "" {
+		if reason := df.keepRole(r.ID, referenced, reliedOn, surviving); reason != "" {
 			if df.opts.Prune {
 				df.warn("%s %s; not pruned", df.roleResource(r.ID), reason)
 			}
@@ -745,7 +745,7 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 
 // keepRole explains why the undeclared role id must survive --prune, or
 // returns "" when it may be dropped.
-func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleID]bool) string {
+func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleID]bool, surviving []string) string {
 	switch {
 	case referenced[id]:
 		return "is referenced by the configuration but not declared (declare it to manage it)"
@@ -763,6 +763,12 @@ func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleI
 		}
 		for _, s := range df.current.Schemas {
 			if s.Owner == id.Name && df.ignore.schema(s.Database, s.Name) && !df.managedSchema(s.Database, s.Name) && !df.d.IsSystemSchema(s.Name) {
+				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
+			}
+		}
+		// Undeclared databases where REASSIGN OWNED runs.
+		for _, s := range df.current.OtherSchemas {
+			if s.Owner == id.Name && slices.Contains(surviving, s.Database) && df.ignore.schema(s.Database, s.Name) && !df.d.IsSystemSchema(s.Name) {
 				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
 			}
 		}
