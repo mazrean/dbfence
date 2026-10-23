@@ -667,28 +667,47 @@ func (d Dialect) staleEscapedRow(raw string, desired *model.Desired) (model.Obje
 
 // matchPattern reports whether name matches the database pattern p, in
 // which _ and % are wildcards and a backslash escapes the next character.
+// Patterns can come from the server, so failed states are memoized to
+// keep runs of % from backtracking exponentially.
 func matchPattern(p, name string) bool {
-	if p == "" {
-		return name == ""
+	failed := make([]bool, (len(p)+1)*(len(name)+1))
+	var match func(i, j int) bool
+	match = func(i, j int) bool {
+		key := i*(len(name)+1) + j
+		if failed[key] {
+			return false
+		}
+		ok := matchStep(p, name, i, j, match)
+		if !ok {
+			failed[key] = true
+		}
+		return ok
 	}
-	switch p[0] {
+	return match(0, 0)
+}
+
+// matchStep matches p[i:] against name[j:], using match for the rest.
+func matchStep(p, name string, i, j int, match func(i, j int) bool) bool {
+	if i == len(p) {
+		return j == len(name)
+	}
+	switch p[i] {
 	case '%':
-		for i := 0; i <= len(name); i++ {
-			if matchPattern(p[1:], name[i:]) {
-				return true
-			}
-		}
-		return false
+		// % matches nothing, or one more byte of name.
+		return match(i+1, j) || (j < len(name) && match(i, j+1))
 	case '_':
-		_, size := utf8.DecodeRuneInString(name)
-		return name != "" && matchPattern(p[1:], name[size:])
+		if j == len(name) {
+			return false
+		}
+		_, size := utf8.DecodeRuneInString(name[j:])
+		return match(i+1, j+size)
 	case '\\':
-		if len(p) > 1 {
-			p = p[1:]
+		if i+1 < len(p) {
+			i++
 		}
 	}
-	_, size := utf8.DecodeRuneInString(p)
-	return strings.HasPrefix(name, p[:size]) && matchPattern(p[size:], name[size:])
+	_, size := utf8.DecodeRuneInString(p[i:])
+	return strings.HasPrefix(name[j:], p[i:i+size]) && match(i+size, j+size)
 }
 
 // targetLabel names a database level grant target in warnings.
