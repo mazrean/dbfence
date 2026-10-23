@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/mazrean/dbfence/internal/model"
@@ -206,7 +207,7 @@ func (st *state) alterMembership(member, role string, want model.MembershipOptio
 		if revokeAdmin && e.admin {
 			q := "REVOKE ADMIN OPTION FOR " + Ident(role) + " FROM " + Ident(member) + by
 			if len(dependents) > 0 {
-				q = cascadeNote("memberships", dependents) + q + " CASCADE"
+				q = cascadeNote("memberships in "+strconv.Quote(role), member, dependents) + q + " CASCADE"
 			}
 			out = append(out, plan.SQL("", q))
 		}
@@ -261,14 +262,24 @@ func (d *Driver) RevokeMembership(member, role model.RoleID) []plan.Statement {
 	return d.st.revokeMembership(member.Name, role.Name)
 }
 
-// cascadeNote explains a CASCADE in the plan output.
-func cascadeNote(what string, dependents []string) string {
+// cascadeNote explains a CASCADE in the plan output: what grantor
+// granted to dependents is revoked with it. what names the privileges or
+// memberships, such as `memberships in "grp"`.
+func cascadeNote(what, grantor string, dependents []string) string {
 	quoted := make([]string, len(dependents))
 	for i, r := range dependents {
 		quoted[i] = Grantee(r)
 	}
-	return "-- CASCADE: " + what + " granted on by the grantee to " + strings.Join(quoted, ", ") +
+	return "-- CASCADE: " + what + " that " + Grantee(grantor) + " granted to " + strings.Join(quoted, ", ") +
 		" are revoked too; declared ones are granted again\n"
+}
+
+// objectLabel names obj for plan output.
+func objectLabel(obj model.Object) string {
+	if obj.Type == model.ObjectSchema {
+		return fmt.Sprintf("schema %q in database %q", obj.Schema, obj.Database)
+	}
+	return fmt.Sprintf("database %q", obj.Database)
 }
 
 // revoke renders REVOKE [GRANT OPTION FOR] privs ON obj FROM grantee for
@@ -332,7 +343,7 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 			q = "SET ROLE " + Ident(g) + "; " + q + "; RESET ROLE"
 		}
 		if len(dependents) > 0 {
-			q = cascadeNote("privileges", dependents) + q
+			q = cascadeNote("privileges on "+objectLabel(obj), grantee, dependents) + q
 		}
 		out = append(out, plan.SQL(db, q))
 		regrants = append(regrants, st.regrantPrivileges(obj, dependents, ps)...)
@@ -421,7 +432,7 @@ func (st *state) revokeMembership(member, role string) []plan.Statement {
 			q += " GRANTED BY " + Ident(e.grantor)
 		}
 		if len(dependents) > 0 {
-			q = cascadeNote("memberships", dependents) + q + " CASCADE"
+			q = cascadeNote("memberships in "+strconv.Quote(role), member, dependents) + q + " CASCADE"
 		}
 		out = append(out, plan.SQL("", q))
 	}

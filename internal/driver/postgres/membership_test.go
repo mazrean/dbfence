@@ -88,9 +88,9 @@ func TestStateAlterMembership(t *testing.T) {
 		{
 			name: "revoke admin from every grant and regrant declared dependents", role: "g", superuser: true,
 			opts: model.MembershipOptions{Admin: &no}, have: model.MembershipState{Admin: true, Inherit: true, Set: true},
-			want: `-- CASCADE: memberships granted on by the grantee to "d", "e" are revoked too; declared ones are granted again` + "\n" +
+			want: `-- CASCADE: memberships in "g" that "u" granted to "d", "e" are revoked too; declared ones are granted again` + "\n" +
 				`REVOKE ADMIN OPTION FOR "g" FROM "u" GRANTED BY "postgres" CASCADE` + "\n" +
-				`-- CASCADE: memberships granted on by the grantee to "d", "e" are revoked too; declared ones are granted again` + "\n" +
+				`-- CASCADE: memberships in "g" that "u" granted to "d", "e" are revoked too; declared ones are granted again` + "\n" +
 				`REVOKE ADMIN OPTION FOR "g" FROM "u" GRANTED BY "other" CASCADE` + "\n" +
 				`GRANT "g" TO "d" WITH INHERIT FALSE`,
 		},

@@ -77,7 +77,7 @@ func TestStateRevoke(t *testing.T) {
 			},
 			obj:     schema,
 			grantee: "ro", privs: []string{"USAGE"}, optionOnly: true,
-			want: "app: -- CASCADE: privileges granted on by the grantee to \"app\", \"x\" are revoked too; declared ones are granted again\n" +
+			want: "app: -- CASCADE: privileges on schema \"api\" in database \"app\" that \"ro\" granted to \"app\", \"x\" are revoked too; declared ones are granted again\n" +
 				`REVOKE GRANT OPTION FOR USAGE ON SCHEMA "api" FROM "ro" CASCADE` + "\n" +
 				`app: GRANT USAGE ON SCHEMA "api" TO "app"` + "\n" +
 				`app: GRANT USAGE ON SCHEMA "api" TO "x" WITH GRANT OPTION`,
@@ -120,7 +120,7 @@ func TestStateRevoke(t *testing.T) {
 			desired: []model.Privilege{{Grantee: model.PublicRole, Object: schema, Name: "USAGE"}},
 			obj:     schema,
 			grantee: "ro", privs: []string{"USAGE"}, optionOnly: true,
-			want: "app: -- CASCADE: privileges granted on by the grantee to PUBLIC are revoked too; declared ones are granted again\n" +
+			want: "app: -- CASCADE: privileges on schema \"api\" in database \"app\" that \"ro\" granted to PUBLIC are revoked too; declared ones are granted again\n" +
 				`REVOKE GRANT OPTION FOR USAGE ON SCHEMA "api" FROM "ro" CASCADE` + "\n" +
 				`app: GRANT USAGE ON SCHEMA "api" TO PUBLIC`,
 		},
@@ -177,7 +177,7 @@ func TestStateRevokeMembership(t *testing.T) {
 				{role: "other", member: "w", grantor: "u"},
 			},
 			desired: []model.Role{{ID: pg("v"), MemberOf: []model.RoleID{pg("grp")}}},
-			want: "-- CASCADE: memberships granted on by the grantee to \"v\" are revoked too; declared ones are granted again\n" +
+			want: "-- CASCADE: memberships in \"grp\" that \"u\" granted to \"v\" are revoked too; declared ones are granted again\n" +
 				`REVOKE "grp" FROM "u" GRANTED BY "postgres" CASCADE` + "\n" + `GRANT "grp" TO "v"`,
 		},
 		{
