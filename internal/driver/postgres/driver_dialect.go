@@ -73,19 +73,19 @@ func (st *state) regrantAfterDrop(role string, surviving, reachable []string) []
 		ps := slices.Sorted(slices.Values(privs[obj]))
 		out = append(out, st.regrantPrivileges(obj, st.aclDependents(obj, role, ps), ps)...)
 	}
-	if st.version < pg16 {
-		// Memberships do not depend on their grantor before 16.
-		return out
-	}
 	var granted []string
 	for _, e := range st.members {
-		if e.grantor == role && !slices.Contains(granted, e.role) {
+		// Memberships do not depend on their grantor before 16.
+		if st.version >= pg16 && e.grantor == role && !slices.Contains(granted, e.role) {
 			granted = append(granted, e.role)
 		}
 	}
 	slices.Sort(granted)
 	for _, g := range granted {
 		out = append(out, st.regrantMembers(g, st.memberDependents(role, g))...)
+	}
+	if len(out) > 0 {
+		out[0] = plan.SQL(out[0].Database, "-- CASCADE: grants made by "+Grantee(role)+" are revoked with it; declared ones are granted again\n"+out[0].SQL())
 	}
 	return out
 }

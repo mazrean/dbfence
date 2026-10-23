@@ -521,6 +521,7 @@ DROP ROLE "x"`
 			version:   170000,
 			databases: []string{"app", "owned"},
 			want: drop + `
+-- CASCADE: grants made by "x" are revoked with it; declared ones are granted again
 GRANT CONNECT ON DATABASE "app" TO "q"
 GRANT CONNECT ON DATABASE "app" TO "y" WITH GRANT OPTION
 app: GRANT USAGE ON SCHEMA "api" TO "y"
@@ -532,6 +533,7 @@ GRANT "g" TO "z"`,
 			version:   150000,
 			databases: []string{"app", "owned"},
 			want: drop + `
+-- CASCADE: grants made by "x" are revoked with it; declared ones are granted again
 GRANT CONNECT ON DATABASE "app" TO "q"
 GRANT CONNECT ON DATABASE "app" TO "y" WITH GRANT OPTION
 app: GRANT USAGE ON SCHEMA "api" TO "y"`,
