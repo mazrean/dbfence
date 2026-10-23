@@ -39,9 +39,12 @@ func f(name string, w word, k plan.Keyword) {
 	quote := plan.QuotedIdent                               // want `plan.QuotedIdent may be used only by the engine Dialects`
 	_ = quote
 
-	_ = plan.SQL("", conv[plan.Keyword](name)) // want `plan.Keyword instantiates a type parameter that admits string conversions`
-	_ = same(k)                                // want `plan.Keyword instantiates a type parameter that admits string conversions`
-	_ = pick[plan.Keyword](k, "CASCADE")
+	// Outside internal/plan any generic may fill a Keyword type argument.
+	_ = plan.SQL("", conv[plan.Keyword](name)) // want `plan.Keyword instantiates a generic with a type argument that contains plan.Keyword`
+	_ = same(k)                                // want `plan.Keyword instantiates a generic with a type argument that contains plan.Keyword`
+	_ = pick[plan.Keyword](k, "CASCADE")       // want `plan.Keyword instantiates a generic with a type argument that contains plan.Keyword`
+	_ = pick(name, "CASCADE")
+	_ = plan.Join(", ", k, plan.Keyword("CASCADE"))
 
 	// Constants, Keyword values and numbers are fine.
 	_ = plan.SQL("", plan.Keyword("GRANT "), plan.Keyword(create), plan.Keyword(typed))

@@ -36,6 +36,31 @@ type Statement struct{ parts []Fragment }
 
 func SQL(_ string, parts ...Fragment) Statement { return Statement{parts: parts} }
 
+type Seq []Fragment
+
+func (Seq) render() {}
+
+// Join is a generic of the plan package, which other packages may
+// instantiate with Keyword.
+func Join[F Fragment](sep Keyword, items ...F) Seq {
+	var out Seq
+	for i, f := range items {
+		if i > 0 {
+			out = append(out, sep)
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// The plan package may use pointers to Keyword and reflect, but a
+// pointer conversion is still a conversion.
+func pointers(s string) *Keyword {
+	k := Keyword("x")
+	_ = &k
+	return (*Keyword)(&s) // want `conversion to \*Keyword, which contains plan.Keyword`
+}
+
 // The plan package itself may use the constructors, but SQL text stays
 // constant there too.
 func internalUse(s string) (Keyword, Ident) {
