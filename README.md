@@ -145,11 +145,24 @@ A MySQL `dsn` is a go-sql-driver/mysql DSN such as `admin:pw@tcp(db.internal:330
   - On MySQL the declared `member_of` becomes exactly the account's default roles (`SET DEFAULT ROLE`), so the roles are active without `SET ROLE`. The connected account's default roles are never narrowed: they also keep the memberships it keeps and its current default roles.
 - **`database "<label>"`**: `name`, `owner`, `encoding`, `lc_collate` and `lc_ctype` (PostgreSQL; the last three are create-only; none may be empty), or `charset` and `collation` (MySQL; letters, digits and `_`).
 - **`schema "<label>"`**: PostgreSQL only. Takes `database`, `name` and `owner`. `schema "public"` (or another template schema) can also be declared in a database the plan creates; only its owner and grants are planned.
-- **`grant`**: takes `role`, `database`, an optional `schema` (PostgreSQL), `privileges` and `with_grant_option`.
+- **`grant`**: takes `role`, `database` (or `database_pattern` on MySQL), an optional `schema` (PostgreSQL), `privileges` and `with_grant_option`.
   - `ALL` expands to every privilege of that object type. `GRANT OPTION` is not a privilege; use `with_grant_option = true`.
   - A declared role's privileges on declared databases or schemas that aren't listed are revoked. Grants to an object's owner have no effect (a warning is printed).
   - The database (and schema) must be declared.
-  - MySQL: only database-level privileges (`ON db.*`) are managed. Every grant block for the same account and database must use the same `with_grant_option`, because MySQL keeps one grant option per database. `_` and `%` in database names are escaped (`my\_app`), so a grant never acts as a wildcard. Other wildcard grants are not managed; a warning is printed when one of a declared account matches a declared database. With `partial_revokes` ON, MySQL reads names literally, so escaped rows of declared databases are revoked and granted again on the literal name.
+  - MySQL: only database-level privileges (`ON db.*`) are managed. Every grant block for the same account and database (or pattern) must use the same `with_grant_option`, because MySQL keeps one grant option per database. `_` and `%` in `database` names are escaped (`my\_app`), so a `database` grant never acts as a wildcard. With `partial_revokes` ON, MySQL reads names literally, so escaped rows of declared databases are revoked and granted again on the literal name.
+- **`grant` with `database_pattern`** (MySQL only): a wildcard grant such as `ON tenant\_%.*`.
+  - The pattern is used verbatim: `%` and `_` are wildcards and `\` escapes them (write `"tenant\\_%"` in HCL for `tenant\_%`). It needs at least one wildcard, and the databases it matches need not be declared.
+  - A declared role's privileges on a declared pattern that aren't listed are revoked. Patterns that no grant block declares are not managed; a warning is printed when one held by a declared account matches a declared database.
+  - MySQL does not add up database-level grants: for an account it uses only the most specific `mysql.db` row that matches a database. When an account has both a `database` grant and a matching pattern, or two matching patterns, plan warns that the pattern's privileges don't apply to that database.
+  - Needs `partial_revokes` OFF (plan fails otherwise, because MySQL then reads `%` and `_` literally). Wildcards in database-level grants are deprecated since MySQL 8.2 and are to become literals in a future release.
+
+  ```hcl
+  grant {
+    role             = user.app.id
+    database_pattern = "tenant\\_%"          # tenant_a, tenant_b, ... (not tenantX)
+    privileges       = ["SELECT", "INSERT"]
+  }
+  ```
 - **`grant` to `PUBLIC`** (PostgreSQL only): `role = "PUBLIC"` (any case, no role block needed).
   - PUBLIC is managed only on databases and schemas that have at least one PUBLIC grant block. There, PUBLIC's undeclared privileges are revoked; elsewhere they are left alone.
   - `privileges = []` (allowed only for PUBLIC) revokes everything PUBLIC holds on that object. It cannot be combined with another PUBLIC grant block on the same object.
