@@ -65,6 +65,10 @@ func TestFunctions(t *testing.T) {
 		{"tfstate missing", `tfstate("testdata/terraform.tfstate", "aws_db_instance.nope.address")`, cty.NilVal, "not found"},
 		{"stdlib format", `format("%s-%d", "a", 1)`, cty.StringVal("a-1"), ""},
 		{"base64", `base64decode(base64encode("x"))`, cty.StringVal("x"), ""},
+		{"tonumber", `tonumber("12")`, cty.NumberIntVal(12), ""},
+		{"tonumber invalid", `tonumber("x")`, cty.NilVal, "cannot convert value to number"},
+		{"jsondecode", `jsondecode("{\"a\":1}").a`, cty.NumberIntVal(1), ""},
+		{"jsondecode invalid", `jsondecode("{x")`, cty.NilVal, "not valid JSON"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -97,5 +101,31 @@ func TestGCPSecretsAreCached(t *testing.T) {
 	}
 	if len(gcp.names) != 1 {
 		t.Errorf("gcp calls = %v, want 1", gcp.names)
+	}
+}
+
+// Errors must never quote secret material passed to a function.
+func TestFunctionErrorsDoNotLeakValues(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		expr string
+	}{
+		{"tonumber", `tonumber(env("SECRET"))`},
+		{"jsondecode first char", `jsondecode(env("SECRET"))`},
+		{"jsondecode inner", `jsondecode("{\"a\": ${env("SECRET")}}")`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewRegistry(t.Context(), WithEnv(func(string) (string, bool) { return "qs3cr3t", true }))
+			_, err := eval(t, r, tt.expr)
+			if err == nil {
+				t.Fatal("want error")
+			}
+			if strings.Contains(err.Error(), "qs3cr3t") || strings.Contains(err.Error(), "'q'") || strings.Contains(err.Error(), `"q"`) {
+				t.Errorf("error leaks the value: %v", err)
+			}
+		})
 	}
 }
