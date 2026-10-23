@@ -23,7 +23,7 @@ func TestSecretSourcesRegisterResults(t *testing.T) {
 		plain      []string
 	}{
 		{name: "secretenv", expr: `secretenv("PW")`, registered: []string{"reg-secretenv-value"}},
-		{name: "env is not a secret source", expr: `env("PLAIN")`, plain: []string{"reg-env-value"}},
+		{name: "env is not a secret source", expr: `env("PLAIN")`, plain: []string{"reg-env-unlisted"}},
 		{name: "aws_secretsmanager json_key", expr: `aws_secretsmanager("id", "password")`, registered: []string{"reg-aws-password"}},
 		{name: "aws_secretsmanager whole document", expr: `aws_secretsmanager("id2")`, registered: []string{`{"password": "reg-aws-doc"}`}},
 		{name: "gcp_secretmanager", expr: `gcp_secretmanager("projects/p/secrets/reg-gcp")`, registered: []string{"payload:projects/p/secrets/reg-gcp/versions/latest"}},
@@ -32,7 +32,7 @@ func TestSecretSourcesRegisterResults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			env := map[string]string{"PW": "reg-secretenv-value", "PLAIN": "reg-env-value"}
+			env := map[string]string{"PW": "reg-secretenv-value", "PLAIN": "reg-env-unlisted"}
 			aws := `{"password": "reg-aws-password"}`
 			if tt.name == "aws_secretsmanager whole document" {
 				aws = `{"password": "reg-aws-doc"}`
