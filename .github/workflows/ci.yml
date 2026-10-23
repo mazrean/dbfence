@@ -16,6 +16,7 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@v5
 
+      # Integration tests start MySQL and PostgreSQL containers with dockertest.
       - name: Run tests
         run: mise run test:ci
 
@@ -71,30 +72,21 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@v5
 
+      - name: Check GoReleaser configuration
+        run: mise run release:check
+
       - name: Build with GoReleaser
         run: mise run release:build
 
       - name: Test binary execution
-        run: ./dist/kessoku_linux_amd64_v1/kessoku --version
+        run: ./dist/dbfence_linux_amd64_v1/dbfence --version
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: kessoku-binaries
+          name: dbfence-binaries
           path: dist/
           retention-days: 30
-
-  validate-skills:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up mise
-        uses: jdx/mise-action@v5
-
-      - name: Validate kessoku-di skill
-        run: mise run validate-skills
 
   api-compatibility:
     runs-on: ubuntu-latest
