@@ -19,6 +19,20 @@ func TestStatementRedaction(t *testing.T) {
 	}
 }
 
+func TestStatementNotesAreNotSQL(t *testing.T) {
+	t.Parallel()
+	s := SQL("", "REVOKE X").WithNote("x\nDROP DATABASE prod; --")
+	if got, want := s.SQL(), "REVOKE X"; got != want {
+		t.Errorf("SQL() = %q, want %q", got, want)
+	}
+	if got, want := s.Display(true), "REVOKE X"; got != want {
+		t.Errorf("Display(true) = %q, want %q", got, want)
+	}
+	if got := s.Notes(); len(got) != 1 {
+		t.Errorf("Notes() = %q, want one note", got)
+	}
+}
+
 func TestRender(t *testing.T) {
 	t.Parallel()
 	schema := Change{
@@ -48,6 +62,15 @@ func TestRender(t *testing.T) {
 			}},
 			want: "-- Plan: 1 to create, 1 to change, 1 to grant, 1 to revoke, 2 to drop (7 statements).\n" +
 				"-- DESTRUCTIVE: this plan drops 2 objects: database \"d\", role \"x\"\n",
+		},
+		{
+			name: "notes are shown before the statement",
+			plan: &Plan{Changes: []Change{{
+				Action: ActionRevoke, Resource: "r",
+				Statements: []Statement{SQL("app", "REVOKE X CASCADE").WithNote("second").WithNote("first")},
+			}}},
+			want: "-- [revoke] r\n-- (on database \"app\")\n-- first\n-- second\nREVOKE X CASCADE;\n\n" +
+				"-- Plan: 0 to create, 0 to change, 1 to revoke, 0 to drop (1 statement).\n",
 		},
 		{
 			name: "no changes",

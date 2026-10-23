@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -141,6 +142,9 @@ func sqlOf(stmts []plan.Statement) string {
 	out := make([]string, len(stmts))
 	for i, s := range stmts {
 		out[i] = s.SQL()
+		for _, n := range slices.Backward(s.Notes()) {
+			out[i] = "-- " + n + "\n" + out[i]
+		}
 		if s.Database != "" {
 			out[i] = s.Database + ": " + out[i]
 		}

@@ -47,10 +47,14 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 	for _, c := range p.Changes {
 		for _, s := range c.Statements {
 			n++
-			// Comments explaining the statement, such as a CASCADE, go on
+			// Notes explaining the statement, such as a CASCADE, go on
 			// their own lines before the progress line.
-			comments, stmt := splitComments(s.Display(showSecrets))
-			if _, err := fmt.Fprintf(w, "%s[%d/%d] %s%s\n", comments, n, total, onDatabase(s.Database, "", " "), stmt); err != nil {
+			var sb strings.Builder
+			for _, note := range s.Notes() {
+				fmt.Fprintf(&sb, "-- %s\n", note)
+			}
+			fmt.Fprintf(&sb, "[%d/%d] %s%s\n", n, total, onDatabase(s.Database, "", " "), s.Display(showSecrets))
+			if _, err := io.WriteString(w, sb.String()); err != nil {
 				return err
 			}
 			if err := ex.Exec(ctx, s.Database, s.SQL()); err != nil {
@@ -118,21 +122,6 @@ func withholdQuoted(msg string) string {
 		out += withheldNote
 	}
 	return out
-}
-
-// splitComments splits the leading "--" comment lines off text. comments
-// keeps their line breaks.
-func splitComments(text string) (comments, rest string) {
-	rest = text
-	for strings.HasPrefix(rest, "--") {
-		line, after, ok := strings.Cut(rest, "\n")
-		if !ok {
-			break
-		}
-		comments += line + "\n"
-		rest = after
-	}
-	return comments, rest
 }
 
 // isCancellation reports whether err only says that ctx was cancelled or

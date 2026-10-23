@@ -100,9 +100,9 @@ func (st *state) revokeOwnerMemberships(role string) []plan.Statement {
 		if st.version >= pg16 && len(st.memberDependents(role, e.role)) > 0 {
 			q += " CASCADE"
 		}
-		note := fmt.Sprintf("-- revoked first: through it %s has the privileges of the owner of objects it granted privileges on, so DROP OWNED would not revoke those grants\n",
-			Ident(role))
-		out = append(out, plan.SQL("", note+q))
+		note := fmt.Sprintf("revoked first: through it %s has the privileges of the owner of objects it granted privileges on, so DROP OWNED would not revoke those grants",
+			noteRole(role))
+		out = append(out, plan.SQL("", q).WithNote(note))
 	}
 	return out
 }
@@ -157,7 +157,7 @@ func (st *state) regrantAfterDrop(role string, surviving, reachable []string) []
 		out = append(out, stmts...)
 	}
 	if len(out) > 0 {
-		out[0] = plan.SQL(out[0].Database, "-- CASCADE: grants made by "+Grantee(role)+" are revoked with it; declared ones are granted again\n"+out[0].SQL())
+		out[0] = out[0].WithNote("CASCADE: grants made by " + noteRole(role) + " are revoked with it; declared ones are granted again")
 	}
 	return out
 }
@@ -173,7 +173,8 @@ func (d *Driver) DropSchema(s model.Schema) []plan.Statement {
 	if n == 0 {
 		return d.Dialect.DropSchema(s)
 	}
-	return []plan.Statement{plan.SQL(s.Database, fmt.Sprintf("-- CASCADE: the schema contains %d objects, which are dropped too\nDROP SCHEMA %s CASCADE", n, Ident(s.Name)))}
+	return []plan.Statement{plan.SQL(s.Database, "DROP SCHEMA "+Ident(s.Name)+" CASCADE").
+		WithNote(fmt.Sprintf("CASCADE: the schema contains %d objects, which are dropped too", n))}
 }
 
 // AlterRole implements diff.Dialect. Changes to roles the connected user
@@ -277,10 +278,11 @@ func (st *state) alterMembership(member, role string, want model.MembershipOptio
 		}
 		if revokeAdmin && e.admin {
 			q := "REVOKE ADMIN OPTION FOR " + Ident(role) + " FROM " + Ident(member) + by
-			if len(dependents) > 0 {
-				q = cascadeNote("memberships in "+strconv.Quote(role), member, dependents) + q + " CASCADE"
+			if len(dependents) == 0 {
+				out = append(out, plan.SQL("", q))
+			} else {
+				out = append(out, plan.SQL("", q+" CASCADE").WithNote(cascadeNote("memberships in "+strconv.Quote(role), member, dependents)))
 			}
-			out = append(out, plan.SQL("", q))
 		}
 		if opts != (model.MembershipOptions{}) {
 			out = append(out, plan.SQL("", grantMembership(member, role, opts)+by))
@@ -390,10 +392,20 @@ func (st *state) membershipDenied(verb, member, role, grantor string) string {
 func cascadeNote(what, grantor string, dependents []string) string {
 	quoted := make([]string, len(dependents))
 	for i, r := range dependents {
-		quoted[i] = Grantee(r)
+		quoted[i] = noteRole(r)
 	}
-	return "-- CASCADE: " + what + " that " + Grantee(grantor) + " granted to " + strings.Join(quoted, ", ") +
-		" are revoked too; declared ones are granted again\n"
+	return "CASCADE: " + what + " that " + noteRole(grantor) + " granted to " + strings.Join(quoted, ", ") +
+		" are revoked too; declared ones are granted again"
+}
+
+// noteRole names a role in a plan note: PUBLIC unquoted, any other role
+// Go-quoted like objectLabel, so that line breaks and other control
+// characters in a name read from the server are escaped.
+func noteRole(name string) string {
+	if (model.RoleID{Name: name}).IsPublic() {
+		return "PUBLIC"
+	}
+	return strconv.Quote(name)
 }
 
 // objectLabel names obj for plan output.
@@ -475,10 +487,11 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 			// so a failing REVOKE also rolls back the SET ROLE.
 			q = "SET ROLE " + Ident(g) + "; " + q + "; RESET ROLE"
 		}
+		stmt := plan.SQL(db, q)
 		if len(dependents) > 0 {
-			q = cascadeNote("privileges on "+objectLabel(obj), grantee, dependents) + q
+			stmt = stmt.WithNote(cascadeNote("privileges on "+objectLabel(obj), grantee, dependents))
 		}
-		out = append(out, plan.SQL(db, q))
+		out = append(out, stmt)
 		regrants = append(regrants, st.regrantPrivileges(obj, grantee, dependents, ps)...)
 	}
 	return append(out, regrants...), warns
@@ -579,10 +592,11 @@ func (st *state) revokeMembership(member, role string) ([]plan.Statement, []stri
 		if e.grantor != "" {
 			q += " GRANTED BY " + Ident(e.grantor)
 		}
+		stmt := plan.SQL("", q)
 		if len(dependents) > 0 {
-			q = cascadeNote("memberships in "+strconv.Quote(role), member, dependents) + q + " CASCADE"
+			stmt = plan.SQL("", q+" CASCADE").WithNote(cascadeNote("memberships in "+strconv.Quote(role), member, dependents))
 		}
-		out = append(out, plan.SQL("", q))
+		out = append(out, stmt)
 	}
 	if !revoked {
 		if !st.canManageMembership(role, "") {

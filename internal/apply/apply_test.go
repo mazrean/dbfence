@@ -143,19 +143,25 @@ func TestRunErrors(t *testing.T) {
 	}
 }
 
-func TestRunPrintsCommentsBeforeTheStatement(t *testing.T) {
+func TestRunPrintsNotesBeforeTheStatement(t *testing.T) {
 	t.Parallel()
+	revoke := `REVOKE CONNECT ON DATABASE "app" FROM "a" CASCADE`
 	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionRevoke, Resource: `CONNECT on database "app" from "a"`, Statements: []plan.Statement{
-		plan.SQL("app", "-- CASCADE: one\n-- two\nREVOKE CONNECT ON DATABASE \"app\" FROM \"a\" CASCADE"),
-		plan.SQL("", "-- only a comment"),
+		plan.SQL("app", revoke).WithNote("two").WithNote("CASCADE: one"),
+		plan.SQL("", "GRANT X"),
 	}}}}
 	var out strings.Builder
-	if err := Run(t.Context(), &recorder{}, p, &out, false); err != nil {
+	r := &recorder{}
+	if err := Run(t.Context(), r, p, &out, false); err != nil {
 		t.Fatal(err)
 	}
-	want := "-- CASCADE: one\n-- two\n[1/2] (on database \"app\") REVOKE CONNECT ON DATABASE \"app\" FROM \"a\" CASCADE\n[2/2] -- only a comment\n"
+	want := "-- CASCADE: one\n-- two\n[1/2] (on database \"app\") " + revoke + "\n[2/2] GRANT X\n"
 	if out.String() != want {
 		t.Errorf("output =\n%s\nwant\n%s", out.String(), want)
+	}
+	// Notes are never sent to the server.
+	if got := strings.Join(r.ran, "\n"); got != "app|"+revoke+"\n|GRANT X" {
+		t.Errorf("ran =\n%s", got)
 	}
 }
 

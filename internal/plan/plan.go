@@ -17,6 +17,7 @@ type Secret string
 type Statement struct {
 	Database string
 	parts    []any
+	notes    []string
 }
 
 // SQL builds a statement from string and Secret fragments.
@@ -30,6 +31,17 @@ func SQL(database string, parts ...any) Statement {
 	}
 	return Statement{Database: database, parts: parts}
 }
+
+// WithNote returns s with note in front of its other notes. Notes explain
+// the statement in plan and apply output, such as a CASCADE; they are
+// never part of the SQL sent to the server.
+func (s Statement) WithNote(note string) Statement {
+	s.notes = append([]string{note}, s.notes...)
+	return s
+}
+
+// Notes returns the notes explaining s, in display order.
+func (s Statement) Notes() []string { return slices.Clone(s.notes) }
 
 // SQL returns the executable text.
 func (s Statement) SQL() string { return s.render(true) }
@@ -122,6 +134,9 @@ func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 		for _, s := range c.Statements {
 			if s.Database != "" {
 				fmt.Fprintf(&sb, "-- (on database %q)\n", s.Database)
+			}
+			for _, n := range s.notes {
+				fmt.Fprintf(&sb, "-- %s\n", n)
 			}
 			sb.WriteString(s.Display(showSecrets))
 			sb.WriteString(";\n")
