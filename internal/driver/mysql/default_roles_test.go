@@ -73,3 +73,29 @@ func TestSetDefaultRoles(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultRolesWarning(t *testing.T) {
+	t.Parallel()
+	unknown := &model.Current{Roles: []model.RoleState{{ID: app, DefaultRolesUnknown: true}}}
+	known := &model.Current{Roles: []model.RoleState{{ID: app}}}
+	withMembers := &model.Desired{Roles: []model.Role{{ID: app, MemberOf: []model.RoleID{reader}}}}
+	withoutMembers := &model.Desired{Roles: []model.Role{{ID: app}}}
+	tests := []struct {
+		desired *model.Desired
+		cur     *model.Current
+		name    string
+		want    bool
+	}{
+		{name: "unreadable with managed memberships", desired: withMembers, cur: unknown, want: true},
+		{name: "unreadable without managed memberships", desired: withoutMembers, cur: unknown},
+		{name: "readable", desired: withMembers, cur: known},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := defaultRolesWarning(tt.desired, tt.cur); (got != "") != tt.want {
+				t.Errorf("defaultRolesWarning() = %q, want a warning: %v", got, tt.want)
+			}
+		})
+	}
+}

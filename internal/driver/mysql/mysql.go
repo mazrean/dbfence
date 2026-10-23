@@ -134,12 +134,25 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	if err := d.inspectDBPrivileges(ctx, cur, desired); err != nil {
 		return nil, err
 	}
+	if w := defaultRolesWarning(desired, cur); w != "" {
+		cur.Warnings = append(cur.Warnings, w)
+	}
 	plugins, err := d.activeAuthPlugins(ctx)
 	if err != nil {
 		return nil, err
 	}
 	cur.Warnings = append(cur.Warnings, roleWarnings(desired, cur, plugins)...)
 	return cur, nil
+}
+
+// defaultRolesWarning explains the fallback when mysql.default_roles
+// cannot be read and the configuration manages memberships.
+func defaultRolesWarning(desired *model.Desired, cur *model.Current) string {
+	if desired == nil || !slices.ContainsFunc(cur.Roles, func(r model.RoleState) bool { return r.DefaultRolesUnknown }) ||
+		!slices.ContainsFunc(desired.Roles, func(r model.Role) bool { return r.MemberOf != nil }) {
+		return ""
+	}
+	return "cannot read default roles (mysql.default_roles): SET DEFAULT ROLE is issued on every run for declared accounts with member_of"
 }
 
 // activeAuthPlugins lists the loaded authentication plugins, or nil when
