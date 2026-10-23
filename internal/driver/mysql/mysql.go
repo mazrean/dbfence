@@ -503,13 +503,35 @@ func (Dialect) IsSystemDatabase(name string) bool {
 // IsSystemSchema implements diff.Dialect. MySQL has no schemas inside databases.
 func (Dialect) IsSystemSchema(string) bool { return true }
 
+// Name renders a charset, collation or plugin name: bare when it is a
+// plain word, quoted as an identifier otherwise.
+func Name(s string) string {
+	if s != "" && strings.IndexFunc(s, func(r rune) bool {
+		return r != '_' && (r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
+	}) < 0 {
+		return s
+	}
+	return Ident(s)
+}
+
+// passwordPlugins are authentication plugins that verify a password.
+// IDENTIFIED WITH one of them without BY sets an empty password.
+var passwordPlugins = []string{password.PluginCachingSHA2, password.PluginNative, "sha256_password"}
+
+func isPasswordPlugin(plugin string) bool {
+	return slices.ContainsFunc(passwordPlugins, func(p string) bool { return strings.EqualFold(p, plugin) })
+}
+
 func (d Dialect) identified(plugin string, pw *string) []any {
-	if pw == nil {
+	switch {
+	case pw == nil && plugin == "":
 		return nil
+	case pw == nil:
+		return []any{" IDENTIFIED WITH " + Name(plugin)}
 	}
 	clause := " IDENTIFIED"
 	if plugin != "" {
-		clause += " WITH " + plugin
+		clause += " WITH " + Name(plugin)
 	}
 	return []any{clause + " BY ", plan.Secret(d.Literal(*pw))}
 }
@@ -548,25 +570,30 @@ func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]pla
 	var out []plan.Statement
 	var warns []string
 	plugin := cmpOr(r.AuthPlugin, cur.AuthPlugin)
-	pluginChanged := r.AuthPlugin != "" && r.AuthPlugin != cur.AuthPlugin
-	setPassword := false
+	pluginChanged := r.AuthPlugin != "" && !strings.EqualFold(r.AuthPlugin, cur.AuthPlugin)
+	identify := false
 	switch {
 	case r.Password == nil:
-		if pluginChanged {
-			warns = append(warns, fmt.Sprintf("auth_plugin of %q differs (%s) but no password is declared; it cannot be changed", r.ID, cur.AuthPlugin))
+		switch {
+		case !pluginChanged:
+		case isPasswordPlugin(r.AuthPlugin):
+			// Switching without BY would set an empty password.
+			warns = append(warns, fmt.Sprintf("auth_plugin of %q is %s, not %s, but no password is declared; declare one to change the plugin", r.ID, cur.AuthPlugin, r.AuthPlugin))
+		default:
+			identify = true
 		}
 	case force, pluginChanged:
-		setPassword = true
+		identify = true
 	default:
 		ok, err := password.MatchMySQL(cur.AuthPlugin, cur.PasswordHash, *r.Password)
 		switch {
 		case err != nil:
 			warns = append(warns, fmt.Sprintf("cannot compare the password of %q: %v; use --force-password to set it", r.ID, err))
 		case !ok:
-			setPassword = true
+			identify = true
 		}
 	}
-	if setPassword {
+	if identify {
 		parts := append([]any{"ALTER USER " + d.Account(r.ID)}, d.identified(plugin, r.Password)...)
 		out = append(out, plan.SQL("", parts...))
 	}
