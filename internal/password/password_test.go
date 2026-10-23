@@ -92,6 +92,7 @@ func TestMatchPostgres(t *testing.T) {
 		{"md5 match", PostgresMD5("app", "secret"), "app", "secret", true, false},
 		{"md5 other user", PostgresMD5("app", "secret"), "bob", "secret", false, false},
 		{"no password", "", "app", "secret", false, false},
+		{"no password empty declared", "", "app", "", true, false},
 		{"unknown", "plain", "app", "secret", false, true},
 	}
 	for _, tt := range tests {

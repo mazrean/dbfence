@@ -180,7 +180,9 @@ func repeat(seq []byte, n int) []byte {
 func MatchPostgres(verifier, user, password string) (bool, error) {
 	switch {
 	case verifier == "":
-		return false, nil
+		// No stored password (NULL rolpassword). PostgreSQL stores an
+		// empty password this way, so only "" matches.
+		return password == "", nil
 	case strings.HasPrefix(verifier, "SCRAM-SHA-256$"):
 		return matchSCRAM(verifier, password)
 	case strings.HasPrefix(verifier, "md5") && len(verifier) == 35:
