@@ -3,8 +3,12 @@ package funcs
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zclconf/go-cty/cty"
 )
 
 func TestTFStateErrorsRedactURL(t *testing.T) {
@@ -74,6 +78,41 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 				if strings.Contains(msg, s) {
 					t.Errorf("err = %q leaks %q", msg, s)
 				}
+			}
+		})
+	}
+}
+
+// TestTFStateErrorsDoNotQuoteValues checks that lookup and decoding
+// errors never quote values from the state.
+func TestTFStateErrorsDoNotQuoteValues(t *testing.T) {
+	t.Parallel()
+	const secret = "S3cr3tPassw0rd"
+	path := filepath.Join(t.TempDir(), "terraform.tfstate")
+	state := `{"version": 4, "outputs": {}, "resources": [{"mode": "managed", "type": "aws_db_instance", "name": "main",
+		"instances": [{"attributes": {"password": "` + secret + `"}}]}]}`
+	if err := os.WriteFile(path, []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		tfstate TFState
+		address string
+		wantErr string
+	}{
+		{"address one level too deep", newTFStateReader(), "aws_db_instance.main.password.value", `cannot look up "aws_db_instance.main.password.value"`},
+		{"undecodable value", fakeTFState{json: `{"a": "` + secret + `"`}, "output.x", `the value of "output.x" cannot be decoded`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fn := NewRegistry(t.Context(), WithTFState(tt.tfstate)).Functions()["tfstate"]
+			_, err := fn.Call([]cty.Value{cty.StringVal(path), cty.StringVal(tt.address)})
+			if err == nil {
+				t.Fatal("want error")
+			}
+			if msg := err.Error(); strings.Contains(msg, secret) || !strings.Contains(msg, tt.wantErr) {
+				t.Errorf("err = %q, want %q without the secret", msg, tt.wantErr)
 			}
 		})
 	}

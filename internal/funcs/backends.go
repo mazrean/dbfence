@@ -91,7 +91,9 @@ func (t *tfstateReader) Lookup(ctx context.Context, loc, address string) ([]byte
 	shown, _ := redactURL(loc)
 	obj, err := st.Lookup(address)
 	if err != nil {
-		return nil, fmt.Errorf("lookup %q in %s: %w", address, shown, err)
+		// Not wrapped: gojq's type errors quote the value they were
+		// applied to, which may be a secret attribute.
+		return nil, fmt.Errorf("tfstate: cannot look up %q in %s; check that the address matches the structure of the state", address, shown)
 	}
 	if obj == nil || obj.Value == nil {
 		return nil, errors.New("tfstate: " + address + " not found in " + shown)
