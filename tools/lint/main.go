@@ -14,6 +14,7 @@ import (
 	"github.com/kisielk/errcheck/errcheck"
 	"github.com/kyoh86/exportloopref"
 	"github.com/mazrean/dbfence/tools/lint/outputsink"
+	"github.com/mazrean/dbfence/tools/lint/sqlfragment"
 	"github.com/lufeee/execinquery"
 	"github.com/nishanths/exhaustive"
 	"github.com/sanposhiho/wastedassign/v2"
@@ -124,6 +125,7 @@ func main() {
 
 		// dbfence analyzers
 		outputsink.Analyzer,
+		sqlfragment.Analyzer,
 	}
 
 	// modernize analyzers
