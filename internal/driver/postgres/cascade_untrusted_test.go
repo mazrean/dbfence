@@ -148,3 +148,91 @@ func TestCascadePlanSparesUnmanagedRoles(t *testing.T) {
 		}
 	}
 }
+
+// TestPruneSparesUnmanagedRoles checks that --prune keeps a role whose
+// DROP ROLE or DROP OWNED would take privileges or memberships from a role
+// Inspect left out, and says why.
+func TestPruneSparesUnmanagedRoles(t *testing.T) {
+	t.Parallel()
+	bad := "evil\n"
+	db := model.Object{Type: model.ObjectDatabase, Database: "app"}
+	tests := []struct {
+		name    string
+		acl     []aclEntry
+		members []memberEntry
+		version int
+		dropped bool
+	}{
+		{
+			name:    "unmanaged member",
+			members: []memberEntry{{role: "old", member: bad, grantor: "postgres"}},
+		},
+		{
+			name: "privilege granted to an unmanaged role",
+			acl:  []aclEntry{{obj: db, grantee: "old", grantor: "postgres", priv: "CONNECT", grantable: true}, {obj: db, grantee: bad, grantor: "old", priv: "CONNECT"}},
+		},
+		{
+			name: "privilege passed on to an unmanaged role",
+			acl: []aclEntry{
+				{obj: db, grantee: "old", grantor: "postgres", priv: "CONNECT", grantable: true},
+				{obj: db, grantee: "x", grantor: "old", priv: "CONNECT", grantable: true},
+				{obj: db, grantee: bad, grantor: "x", priv: "CONNECT"},
+			},
+		},
+		{
+			name:    "membership granted to an unmanaged role",
+			members: []memberEntry{{role: "grp", member: "old", grantor: "postgres", admin: true}, {role: "grp", member: bad, grantor: "old"}},
+		},
+		{
+			name:    "membership granted to an unmanaged role before 16",
+			members: []memberEntry{{role: "grp", member: "old", grantor: "postgres", admin: true}, {role: "grp", member: bad, grantor: "old"}},
+			version: 150000,
+			dropped: true,
+		},
+		{
+			name:    "grants to managed roles only",
+			acl:     []aclEntry{{obj: db, grantee: "old", grantor: "postgres", priv: "CONNECT", grantable: true}, {obj: db, grantee: "x", grantor: "old", priv: "CONNECT"}},
+			members: []memberEntry{{role: "old", member: "x", grantor: "postgres"}},
+			dropped: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app"}}, Roles: []model.Role{{ID: pg("x")}, {ID: pg("grp")}}}
+			cur := &model.Current{
+				CurrentUser: pg("postgres"),
+				Roles:       []model.RoleState{{ID: pg("postgres"), Superuser: true}, {ID: pg("old")}, {ID: pg("x")}, {ID: pg("grp")}, {ID: pg(bad)}},
+				Databases:   []model.Database{{Name: "postgres"}, {Name: "app", Owner: "postgres"}},
+			}
+			version := tt.version
+			if version == 0 {
+				version = 170000
+			}
+			st := &state{
+				desired: desired, user: "postgres", superuser: true, version: version,
+				connectable: map[string]bool{"postgres": true, "app": true},
+				owners:      map[model.Object]string{db: "postgres"},
+				acl:         tt.acl, members: tt.members,
+			}
+			if _, err := cur.DropUntrusted(model.EnginePostgres); err != nil {
+				t.Fatal(err)
+			}
+			p, err := compute(t, desired, cur, &Driver{st: st}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := sqlOf(p.Statements())
+			if dropped := strings.Contains(got, `DROP ROLE "old"`); dropped != tt.dropped {
+				t.Errorf("DROP ROLE planned = %v, want %v:\n%s", dropped, tt.dropped, got)
+			}
+			if strings.Contains(got, "evil") {
+				t.Errorf("plan names the unmanaged role:\n%s", got)
+			}
+			const keep = `role "old" has a member, or granted privileges or memberships (directly or through other roles) to a role, that dbfence does not manage`
+			if w := strings.Join(p.Warnings, "\n"); strings.Contains(w, keep) == tt.dropped {
+				t.Errorf("warnings (want the keep reason: %v):\n%s", !tt.dropped, w)
+			}
+		})
+	}
+}

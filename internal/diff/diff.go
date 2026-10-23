@@ -66,6 +66,15 @@ type DefaultRoleSetter interface {
 	SetDefaultRoles(r model.Role, cur model.RoleState) []plan.Statement
 }
 
+// RoleKeeper is implemented by dialects that know, from the inspected
+// state, more reasons to keep a role than diff sees (PostgreSQL: dropping
+// it would revoke what roles dbfence does not manage hold). KeepRole
+// explains why --prune must not drop the undeclared role id, or returns
+// "". databases lists existing databases that survive the plan.
+type RoleKeeper interface {
+	KeepRole(id model.RoleID, databases []string) string
+}
+
 // PublicDefaulter is implemented by dialects whose new objects grant
 // privileges to PUBLIC (PostgreSQL). DefaultPublicPrivileges returns the
 // privileges PUBLIC holds on obj right after the plan creates it: obj is
@@ -831,6 +840,9 @@ func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleI
 				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
 			}
 		}
+	}
+	if k, ok := df.d.(RoleKeeper); ok {
+		return k.KeepRole(id, surviving)
 	}
 	return ""
 }

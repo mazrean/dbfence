@@ -40,6 +40,48 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 	return append(out, d.st.regrantAfterDrop(id.Name, databases, reachable)...)
 }
 
+// KeepRole implements diff.RoleKeeper. A role is kept when dropping it
+// would take privileges or memberships from a role dbfence does not
+// manage: DROP ROLE removes its members, and DROP OWNED revokes with
+// CASCADE what it granted, directly or through other roles.
+func (d *Driver) KeepRole(id model.RoleID, databases []string) string {
+	if d.st == nil {
+		return ""
+	}
+	if d.st.dropReachesUnmanaged(id.Name, slices.ContainsFunc(databases, func(db string) bool { return d.st.connectable[db] })) {
+		return "has a member, or granted privileges or memberships (directly or through other roles) to a role, that dbfence does not manage (see its warning), which dropping it would revoke; handle it manually"
+	}
+	return ""
+}
+
+// dropReachesUnmanaged reports whether dropping role takes something from
+// a role dbfence does not manage: its membership in role, or, when DROP
+// OWNED runs (owned), a privilege or (PostgreSQL 16+) membership granted
+// by role, directly or transitively. Grants on objects role owns survive
+// REASSIGN OWNED.
+func (st *state) dropReachesUnmanaged(role string, owned bool) bool {
+	if slices.ContainsFunc(st.members, func(e memberEntry) bool { return e.role == role && unmanagedRole(e.member) }) {
+		return true
+	}
+	if !owned {
+		return false
+	}
+	privs := map[model.Object][]string{}
+	for _, e := range st.acl {
+		if e.grantor == role && e.grantee != role && st.owners[e.obj] != role && !slices.Contains(privs[e.obj], e.priv) {
+			privs[e.obj] = append(privs[e.obj], e.priv)
+		}
+	}
+	for obj, ps := range privs {
+		if anyUnmanaged(st.aclDependents(obj, role, ps)) {
+			return true
+		}
+	}
+	return st.version >= pg16 && slices.ContainsFunc(st.members, func(e memberEntry) bool {
+		return e.grantor == role && anyUnmanaged(st.memberDependents(role, e.role))
+	})
+}
+
 // ownerMemberships returns the memberships of role through which it has
 // the privileges of the owner of an object on which it granted privileges
 // to others. While role holds them, revoking its grant option does not
