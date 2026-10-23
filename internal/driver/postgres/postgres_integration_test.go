@@ -214,11 +214,58 @@ func TestIntegration(t *testing.T) {
 			_ = c.Close()
 		}
 		// An md5 verifier of the declared password is upgraded.
-		s.exec(t, "SET password_encryption = 'md5'; ALTER ROLE pwuser PASSWORD 'old'")
+		s.exec(t, "BEGIN; SET LOCAL password_encryption = 'md5'; ALTER ROLE pwuser PASSWORD 'old'; COMMIT")
 		desired := &model.Desired{Engine: model.EnginePostgres, Roles: []model.Role{{ID: pg("pwuser"), Login: &login, Password: pw("old")}}}
 		converge(t, d, desired, diff.Options{})
 		if got := s.queryStrings(t, "SELECT left(rolpassword, 14) FROM pg_authid WHERE rolname = 'pwuser'"); got[0] != "SCRAM-SHA-256$" {
 			t.Errorf("verifier not upgraded: %q", got)
+		}
+	})
+
+	t.Run("databases that refuse connections", func(t *testing.T) {
+		s.exec(t,
+			"CREATE DATABASE noconn", "ALTER DATABASE noconn ALLOW_CONNECTIONS false",
+			"CREATE DATABASE tmpl", "ALTER DATABASE tmpl IS_TEMPLATE true",
+			"CREATE DATABASE private", "REVOKE CONNECT ON DATABASE private FROM PUBLIC",
+			"CREATE ROLE limited LOGIN CREATEROLE PASSWORD 'pw'",
+			"CREATE ROLE stray_noconn",
+		)
+		desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "noconn"}, {Name: "tmpl"}, {Name: "private"}}}
+		for _, user := range []string{"postgres", "limited"} {
+			d := s.open(t, user)
+			cur, err := d.Inspect(t.Context(), desired)
+			if err != nil {
+				t.Fatalf("%s: %v", user, err)
+			}
+			if cur.CurrentDatabase != "postgres" {
+				t.Errorf("CurrentDatabase = %q", cur.CurrentDatabase)
+			}
+			p, err := diff.Compute(desired, cur, d, diff.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sb strings.Builder
+			_ = p.Render(&sb, false)
+			out := sb.String()
+			if strings.Contains(out, "CREATE DATABASE") || !strings.Contains(out, `cannot connect to database "noconn"`) {
+				t.Errorf("%s plan:\n%s", user, out)
+			}
+			if user == "limited" && (!strings.Contains(out, `cannot connect to database "private"`) || cur.Roles[0].PasswordReadable) {
+				t.Errorf("limited plan:\n%s", out)
+			}
+			// Pruning a role does not run statements on databases that
+			// cannot be connected to.
+			if user == "postgres" {
+				p, err := diff.Compute(desired, cur, d, diff.Options{Prune: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, st := range p.Statements() {
+					if st.Database == "noconn" {
+						t.Errorf("statement on unreachable database: %s", st.SQL())
+					}
+				}
+			}
 		}
 	})
 

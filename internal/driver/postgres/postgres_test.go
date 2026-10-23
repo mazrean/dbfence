@@ -215,6 +215,37 @@ func TestNormEncoding(t *testing.T) {
 	}
 }
 
+func TestAddACLFoldsGrantors(t *testing.T) {
+	t.Parallel()
+	obj := model.Object{Type: model.ObjectDatabase, Database: "app"}
+	owner := aclEntry{obj: obj, grantee: "b", grantor: "owner", priv: "CONNECT"}
+	other := aclEntry{obj: obj, grantee: "b", grantor: "a", priv: "CONNECT", grantable: true}
+	for _, order := range [][]aclEntry{{owner, other}, {other, owner}} {
+		st := &state{}
+		cur := &model.Current{}
+		for _, e := range order {
+			st.addACL(cur, e)
+		}
+		if len(cur.Privileges) != 1 || !cur.Privileges[0].GrantOption || len(st.acl) != 2 {
+			t.Errorf("order %v: privileges = %+v, acl = %d rows", order, cur.Privileges, len(st.acl))
+		}
+	}
+}
+
+func TestDropRoleSkipsProviderDatabases(t *testing.T) {
+	t.Parallel()
+	stmts := Dialect{}.DropRole(pg("x"), []string{"app", "postgres", "rdsadmin", "cloudsqladmin", "azure_maintenance", "template1", "alloydbadmin"})
+	var dbs []string
+	for _, s := range stmts {
+		if s.Database != "" {
+			dbs = append(dbs, s.Database)
+		}
+	}
+	if strings.Join(dbs, ",") != "app,app,postgres,postgres" {
+		t.Errorf("statements run on %v", dbs)
+	}
+}
+
 func TestPasswordStatements(t *testing.T) {
 	t.Parallel()
 	scram, err := password.SCRAMVerifierWithSalt("s3cret", []byte("0123456789abcdef"), password.SCRAMIterations)
