@@ -152,7 +152,9 @@ func (st *state) regrantAfterDrop(role string, surviving, reachable []string) []
 	}
 	slices.Sort(granted)
 	for _, g := range granted {
-		out = append(out, st.regrantMembers(g, st.memberDependents(role, g))...)
+		// pruneWarnings names the grants the connected user may not make.
+		stmts, _ := st.regrantMembers(g, st.memberDependents(role, g))
+		out = append(out, stmts...)
 	}
 	if len(out) > 0 {
 		out[0] = plan.SQL(out[0].Database, "-- CASCADE: grants made by "+Grantee(role)+" are revoked with it; declared ones are granted again\n"+out[0].SQL())
@@ -290,7 +292,9 @@ func (st *state) alterMembership(member, role string, want model.MembershipOptio
 		out = append(out, plan.SQL("", grantMembership(member, role, want)))
 	}
 	if revokeAdmin {
-		out = append(out, st.regrantMembers(role, dependents)...)
+		stmts, regrantWarns := st.regrantMembers(role, dependents)
+		out = append(out, stmts...)
+		warns = append(warns, regrantWarns...)
 	}
 	return out, warns
 }
@@ -590,23 +594,30 @@ func (st *state) revokeMembership(member, role string) ([]plan.Statement, []stri
 		// Nothing is revoked, so nothing cascades.
 		return nil, warns
 	}
-	return append(out, st.regrantMembers(role, dependents)...), warns
+	stmts, regrantWarns := st.regrantMembers(role, dependents)
+	return append(out, stmts...), append(warns, regrantWarns...)
 }
 
 // regrantMembers grants role again to the dependents that declare the
-// membership, which they lose through CASCADE.
-func (st *state) regrantMembers(role string, dependents []string) []plan.Statement {
+// membership, which they lose through CASCADE. When the connected user
+// may not grant role, it warns instead.
+func (st *state) regrantMembers(role string, dependents []string) ([]plan.Statement, []string) {
 	id := model.RoleID{Name: role}
 	var out []plan.Statement
+	var warns []string
 	for _, dep := range dependents {
 		i := slices.IndexFunc(st.desired.Roles, func(r model.Role) bool {
 			return r.ID.Name == dep && slices.Contains(r.MemberOf, id)
 		})
-		if i >= 0 {
+		switch {
+		case i < 0:
+		case !st.canManageMembership(role, st.user):
+			warns = append(warns, fmt.Sprintf("the plan revokes the declared membership of %q in %q with CASCADE, but %q may not grant it again (it needs ADMIN OPTION on the role); it stays revoked until granted", dep, role, st.user))
+		default:
 			out = append(out, newMembership(dep, role, st.desired.Roles[i].MemberOptions[id]))
 		}
 	}
-	return out
+	return out, warns
 }
 
 // losesMembership reports whether the plan revokes the membership of the

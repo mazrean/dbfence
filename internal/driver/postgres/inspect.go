@@ -329,6 +329,34 @@ func (st *state) pruneWarnings(cur *model.Current) []string {
 					name, e.role, st.user))
 			}
 		}
+		warns = append(warns, st.pruneRegrantWarnings(name)...)
+	}
+	return warns
+}
+
+// pruneRegrantWarnings names the declared memberships that dropping role
+// revokes (those it granted, PostgreSQL 16+) and that the connected user
+// may not grant again.
+func (st *state) pruneRegrantWarnings(role string) []string {
+	if st.version < pg16 {
+		return nil
+	}
+	var granted, warns []string
+	for _, e := range st.members {
+		if e.grantor != role || slices.Contains(granted, e.role) {
+			continue
+		}
+		granted = append(granted, e.role)
+		if st.canManageMembership(e.role, st.user) {
+			continue
+		}
+		id := model.RoleID{Name: e.role}
+		for _, dep := range st.memberDependents(role, e.role) {
+			if slices.ContainsFunc(st.desired.Roles, func(r model.Role) bool { return r.ID.Name == dep && slices.Contains(r.MemberOf, id) }) {
+				warns = append(warns, fmt.Sprintf("role %q: dropping it with --prune revokes the declared membership of %q in %q that it granted, and %q may not grant it again (it needs ADMIN OPTION on the role)",
+					role, dep, e.role, st.user))
+			}
+		}
 	}
 	return warns
 }

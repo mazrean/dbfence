@@ -270,3 +270,43 @@ func TestMembershipPermissions(t *testing.T) {
 		})
 	}
 }
+
+// TestRegrantMembersNeedsAdmin checks that a membership revoked by
+// CASCADE is only granted again when the connected user may grant it.
+func TestRegrantMembersNeedsAdmin(t *testing.T) {
+	t.Parallel()
+	desired := &model.Desired{Roles: []model.Role{{ID: pg("d"), MemberOf: []model.RoleID{pg("g")}}}}
+	members := []memberEntry{{role: "g", member: "x", grantor: "postgres", admin: true}, {role: "g", member: "d", grantor: "x"}}
+	tests := []struct {
+		roles    map[string]roleAccess
+		name     string
+		want     string
+		wantWarn string
+	}{
+		{name: "with ADMIN OPTION", roles: map[string]roleAccess{"g": {admin: true}}, want: `GRANT "g" TO "d"`},
+		{
+			name: "without ADMIN OPTION", roles: map[string]roleAccess{"g": {}},
+			wantWarn: `the plan revokes the declared membership of "d" in "g" with CASCADE, but "adm" may not grant it again (it needs ADMIN OPTION on the role); it stays revoked until granted`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := &state{user: "adm", version: 170000, roles: tt.roles, members: members, desired: desired}
+			stmts, warns := st.regrantMembers("g", st.memberDependents("x", "g"))
+			if got := sqlOf(stmts); got != tt.want {
+				t.Errorf("statements = %q, want %q", got, tt.want)
+			}
+			if got := strings.Join(warns, "\n"); got != tt.wantWarn {
+				t.Errorf("warnings = %q, want %q", got, tt.wantWarn)
+			}
+			wantPrune := ""
+			if tt.wantWarn != "" {
+				wantPrune = `role "x": dropping it with --prune revokes the declared membership of "d" in "g" that it granted, and "adm" may not grant it again (it needs ADMIN OPTION on the role)`
+			}
+			if got := strings.Join(st.pruneRegrantWarnings("x"), "\n"); got != wantPrune {
+				t.Errorf("prune warnings = %q, want %q", got, wantPrune)
+			}
+		})
+	}
+}
