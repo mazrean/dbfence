@@ -11,6 +11,45 @@ import (
 // first drops the warnings returned with stmts.
 func first(stmts []plan.Statement, _ []string) []plan.Statement { return stmts }
 
+// TestStateRevokeNeedsSetRole checks that a non-superuser only revokes
+// another grantor's grant when it may SET ROLE to that grantor.
+func TestStateRevokeNeedsSetRole(t *testing.T) {
+	t.Parallel()
+	db := model.Object{Type: model.ObjectDatabase, Database: "hdb"}
+	tests := []struct {
+		roles    map[string]roleAccess
+		name     string
+		want     string
+		wantWarn string
+	}{
+		{
+			name: "grantor it may not SET ROLE to", roles: map[string]roleAccess{"h3": {}},
+			wantWarn: `CONNECT on database "hdb" granted by "h3" to "hu" differs from the configuration, but "adm" may not SET ROLE "h3" to revoke it (it needs superuser, or SET on the grantor); not changed`,
+		},
+		{
+			name: "grantor it may SET ROLE to", roles: map[string]roleAccess{"h3": {set: true}},
+			want: `SET ROLE "h3"; REVOKE CONNECT ON DATABASE "hdb" FROM "hu"; RESET ROLE`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := &state{
+				desired: &model.Desired{}, user: "adm", version: 170000, roles: tt.roles,
+				owners: map[model.Object]string{db: "h1"},
+				acl:    []aclEntry{{obj: db, grantee: "hu", grantor: "h3", priv: "CONNECT"}},
+			}
+			stmts, warns := st.revoke("hu", db, []string{"CONNECT"}, false)
+			if got := sqlOf(stmts); got != tt.want {
+				t.Errorf("statements = %q, want %q", got, tt.want)
+			}
+			if got := strings.Join(warns, "\n"); got != tt.wantWarn {
+				t.Errorf("warnings = %q, want %q", got, tt.wantWarn)
+			}
+		})
+	}
+}
+
 func sqlOf(stmts []plan.Statement) string {
 	out := make([]string, len(stmts))
 	for i, s := range stmts {
@@ -143,7 +182,7 @@ func TestStateRevoke(t *testing.T) {
 				acl:     tt.acl,
 				user:    "postgres", superuser: true,
 			}
-			if got := sqlOf(st.revoke(tt.grantee, tt.obj, tt.privs, tt.optionOnly)); got != tt.want {
+			if got := sqlOf(first(st.revoke(tt.grantee, tt.obj, tt.privs, tt.optionOnly))); got != tt.want {
 				t.Errorf("got\n%s\nwant\n%s", got, tt.want)
 			}
 		})

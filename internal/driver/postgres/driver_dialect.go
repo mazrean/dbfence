@@ -231,7 +231,7 @@ func (d *Driver) Revoke(grantee model.RoleID, obj model.Object, privs []string) 
 	if d.st == nil {
 		return d.Dialect.Revoke(grantee, obj, privs)
 	}
-	return d.st.revoke(grantee.Name, obj, privs, false), nil
+	return d.st.revoke(grantee.Name, obj, privs, false)
 }
 
 // RevokeGrantOption implements diff.Dialect. Each grantor's grant option
@@ -240,7 +240,7 @@ func (d *Driver) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs
 	if d.st == nil {
 		return d.Dialect.RevokeGrantOption(grantee, obj, privs)
 	}
-	return d.st.revoke(grantee.Name, obj, privs, true), nil
+	return d.st.revoke(grantee.Name, obj, privs, true)
 }
 
 // DefaultPublicPrivileges implements diff.PublicDefaulter for the
@@ -336,8 +336,9 @@ func objectLabel(obj model.Object) string {
 // REVOKE (a superuser acts as the owner), so grants from other grantors
 // are revoked as that grantor. Grants the grantee passed on depend on its
 // grant option: they are revoked with CASCADE and the declared ones are
-// granted again.
-func (st *state) revoke(grantee string, obj model.Object, privs []string, optionOnly bool) []plan.Statement {
+// granted again. Grants of grantors the connected user may not SET ROLE
+// to are reported instead.
+func (st *state) revoke(grantee string, obj model.Object, privs []string, optionOnly bool) ([]plan.Statement, []string) {
 	owner := st.owners[obj]
 	asSelf := func(grantor string) bool {
 		return grantor == "" || grantor == owner || (grantor == st.user && !st.superuser)
@@ -375,8 +376,18 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 
 	db, target := onObject(obj)
 	var out, regrants []plan.Statement
+	var warns []string
 	for _, g := range grantors {
 		ps := byGrantor[g]
+		if g != "" && !st.canSet(g) {
+			what := strings.Join(ps, ", ")
+			if optionOnly {
+				what = "grant option for " + what
+			}
+			warns = append(warns, fmt.Sprintf("%s on %s granted by %q to %s differs from the configuration, but %q may not SET ROLE %q to revoke it (it needs superuser, or SET on the grantor); not changed",
+				what, objectLabel(obj), g, Grantee(grantee), st.user, g))
+			continue
+		}
 		dependents := st.aclDependents(obj, grantee, ps)
 		q := "REVOKE "
 		if optionOnly {
@@ -397,7 +408,7 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 		out = append(out, plan.SQL(db, q))
 		regrants = append(regrants, st.regrantPrivileges(obj, dependents, ps)...)
 	}
-	return append(out, regrants...)
+	return append(out, regrants...), warns
 }
 
 // losesGrantOption reports whether the plan revokes priv on obj, or its
