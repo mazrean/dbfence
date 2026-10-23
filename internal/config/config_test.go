@@ -55,7 +55,8 @@ grant {
   with_grant_option = true
 }
 ignore {
-  roles = ["datadog"]
+  roles   = ["datadog"]
+  schemas = ["vendor", "app\\.audit"]
 }
 `)
 	if err != nil {
@@ -75,7 +76,7 @@ ignore {
 			{Grantee: model.RoleID{Name: "app"}, Object: model.Object{Type: model.ObjectDatabase, Database: "app"}, Name: "CONNECT", GrantOption: true},
 			{Grantee: model.RoleID{Name: "app"}, Object: model.Object{Type: model.ObjectDatabase, Database: "app"}, Name: "TEMPORARY", GrantOption: true},
 		},
-		Ignore: model.Ignore{Roles: []string{"datadog"}},
+		Ignore: model.Ignore{Roles: []string{"datadog"}, Schemas: []string{"vendor", `app\.audit`}},
 	}
 	if cfg.DSN != "postgres://localhost/postgres" {
 		t.Errorf("DSN = %q", cfg.DSN)

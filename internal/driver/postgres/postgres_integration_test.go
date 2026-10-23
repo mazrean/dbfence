@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -405,6 +406,35 @@ func TestIntegration(t *testing.T) {
 		out := converge(t, d, desired, diff.Options{Prune: true})
 		if !strings.Contains(out, `DROP SCHEMA "junkfull" CASCADE`) || strings.Contains(out, `DROP SCHEMA "junk" CASCADE`) {
 			t.Errorf("plan:\n%s", out)
+		}
+	})
+
+	t.Run("ignore schemas by qualified name", func(t *testing.T) {
+		s.exec(t, "CREATE DATABASE is_app", "CREATE DATABASE is_analytics")
+		s.exec(t, `\c is_app`, "CREATE SCHEMA staging")
+		s.exec(t, `\c is_analytics`, "CREATE SCHEMA staging")
+		d := s.open(t, "postgres")
+		desired := &model.Desired{
+			Engine:    model.EnginePostgres,
+			Databases: []model.Database{{Name: "is_app"}, {Name: "is_analytics"}},
+			Ignore:    model.Ignore{Roles: []string{".*"}, Databases: []string{".*"}, Schemas: []string{`is_analytics\.staging`}},
+		}
+		out := converge(t, d, desired, diff.Options{Prune: true})
+		if !strings.Contains(out, `schema "staging" in database "is_app"`) || strings.Contains(out, `"is_analytics"`) {
+			t.Errorf("plan:\n%s", out)
+		}
+		cur, err := d.Inspect(t.Context(), desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, sc := range cur.Schemas {
+			if sc.Name == "staging" {
+				got = append(got, sc.Database)
+			}
+		}
+		if !slices.Equal(got, []string{"is_analytics"}) {
+			t.Errorf("databases with schema staging = %v, want [is_analytics]", got)
 		}
 	})
 

@@ -163,7 +163,9 @@ type PrivilegeKey struct {
 
 // Ignore lists regular expressions of unmanaged objects that must not
 // be reported or pruned. Patterns match the whole name (see
-// CompileIgnorePattern).
+// CompileIgnorePattern). Role patterns match the name or, for a MySQL
+// account, "name@host"; schema patterns match the schema name or
+// "<database>.<schema>".
 type Ignore struct {
 	Roles     []string
 	Databases []string

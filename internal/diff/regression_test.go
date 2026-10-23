@@ -290,6 +290,19 @@ func TestComputePruneProtection(t *testing.T) {
 			},
 		},
 		{
+			name:    "owner of a schema ignored by its qualified name",
+			desired: &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app", Owner: "admin"}}, Ignore: model.Ignore{Schemas: []string{`app\.vendor`}}},
+			current: func() *model.Current {
+				c := pgCur([]model.RoleState{{ID: pgID("vendor_owner")}}, []model.Database{{Name: "app", Owner: "admin"}})
+				c.Schemas = []model.Schema{{Database: "app", Name: "vendor", Owner: "vendor_owner"}}
+				c.InspectedDatabases = []string{"app"}
+				return c
+			}(),
+			dialect:   postgres.Dialect{},
+			want:      []string{},
+			wantWarns: []string{`role "vendor_owner" owns the ignored schema "vendor" in database "app"; not pruned`},
+		},
+		{
 			name:    "connected database",
 			desired: &model.Desired{Engine: model.EnginePostgres},
 			current: func() *model.Current {

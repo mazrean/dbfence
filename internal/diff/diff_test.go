@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/driver/mysql"
 	"github.com/mazrean/dbfence/internal/driver/postgres"
@@ -414,6 +415,46 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 				if !slices.ContainsFunc(p.Warnings, func(got string) bool { return strings.Contains(got, w) }) {
 					t.Errorf("missing warning %q in %q", w, p.Warnings)
 				}
+			}
+		})
+	}
+}
+
+func TestComputeIgnoreSchemas(t *testing.T) {
+	t.Parallel()
+	pruneStaging := func(db string) string { return db + `: DROP SCHEMA "staging"` }
+	tests := []struct {
+		name     string
+		patterns []string
+		want     []string
+	}{
+		{"no pattern", nil, []string{pruneStaging("analytics"), pruneStaging("app")}},
+		{"bare name ignores every database", []string{"staging"}, nil},
+		{"qualified name ignores one database", []string{`analytics\.staging`}, []string{pruneStaging("app")}},
+		{"unescaped dot also matches the qualified name", []string{"app.staging"}, []string{pruneStaging("analytics")}},
+		{"database wildcard", []string{`a.*\.staging`}, nil},
+		{"anchored: database prefix alone does not match", []string{"app"}, []string{pruneStaging("analytics"), pruneStaging("app")}},
+		{"anchored: partial qualified name does not match", []string{`app\.stag`}, []string{pruneStaging("analytics"), pruneStaging("app")}},
+		{"anchored: no suffix match on the qualified name", []string{`pp\.staging`}, []string{pruneStaging("analytics"), pruneStaging("app")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cur := pgMatching(t)
+			cur.Databases = append(cur.Databases, model.Database{Name: "analytics", Owner: "owner"})
+			cur.Schemas = append(cur.Schemas,
+				model.Schema{Database: "app", Name: "staging", Owner: "owner"},
+				model.Schema{Database: "analytics", Name: "staging", Owner: "owner"})
+			d := pgDesired()
+			d.Databases = append(d.Databases, model.Database{Name: "analytics", Owner: "owner"})
+			d.Ignore.Schemas = tt.patterns
+
+			p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
 			}
 		})
 	}

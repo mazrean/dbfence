@@ -338,7 +338,7 @@ func (df *differ) schemas() {
 		df.add(phaseSchema, plan.ActionUpdate, res, df.d.AlterSchema(s, df.current.Schemas[i]))
 	}
 	for _, c := range df.current.Schemas {
-		if df.managedSchema(c.Database, c.Name) || df.d.IsSystemSchema(c.Name) || df.ignore.schema(c.Name) {
+		if df.managedSchema(c.Database, c.Name) || df.d.IsSystemSchema(c.Name) || df.ignore.schema(c.Database, c.Name) {
 			continue
 		}
 		if !df.opts.Prune {
@@ -584,7 +584,7 @@ func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleI
 			}
 		}
 		for _, s := range df.current.Schemas {
-			if s.Owner == id.Name && df.ignore.schema(s.Name) && !df.d.IsSystemSchema(s.Name) {
+			if s.Owner == id.Name && df.ignore.schema(s.Database, s.Name) && !df.d.IsSystemSchema(s.Name) {
 				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
 			}
 		}
@@ -678,4 +678,9 @@ func (i ignorer) role(id model.RoleID) bool {
 	return matchAny(i.roles, id.Name) || (id.Host != "" && matchAny(i.roles, id.String()))
 }
 func (i ignorer) database(name string) bool { return matchAny(i.databases, name) }
-func (i ignorer) schema(name string) bool   { return matchAny(i.schemas, name) }
+
+// schema matches a pattern against the bare schema name or against
+// "<database>.<schema>", so a schema can be ignored in one database only.
+func (i ignorer) schema(database, name string) bool {
+	return matchAny(i.schemas, name) || matchAny(i.schemas, database+"."+name)
+}
