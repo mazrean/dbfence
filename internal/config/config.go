@@ -233,6 +233,10 @@ type resource struct {
 	attrs hcl.Attributes
 	name  string
 	host  string
+	// nameMarks and hostMarks are the cty marks (funcs.Sensitive) of
+	// name and host, put back on the reference values.
+	nameMarks cty.ValueMarks
+	hostMarks cty.ValueMarks
 	// nameRange is the name attribute, or the label when name is absent.
 	nameRange hcl.Range
 }
@@ -448,7 +452,8 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 	r.attrs = attrs
 	if a, ok := attrs["name"]; ok {
 		r.nameRange = a.Range
-		diags = append(diags, decodeLiteral(a, ctx, &r.name)...)
+		r.nameMarks = make(cty.ValueMarks)
+		diags = append(diags, decodeLiteral(a, ctx, &r.name, r.nameMarks)...)
 	}
 	if a, ok := attrs["host"]; ok {
 		if b.Type != "role" && b.Type != "user" {
@@ -457,7 +462,8 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 		if engine != model.EngineMySQL {
 			return r, append(diags, errAt(a.Range, "Unsupported attribute", `"host" is only supported for mysql.`))
 		}
-		diags = append(diags, decodeLiteral(a, ctx, &r.host)...)
+		r.hostMarks = make(cty.ValueMarks)
+		diags = append(diags, decodeLiteral(a, ctx, &r.host, r.hostMarks)...)
 		switch {
 		case diags.HasErrors():
 		case r.host == "":
@@ -482,37 +488,62 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 }
 
 // decodeLiteral decodes name and host, which are resolved before any
-// block can be referenced.
-func decodeLiteral(a *hcl.Attribute, ctx *hcl.EvalContext, dst *string) hcl.Diagnostics {
+// block can be referenced. The marks of the value are added to marks.
+func decodeLiteral(a *hcl.Attribute, ctx *hcl.EvalContext, dst *string, marks cty.ValueMarks) hcl.Diagnostics {
 	if len(a.Expr.Variables()) > 0 {
 		return hcl.Diagnostics{errAt(a.Expr.Range(), "References not allowed",
 			fmt.Sprintf("%s cannot reference other blocks; only literals and functions are allowed.", a.Name))}
 	}
-	return gohcl.DecodeExpression(a.Expr, ctx, dst)
+	return gohcl.DecodeExpression(markRecorder{Expression: markedExpr(a.Expr), marks: marks}, ctx, dst)
 }
 
-// refValue is the value exposed to expressions as <type>.<label>.
+// markRecorder evaluates to the value of its expression without marks,
+// and adds the marks to marks.
+type markRecorder struct {
+	hcl.Expression
+	marks cty.ValueMarks
+}
+
+func (e markRecorder) Value(ctx *hcl.EvalContext) (cty.Value, hcl.Diagnostics) {
+	v, diags := e.Expression.Value(ctx)
+	v, m := v.UnmarkDeep()
+	maps.Copy(e.marks, m)
+	return v, diags
+}
+
+// markedExpr undoes unmarkedExpr, for the values that keep their marks.
+func markedExpr(expr hcl.Expression) hcl.Expression {
+	if u, ok := expr.(unmarkedExpr); ok {
+		return u.Expression
+	}
+	return expr
+}
+
+// refValue is the value exposed to expressions as <type>.<label>. Names
+// and hosts derived from a secret keep its mark, so that errors about the
+// references do not show them.
 func refValue(typ string, r resource, engine model.Engine, ctx *hcl.EvalContext) cty.Value {
+	name := cty.StringVal(r.name).WithMarks(r.nameMarks)
 	switch typ {
 	case "role", "user":
-		id := r.name
+		id := name
 		if engine == model.EngineMySQL {
-			id = model.RoleID{Name: r.name, Host: r.host}.String()
+			id = cty.StringVal(model.RoleID{Name: r.name, Host: r.host}.String()).WithMarks(r.nameMarks, r.hostMarks)
 		}
-		return cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal(r.name), "host": cty.StringVal(r.host), "id": cty.StringVal(id)})
+		return cty.ObjectVal(map[string]cty.Value{"name": name, "host": cty.StringVal(r.host).WithMarks(r.hostMarks), "id": id})
 	case "schema":
 		// Schemas may only reference databases, which are resolved first.
 		db := cty.UnknownVal(cty.String)
 		if a, ok := r.attrs["database"]; ok {
-			if v, d := a.Expr.Value(ctx); !d.HasErrors() {
+			if v, d := markedExpr(a.Expr).Value(ctx); !d.HasErrors() {
 				if sv, err := convert.Convert(v, cty.String); err == nil && !sv.IsNull() {
 					db = sv
 				}
 			}
 		}
-		return cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal(r.name), "database": db})
+		return cty.ObjectVal(map[string]cty.Value{"name": name, "database": db})
 	default:
-		return cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal(r.name)})
+		return cty.ObjectVal(map[string]cty.Value{"name": name})
 	}
 }
 
