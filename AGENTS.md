@@ -38,7 +38,6 @@ internal/diff/       desired vs current -> ordered *plan.Plan via diff.Dialect (
 internal/plan/       Statement / Secret fragments, redacted output (no I/O)
 internal/apply/      sequential execution, stop at first error
 internal/di/         kessoku injectors
-specs/dbfence/       PRD, design, tech digests, task files
 tools/lint/          repo linter module
 ```
 
@@ -55,13 +54,6 @@ tools/lint/          repo linter module
 - ALWAYS: use Conventional Commits via the `committing-code` skill; keep commits atomic.
 - ASK FIRST: new dependencies, changes to the HCL schema or CLI flags.
 - NEVER: add SQLite or other engines; add a state file; bypass hooks (`--no-verify`).
-
-## Active Specs
-
-- `specs/dbfence/skills/prd-dbfence/SKILL.md` — requirements (FR/NFR, non-goals)
-- `specs/dbfence/design-dbfence.md` — architecture, interface contracts, HCL schema
-- `specs/dbfence/skills/tech-*/SKILL.md` — component research digests (read when touching that component)
-- `specs/dbfence/tasks/overview.md` — implementation task progress
 
 ## Conditional Rules
 
