@@ -290,6 +290,22 @@ func TestComputePruneProtection(t *testing.T) {
 			},
 		},
 		{
+			// A declared database is managed even when an ignore pattern
+			// matches it, so pruned roles are reassigned there too.
+			name:    "declared database matching an ignore pattern",
+			desired: &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "keepme", Owner: "admin"}}, Ignore: model.Ignore{Databases: []string{"keep.*"}}},
+			current: pgCur([]model.RoleState{{ID: pgID("stray")}}, []model.Database{{Name: "keepme", Owner: "admin"}}),
+			dialect: postgres.Dialect{},
+			want: []string{
+				`keepme: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
+				`keepme: DROP OWNED BY "stray"`,
+				`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
+				`postgres: DROP OWNED BY "stray"`,
+				`DROP ROLE "stray"`,
+			},
+			wantWarns: []string{},
+		},
+		{
 			name:    "owner of a schema ignored by its qualified name",
 			desired: &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app", Owner: "admin"}}, Ignore: model.Ignore{Schemas: []string{`app\.vendor`}}},
 			current: func() *model.Current {

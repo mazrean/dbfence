@@ -639,10 +639,11 @@ func boolInt(b bool) int {
 }
 
 func (df *differ) pruneRoles(droppedDatabases []string) {
-	// Objects in ignored databases must not be reassigned or dropped.
+	// Objects in ignored databases must not be reassigned or dropped;
+	// declared databases are managed even when a pattern matches them.
 	var surviving []string
 	for _, db := range df.current.Databases {
-		if !slices.Contains(droppedDatabases, db.Name) && !df.ignore.database(db.Name) {
+		if !slices.Contains(droppedDatabases, db.Name) && (!df.ignore.database(db.Name) || df.managedDatabase(db.Name)) {
 			surviving = append(surviving, db.Name)
 		}
 	}
@@ -686,12 +687,12 @@ func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleI
 	// objects are kept.
 	if id.Host == "" {
 		for _, db := range df.current.Databases {
-			if db.Owner == id.Name && df.ignore.database(db.Name) {
+			if db.Owner == id.Name && df.ignore.database(db.Name) && !df.managedDatabase(db.Name) {
 				return fmt.Sprintf("owns the ignored database %q", db.Name)
 			}
 		}
 		for _, s := range df.current.Schemas {
-			if s.Owner == id.Name && df.ignore.schema(s.Database, s.Name) && !df.d.IsSystemSchema(s.Name) {
+			if s.Owner == id.Name && df.ignore.schema(s.Database, s.Name) && !df.managedSchema(s.Database, s.Name) && !df.d.IsSystemSchema(s.Name) {
 				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
 			}
 		}

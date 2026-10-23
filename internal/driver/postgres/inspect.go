@@ -273,7 +273,7 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 			switch {
 			case !prunable(role):
 				return nil
-			case matches(ignoreDBs, db):
+			case matches(ignoreDBs, db) && !slices.ContainsFunc(st.desired.Databases, func(d model.Database) bool { return d.Name == db }):
 				why = "ignored"
 			case !st.connectable[db]:
 				why = "cannot connect"
