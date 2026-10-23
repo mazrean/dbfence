@@ -19,7 +19,7 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
 
-	secrets := []string{"pa55word", "X-Amz-Signature=SIG", "SIG", "frag"}
+	secrets := []string{"pa55word", "X-Amz-Signature=SIG", "SIG", "frag", "p%zz"}
 	tests := []struct {
 		name    string
 		url     string
@@ -37,6 +37,12 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 			url:     "http://user:pa55word@" + host + "/state?X-Amz-Signature=SIG",
 			address: "aws_db_instance.nope.address",
 			wantErr: []string{"not found in http://user:xxxxx@" + host + "/state"},
+		},
+		{
+			name:    "unparsable url",
+			url:     "https://u:p%zz@127.0.0.1:1/s",
+			address: "output.n",
+			wantErr: []string{"state URL cannot be parsed"},
 		},
 		{
 			name:    "local path kept",

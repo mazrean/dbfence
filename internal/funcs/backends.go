@@ -67,6 +67,10 @@ func newTFStateReader() *tfstateReader {
 }
 
 func (t *tfstateReader) Lookup(ctx context.Context, loc, address string) ([]byte, error) {
+	if _, err := url.Parse(loc); err != nil {
+		// The parse error quotes the URL, which may hold a password.
+		return nil, errors.New("tfstate: the state URL cannot be parsed; check it for unescaped % or control characters")
+	}
 	t.mu.Lock()
 	st, ok := t.states[loc]
 	if !ok {
