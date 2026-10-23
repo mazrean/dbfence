@@ -1,6 +1,7 @@
 [tools]
 # common
 "github:microsoft/apm" = "latest"
+"github:rtk-ai/rtk" = "latest"
 gh = "latest"
 
 # go
@@ -15,6 +16,44 @@ goreleaser = "latest"
 # Note: claude-code / codex / other coding-agent CLIs are intentionally NOT pinned per project policy.
 # Note: python / uv / pipx-installed tools (serena, etc.) are intentionally NOT pinned
 # — gopls MCP from apm-plackage/go covers Go-only code intelligence for this repo.
+
+[tasks.test]
+description = "Run unit tests (integration tests are skipped with -short)"
+run = "go test -short ./..."
+
+[tasks."test:integration"]
+description = "Run all tests including dockertest-based MySQL/PostgreSQL integration tests"
+run = "go test ./..."
+
+[tasks."test:ci"]
+description = "Run all tests with the race detector and coverage"
+run = "go test -race -coverprofile=coverage.out -covermode=atomic ./..."
+
+[tasks.lint]
+description = "Run the project linter"
+run = "go tool lint ./..."
+
+[tasks.generate]
+description = "Regenerate kessoku injectors"
+run = "go generate ./..."
+
+[tasks."release:check"]
+description = "Validate the goreleaser configuration"
+run = "goreleaser check"
+
+[tasks."release:build"]
+description = "Build snapshot binaries with goreleaser"
+run = "goreleaser build --snapshot --clean"
+
+[tasks."release:publish"]
+description = "Publish a release with goreleaser"
+run = "goreleaser release --clean"
+
+[tasks.apicompat]
+description = "Check public Go API compatibility"
+# The root package is `main` and everything else lives under internal/, so there is no public API yet.
+# Wire `go tool apicompat <base> <target>` here once a public package exists.
+run = "echo 'dbfence has no public Go packages; nothing to check.'"
 
 [tasks.worktree]
 run = '''

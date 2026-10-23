@@ -5,3 +5,7 @@ apm_modules/
 
 # Claude
 .claude/
+
+# Build / test output
+dist/
+coverage.out

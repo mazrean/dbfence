@@ -53,6 +53,6 @@ require (
 )
 
 tool (
-	github.com/mazrean/kessoku/tools/apicompat
-	github.com/mazrean/kessoku/tools/lint
+	github.com/mazrean/dbfence/tools/apicompat
+	github.com/mazrean/dbfence/tools/lint
 )
