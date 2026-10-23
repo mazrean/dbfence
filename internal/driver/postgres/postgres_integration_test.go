@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -344,6 +345,22 @@ func TestIntegration(t *testing.T) {
 		}
 		if got := s.queryStrings(t, "SELECT m.rolname FROM pg_auth_members am JOIN pg_roles m ON m.oid = am.member WHERE am.roleid = 'm_grp'::regrole ORDER BY 1"); strings.Join(got, ",") != "m_mgr,m_u2" {
 			t.Errorf("members of m_grp = %v", got)
+		}
+	})
+
+	t.Run("inherit applies to existing memberships", func(t *testing.T) {
+		d := s.open(t, "postgres")
+		for _, inherit := range []bool{true, false, true} {
+			desired := &model.Desired{
+				Engine: model.EnginePostgres,
+				Roles:  []model.Role{{ID: pg("i_grp")}, {ID: pg("i_u"), Inherit: &inherit, MemberOf: []model.RoleID{pg("i_grp")}}},
+				Ignore: model.Ignore{Roles: []string{".*"}},
+			}
+			converge(t, d, desired, diff.Options{})
+			got := s.queryStrings(t, "SELECT pg_has_role('i_u', 'i_grp', 'USAGE')::text")
+			if got[0] != strconv.FormatBool(inherit) {
+				t.Errorf("inherit = %v: i_u has the privileges of i_grp = %s", inherit, got[0])
+			}
 		}
 	})
 

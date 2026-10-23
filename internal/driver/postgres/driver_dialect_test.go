@@ -250,6 +250,57 @@ func TestNonSuperuserWarnings(t *testing.T) {
 	}
 }
 
+func TestInheritOptions(t *testing.T) {
+	t.Parallel()
+	no, yes := false, true
+	members := []memberEntry{
+		{role: "g1", member: "u", grantor: "postgres", inherit: true},
+		{role: "g2", member: "u", grantor: "postgres", inherit: false},
+		{role: "g3", member: "u", grantor: "other", inherit: true},
+		{role: "g4", member: "u", grantor: "postgres", inherit: true},
+		{role: "g1", member: "v", grantor: "postgres", inherit: true},
+	}
+	tests := []struct {
+		name      string
+		want      string
+		role      model.Role
+		version   int
+		superuser bool
+		wantWarn  bool
+	}{
+		{
+			name: "noinherit", version: 170000, superuser: true,
+			role: model.Role{ID: pg("u"), Inherit: &no, MemberOf: []model.RoleID{pg("g1"), pg("g2"), pg("g3")}},
+			want: `GRANT "g1" TO "u" WITH INHERIT FALSE GRANTED BY "postgres"` + "\n" + `GRANT "g3" TO "u" WITH INHERIT FALSE GRANTED BY "other"`,
+		},
+		{
+			name: "inherit", version: 170000, superuser: true,
+			role: model.Role{ID: pg("u"), Inherit: &yes},
+			want: `GRANT "g2" TO "u" WITH INHERIT TRUE GRANTED BY "postgres"`,
+		},
+		{
+			name: "grant by another role as non-superuser", version: 170000,
+			role: model.Role{ID: pg("u"), Inherit: &no, MemberOf: []model.RoleID{pg("g3")}},
+			wantWarn: true,
+		},
+		{name: "unmanaged", version: 170000, superuser: true, role: model.Role{ID: pg("u")}},
+		{name: "before 16", version: 150000, superuser: true, role: model.Role{ID: pg("u"), Inherit: &no}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			st := &state{user: "postgres", version: tt.version, superuser: tt.superuser, members: members}
+			stmts, warns := st.inheritOptions(tt.role)
+			if got := sqlOf(stmts); got != tt.want {
+				t.Errorf("got\n%s\nwant\n%s", got, tt.want)
+			}
+			if (len(warns) > 0) != tt.wantWarn {
+				t.Errorf("warnings = %v", warns)
+			}
+		})
+	}
+}
+
 func TestDriverWithoutInspectBehavesLikeDialect(t *testing.T) {
 	t.Parallel()
 	d := &Driver{}

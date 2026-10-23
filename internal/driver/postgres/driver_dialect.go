@@ -33,10 +33,44 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 // apply part-way.
 func (d *Driver) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.Statement, []string) {
 	stmts, warns := d.Dialect.AlterRole(r, cur, force)
-	if len(stmts) == 0 || d.st == nil || d.st.canAlter(r.ID.Name) {
+	if d.st == nil {
+		return stmts, warns
+	}
+	inherit, inheritWarns := d.st.inheritOptions(r)
+	stmts = append(stmts, inherit...)
+	warns = append(warns, inheritWarns...)
+	if len(stmts) == 0 || d.st.canAlter(r.ID.Name) {
 		return stmts, warns
 	}
 	return nil, append(warns, fmt.Sprintf("role %q differs from the configuration, but %q may not alter it (it needs ADMIN OPTION on the role, or superuser for superuser roles); not changed", r.ID, d.st.user))
+}
+
+// inheritOptions aligns the INHERIT option of the existing memberships of
+// r with its declared inherit attribute. From PostgreSQL 16 on rolinherit
+// is only the default for new grants; each grant carries its own option.
+func (st *state) inheritOptions(r model.Role) ([]plan.Statement, []string) {
+	if r.Inherit == nil || st.version < pg16 {
+		return nil, nil
+	}
+	var stmts []plan.Statement
+	var warns []string
+	for _, e := range st.members {
+		if e.member != r.ID.Name || e.inherit == *r.Inherit ||
+			(r.MemberOf != nil && !slices.Contains(r.MemberOf, model.RoleID{Name: e.role})) {
+			continue
+		}
+		q := "GRANT " + Ident(e.role) + " TO " + Ident(e.member) + " WITH INHERIT " + flag(*r.Inherit, "TRUE", "FALSE")
+		switch {
+		case e.grantor == "":
+		case st.superuser || e.grantor == st.user:
+			q += " GRANTED BY " + Ident(e.grantor)
+		default:
+			warns = append(warns, fmt.Sprintf("membership of %q in %q granted by %q has inherit = %v, but %q may not change it", e.member, e.role, e.grantor, e.inherit, st.user))
+			continue
+		}
+		stmts = append(stmts, plan.SQL("", q))
+	}
+	return stmts, warns
 }
 
 // Revoke implements diff.Dialect. Each grantor's grant is revoked.
