@@ -16,8 +16,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"golang.org/x/text/secure/precis"
 )
 
 // ErrUnsupported is returned when the verifier format is unknown.
@@ -250,12 +248,4 @@ func SCRAMStoredKey(password string, salt []byte, iter int) ([]byte, error) {
 	mac.Write([]byte("Client Key"))
 	stored := sha256.Sum256(mac.Sum(nil))
 	return stored[:], nil
-}
-
-// saslPrep normalizes like PostgreSQL: on failure the raw password is used.
-func saslPrep(password string) string {
-	if p, err := precis.OpaqueString.String(password); err == nil {
-		return p
-	}
-	return password
 }
