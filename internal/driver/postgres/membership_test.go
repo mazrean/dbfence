@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/plan"
 )
 
 func TestGrantMembershipRendering(t *testing.T) {
@@ -143,7 +144,7 @@ func TestRevokeMembershipRegrantsWithOptions(t *testing.T) {
 			{ID: pg("d"), MemberOf: []model.RoleID{pg("g")}, MemberOptions: map[model.RoleID]model.MembershipOptions{pg("g"): {Admin: &yes}}},
 		}},
 	}
-	got := sqlOf(st.revokeMembership("u", "g"))
+	got := sqlOf(first(st.revokeMembership("u", "g")))
 	if want := `GRANT "g" TO "d" WITH ADMIN OPTION`; !strings.HasSuffix(got, want) {
 		t.Errorf("got\n%s\nwant suffix %s", got, want)
 	}
@@ -204,5 +205,68 @@ func TestCheckMembershipOptions(t *testing.T) {
 		if got := strings.Join(warns, "\n"); (tt.warn == "") != (got == "") || !strings.Contains(got, tt.warn) {
 			t.Errorf("%s: warnings = %q, want %q", tt.name, got, tt.warn)
 		}
+	}
+}
+
+// TestMembershipPermissions checks that membership grants and revokes the
+// connected user may not make are reported instead of planned.
+func TestMembershipPermissions(t *testing.T) {
+	t.Parallel()
+	roles := map[string]roleAccess{"ext": {}, "ext2": {}, "mine": {admin: true}, "super": {superuser: true}}
+	tests := []struct {
+		name     string
+		role     string
+		want     string
+		wantWarn string
+		members  []memberEntry
+		version  int
+		revoke   bool
+	}{
+		{
+			name: "grant without ADMIN OPTION", version: 170000, role: "ext2",
+			wantWarn: `membership of "newr" in "ext2" differs from the configuration, but "adm" may not grant it (it needs ADMIN OPTION on the role); not changed`,
+		},
+		{name: "grant with ADMIN OPTION", version: 170000, role: "mine", want: `GRANT "mine" TO "newr"`},
+		{name: "grant of a role created by the plan", version: 170000, role: "created", want: `GRANT "created" TO "newr"`},
+		{name: "grant with CREATEROLE before 16", version: 150000, role: "ext2", want: `GRANT "ext2" TO "newr"`},
+		{
+			name: "grant of a superuser role before 16", version: 150000, role: "super",
+			wantWarn: `membership of "newr" in "super" differs from the configuration, but "adm" may not grant it (it needs ADMIN OPTION on the role, or CREATEROLE for a role that is not a superuser); not changed`,
+		},
+		{
+			name: "revoke a grant made by another grantor", version: 170000, role: "mine", revoke: true,
+			members:  []memberEntry{{role: "mine", member: "newr", grantor: "postgres"}},
+			wantWarn: `membership of "newr" in "mine" granted by "postgres" differs from the configuration, but "adm" may not revoke it (it needs superuser, since another role granted it); not changed`,
+		},
+		{
+			name: "revoke without ADMIN OPTION", version: 170000, role: "ext2", revoke: true,
+			members:  []memberEntry{{role: "ext2", member: "newr", grantor: "adm"}},
+			wantWarn: `membership of "newr" in "ext2" differs from the configuration, but "adm" may not revoke it (it needs ADMIN OPTION on the role); not changed`,
+		},
+		{
+			name: "revoke own grant with ADMIN OPTION", version: 170000, role: "mine", revoke: true,
+			members: []memberEntry{{role: "mine", member: "newr", grantor: "adm"}},
+			want:    `REVOKE "mine" FROM "newr" GRANTED BY "adm"`,
+		},
+		{name: "revoke with CREATEROLE before 16", version: 150000, role: "ext2", revoke: true, want: `REVOKE "ext2" FROM "newr"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Driver{st: &state{user: "adm", version: tt.version, createRole: true, roles: roles, members: tt.members, desired: &model.Desired{}}}
+			var stmts []plan.Statement
+			var warns []string
+			if tt.revoke {
+				stmts, warns = d.RevokeMembership(pg("newr"), pg(tt.role))
+			} else {
+				stmts, warns = d.GrantMembership(pg("newr"), pg(tt.role), model.MembershipOptions{})
+			}
+			if got := sqlOf(stmts); got != tt.want {
+				t.Errorf("statements = %q, want %q", got, tt.want)
+			}
+			if got := strings.Join(warns, "\n"); got != tt.wantWarn {
+				t.Errorf("warnings = %q, want %q", got, tt.wantWarn)
+			}
+		})
 	}
 }

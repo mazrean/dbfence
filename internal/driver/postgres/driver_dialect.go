@@ -256,10 +256,59 @@ func (d *Driver) DefaultPublicPrivileges(obj model.Object) []string {
 // membership has one grant per grantor, and REVOKE only removes the
 // grant named by GRANTED BY.
 func (d *Driver) RevokeMembership(member, role model.RoleID) ([]plan.Statement, []string) {
-	if d.st == nil || d.st.version < pg16 {
+	if d.st == nil {
 		return d.Dialect.RevokeMembership(member, role)
 	}
-	return d.st.revokeMembership(member.Name, role.Name), nil
+	if d.st.version < pg16 {
+		if !d.st.canManageMembership(role.Name, "") {
+			return nil, []string{d.st.membershipDenied("revoke", member.Name, role.Name, "")}
+		}
+		return d.Dialect.RevokeMembership(member, role)
+	}
+	return d.st.revokeMembership(member.Name, role.Name)
+}
+
+// GrantMembership implements diff.Dialect. A grant the connected user may
+// not make is reported instead of planned.
+func (d *Driver) GrantMembership(member, role model.RoleID, opts model.MembershipOptions) ([]plan.Statement, []string) {
+	if d.st != nil && !d.st.canManageMembership(role.Name, d.st.user) {
+		return nil, []string{d.st.membershipDenied("grant", member.Name, role.Name, "")}
+	}
+	return d.Dialect.GrantMembership(member, role, opts)
+}
+
+// canManageMembership reports whether the connected user may grant role,
+// or revoke the grant of it made by grantor. From PostgreSQL 16 on that
+// needs ADMIN OPTION on role and acting as grantor (only a superuser
+// may name another grantor in GRANTED BY); before 16, ADMIN OPTION or
+// CREATEROLE for a role that is not a superuser. Roles created by the
+// plan are granted by their creator, which receives ADMIN OPTION on them.
+func (st *state) canManageMembership(role, grantor string) bool {
+	if st.superuser {
+		return true
+	}
+	a, known := st.roles[role]
+	if st.version >= pg16 {
+		return (grantor == "" || grantor == st.user) && (!known || a.admin)
+	}
+	return !known || a.admin || (st.createRole && !a.superuser)
+}
+
+// membershipDenied explains a membership change that canManageMembership
+// rejected.
+func (st *state) membershipDenied(verb, member, role, grantor string) string {
+	what := fmt.Sprintf("membership of %q in %q", member, role)
+	if grantor != "" && grantor != st.user {
+		what += fmt.Sprintf(" granted by %q", grantor)
+	}
+	need := "ADMIN OPTION on the role"
+	switch {
+	case st.version < pg16:
+		need = "ADMIN OPTION on the role, or CREATEROLE for a role that is not a superuser"
+	case grantor != "" && grantor != st.user:
+		need = "superuser, since another role granted it"
+	}
+	return fmt.Sprintf("%s differs from the configuration, but %q may not %s it (it needs %s); not changed", what, st.user, verb, need)
 }
 
 // cascadeNote explains a CASCADE in the plan output: what grantor
@@ -412,10 +461,12 @@ func (st *state) regrantPrivileges(obj model.Object, roles, privs []string) []pl
 }
 
 // revokeMembership renders one REVOKE ... GRANTED BY per grantor of the
-// membership of member in role (PostgreSQL 16+).
-func (st *state) revokeMembership(member, role string) []plan.Statement {
+// membership of member in role (PostgreSQL 16+). Grants the connected
+// user may not revoke are reported instead.
+func (st *state) revokeMembership(member, role string) ([]plan.Statement, []string) {
 	dependents := st.memberDependents(member, role)
 	var out []plan.Statement
+	var warns []string
 	revoked := false
 	for _, e := range st.members {
 		if e.role != role || e.member != member {
@@ -425,6 +476,10 @@ func (st *state) revokeMembership(member, role string) []plan.Statement {
 		if st.losesMembership(e.grantor, role) {
 			// The plan revokes the grantor's membership with CASCADE,
 			// which removes this grant as well.
+			continue
+		}
+		if !st.canManageMembership(role, e.grantor) {
+			warns = append(warns, st.membershipDenied("revoke", member, role, e.grantor))
 			continue
 		}
 		q := "REVOKE " + Ident(role) + " FROM " + Ident(member)
@@ -437,9 +492,16 @@ func (st *state) revokeMembership(member, role string) []plan.Statement {
 		out = append(out, plan.SQL("", q))
 	}
 	if !revoked {
+		if !st.canManageMembership(role, "") {
+			return nil, []string{st.membershipDenied("revoke", member, role, "")}
+		}
 		out = []plan.Statement{plan.SQL("", "REVOKE "+Ident(role)+" FROM "+Ident(member))}
 	}
-	return append(out, st.regrantMembers(role, dependents)...)
+	if len(out) == 0 {
+		// Nothing is revoked, so nothing cascades.
+		return nil, warns
+	}
+	return append(out, st.regrantMembers(role, dependents)...), warns
 }
 
 // regrantMembers grants role again to the dependents that declare the

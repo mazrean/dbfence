@@ -200,8 +200,8 @@ func TestStateRevokeMembership(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			st := &state{desired: &model.Desired{Roles: tt.desired}, members: tt.members, version: 170000}
-			if got := sqlOf(st.revokeMembership("u", "grp")); got != tt.want {
+			st := &state{desired: &model.Desired{Roles: tt.desired}, members: tt.members, version: 170000, superuser: true}
+			if got := sqlOf(first(st.revokeMembership("u", "grp"))); got != tt.want {
 				t.Errorf("got\n%s\nwant\n%s", got, tt.want)
 			}
 		})
