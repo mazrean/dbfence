@@ -72,21 +72,10 @@ func (t *tfstateReader) Lookup(ctx context.Context, loc, address string) ([]byte
 		// The parse error quotes the URL, which may hold a password.
 		return nil, errors.New("tfstate: the state URL cannot be parsed; check it for unescaped % or control characters")
 	}
-	t.mu.Lock()
-	st, ok := t.states[loc]
-	if !ok {
-		var err error
-		st, err = tfstate.ReadURL(ctx, loc)
-		if err != nil {
-			t.mu.Unlock()
-			// Not wrapped: the cause repeats the URL, which may carry
-			// credentials or a signed query string.
-			_, r := redactURL(loc)
-			return nil, errors.New(r.Replace(err.Error()))
-		}
-		t.states[loc] = st
+	st, err := t.state(ctx, loc)
+	if err != nil {
+		return nil, err
 	}
-	t.mu.Unlock()
 
 	shown, _ := redactURL(loc)
 	obj, err := st.Lookup(address)
@@ -99,6 +88,33 @@ func (t *tfstateReader) Lookup(ctx context.Context, loc, address string) ([]byte
 		return nil, errors.New("tfstate: " + address + " not found in " + shown)
 	}
 	return json.Marshal(obj.Value)
+}
+
+// state returns the state at loc, reading it on first use.
+func (t *tfstateReader) state(ctx context.Context, loc string) (st *tfstate.TFState, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if st, ok := t.states[loc]; ok {
+		return st, nil
+	}
+	defer func() {
+		// tfstate-lookup panics on some malformed URLs (remote:// with
+		// too few path segments). Report a fixed error instead of the
+		// panic and its stack trace.
+		if recover() != nil {
+			shown, _ := redactURL(loc)
+			st, err = nil, errors.New("tfstate: failed to read the state from "+shown+"; check the URL")
+		}
+	}()
+	st, err = tfstate.ReadURL(ctx, loc)
+	if err != nil {
+		// Not wrapped: the cause repeats the URL, which may carry
+		// credentials or a signed query string.
+		_, r := redactURL(loc)
+		return nil, errors.New(r.Replace(err.Error()))
+	}
+	t.states[loc] = st
+	return st, nil
 }
 
 // redactURL returns loc without its userinfo password, query string and

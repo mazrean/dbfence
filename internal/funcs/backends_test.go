@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zclconf/go-cty/cty"
 )
@@ -78,6 +79,46 @@ func TestTFStateErrorsRedactURL(t *testing.T) {
 				if strings.Contains(msg, s) {
 					t.Errorf("err = %q leaks %q", msg, s)
 				}
+			}
+		})
+	}
+}
+
+// TestTFStatePanicDoesNotLockReader checks that a URL on which
+// tfstate-lookup panics yields a plain error and leaves later lookups
+// working.
+func TestTFStatePanicDoesNotLockReader(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"remote without organization", "remote://app.terraform.io"},
+		{"remote with a trailing slash", "remote://app.terraform.io/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fn := NewRegistry(t.Context()).Functions()["tfstate"]
+			_, err := fn.Call([]cty.Value{cty.StringVal(tt.url), cty.StringVal("output.x")})
+			if err == nil {
+				t.Fatal("want error")
+			}
+			if msg := err.Error(); strings.Contains(msg, "panic") || strings.Contains(msg, "goroutine") {
+				t.Errorf("err = %q, want no panic or stack trace", msg)
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := fn.Call([]cty.Value{cty.StringVal("testdata/terraform.tfstate"), cty.StringVal("output.db_host")})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("second lookup: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("second lookup did not return: the reader stayed locked")
 			}
 		})
 	}
