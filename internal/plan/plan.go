@@ -5,6 +5,7 @@ package plan
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -53,21 +54,98 @@ func (s Statement) render(showSecrets bool) string {
 	return sb.String()
 }
 
-// Redact replaces every secret of s found in text, so that server error
-// messages quoting the statement do not leak them.
+// minRedactPrefix is the shortest truncated secret prefix that Redact
+// removes; shorter fragments are too likely to match unrelated text.
+const minRedactPrefix = 4
+
+// Redact removes the secrets of s from text, so that server error messages
+// quoting the statement do not leak them. Only literal contexts are
+// considered: a secret, or a prefix of at least minRedactPrefix bytes of
+// it, that starts right after a single quote and ends at a single quote or
+// at the end of text. This covers the full literal, its unescaped value
+// inside quotes, and fragments truncated by the server (MySQL cuts the
+// "near '...'" part of syntax errors at 80 characters), without rewriting
+// unrelated text that merely contains a short password.
 func (s Statement) Redact(text string) string {
 	for _, p := range s.parts {
 		sec, ok := p.(Secret)
-		if !ok || sec == "" {
+		if !ok {
 			continue
 		}
-		text = strings.ReplaceAll(text, string(sec), "'<redacted>'")
-		// Also cover the value without its surrounding quotes.
-		if inner := strings.Trim(string(sec), "'"); inner != "" {
-			text = strings.ReplaceAll(text, inner, "<redacted>")
+		for _, v := range secretValues(string(sec)) {
+			text = redactValue(text, v)
 		}
 	}
 	return text
+}
+
+// secretValues returns the forms in which the value of the literal sec may
+// be echoed between single quotes: escaped as written and unescaped.
+func secretValues(sec string) []string {
+	inner := strings.TrimSuffix(strings.TrimPrefix(sec, "'"), "'")
+	if inner == "" {
+		return nil
+	}
+	quotes := strings.ReplaceAll(inner, "''", "'")
+	backslash := strings.NewReplacer(`\\`, `\`, `\'`, "'").Replace(quotes)
+	out := []string{inner}
+	for _, v := range []string{quotes, backslash} {
+		if !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
+	// Longest first, so a longer form is not cut short by a shorter one.
+	slices.SortStableFunc(out, func(a, b string) int { return len(b) - len(a) })
+	return out
+}
+
+// redactValue replaces v, or a prefix of it of at least minRedactPrefix
+// bytes, when it starts after a single quote and ends at a single quote or
+// at the end of text.
+func redactValue(text, v string) string {
+	const marker = "<redacted>"
+	var sb strings.Builder
+	last := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] != '\'' {
+			continue
+		}
+		start := i + 1
+		k := literalMatchLen(text[start:], v)
+		if k == 0 {
+			continue
+		}
+		end := start + k
+		sb.WriteString(text[last:start])
+		sb.WriteString(marker)
+		last = end
+		i = end - 1
+	}
+	if last == 0 {
+		return text
+	}
+	sb.WriteString(text[last:])
+	return sb.String()
+}
+
+// literalMatchLen returns the length of the longest prefix of rest that is
+// v or a prefix of v of at least minRedactPrefix bytes and that is followed
+// by a single quote or the end of rest, or 0 when there is none.
+func literalMatchLen(rest, v string) int {
+	n := min(len(rest), len(v))
+	k := 0
+	for k < n && rest[k] == v[k] {
+		k++
+	}
+	for ; k > 0; k-- {
+		if k < len(v) && k < minRedactPrefix {
+			return 0
+		}
+		if k == len(rest) || rest[k] == '\'' {
+			return k
+		}
+	}
+	return 0
 }
 
 // Action is the kind of a change.
