@@ -178,6 +178,12 @@ func TestRegisterLiteralSecrets(t *testing.T) {
 			registered: []string{"Ee1Lp3sWq9"},
 		},
 		{
+			name:       "password of a tfstate URL on another attribute",
+			src:        pgConn + "database \"app\" {\n  name = tfstate(\"https://u:Gg1TfTok9q@h/x.tfstate\", \"out${nope}\")\n}\n",
+			registered: []string{"Gg1TfTok9q"},
+			visible:    []string{"https://u:", "@h/x.tfstate"},
+		},
+		{
 			name:    "function arguments name secrets",
 			src:     pgConn + "user \"app\" {\n  password = env(\"LOOKUP_NAME_ONLY\")\n  login = \"maybe\"\n}\n",
 			visible: []string{"LOOKUP_NAME_ONLY"},

@@ -118,6 +118,7 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 		if file != nil {
 			// Even when parsing failed: the body holds what parsed.
 			registerLiteralSecrets(file.Body)
+			registerStateURLPasswords(file.Body)
 			bodies = append(bodies, file)
 		}
 	}

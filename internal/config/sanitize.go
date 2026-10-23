@@ -174,6 +174,25 @@ func registerLiteralSecrets(body hcl.Body) {
 	}
 }
 
+// registerStateURLPasswords registers the password of every literal
+// state URL passed to tfstate anywhere in body, such as
+// https://user:token@host/x.tfstate, since a diagnostic on the line of
+// the call quotes it whichever attribute it is on.
+func registerStateURLPasswords(body hcl.Body) {
+	b, ok := body.(*hclsyntax.Body)
+	if !ok || b == nil {
+		return
+	}
+	_ = hclsyntax.VisitAll(b, func(n hclsyntax.Node) hcl.Diagnostics {
+		if call, ok := n.(*hclsyntax.FunctionCallExpr); ok && call.Name == "tfstate" && len(call.Args) > 0 {
+			for _, p := range literalParts(call.Args[0]) {
+				registerURLPassword(p)
+			}
+		}
+		return nil
+	})
+}
+
 // registerURLPassword registers the password of s if s is a URL with
 // one.
 func registerURLPassword(s string) {
