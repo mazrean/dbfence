@@ -135,6 +135,11 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		cur.Warnings = append(cur.Warnings, st.ownerWarnings(cur)...)
 		cur.Warnings = append(cur.Warnings, st.pruneWarnings(cur)...)
 	}
+	depWarns, depErr := d.unreachableDependencyWarnings(ctx, cur, st)
+	if depErr != nil {
+		return nil, depErr
+	}
+	cur.Warnings = append(cur.Warnings, depWarns...)
 	d.st = st
 	return cur, nil
 }
@@ -220,12 +225,7 @@ func (st *state) ownerWarnings(cur *model.Current) []string {
 // pruneWarnings warns about unmanaged roles whose objects the connected
 // user may not reassign, so that --prune would fail on them.
 func (st *state) pruneWarnings(cur *model.Current) []string {
-	var ignore []*regexp.Regexp
-	for _, p := range st.desired.Ignore.Roles {
-		if re, err := model.CompileIgnorePattern(p); err == nil {
-			ignore = append(ignore, re)
-		}
-	}
+	ignore := compileIgnore(st.desired.Ignore.Roles)
 	var warns []string
 	for _, r := range cur.Roles {
 		name := r.ID.Name
@@ -238,6 +238,73 @@ func (st *state) pruneWarnings(cur *model.Current) []string {
 			name, st.user, Ident(name), Ident(st.user)))
 	}
 	return warns
+}
+
+// unreachableDependencyWarnings warns about unmanaged roles that own
+// objects or hold privileges (pg_shdepend) in databases where DropRole
+// does not run REASSIGN OWNED and DROP OWNED: databases dbfence cannot
+// connect to, and ignored ones. DROP ROLE would fail on them.
+func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.Current, st *state) ([]string, error) {
+	ignoreRoles := compileIgnore(st.desired.Ignore.Roles)
+	ignoreDBs := compileIgnore(st.desired.Ignore.Databases)
+	matches := func(res []*regexp.Regexp, s string) bool {
+		return slices.ContainsFunc(res, func(re *regexp.Regexp) bool { return re.MatchString(s) })
+	}
+	prunable := func(name string) bool {
+		id := model.RoleID{Name: name}
+		return name != st.user && !(Dialect{}).IsSystemRole(id) && !matches(ignoreRoles, name) &&
+			slices.ContainsFunc(cur.Roles, func(r model.RoleState) bool { return r.ID == id }) &&
+			!slices.ContainsFunc(st.desired.Roles, func(r model.Role) bool { return r.ID == id })
+	}
+	blocked := map[string][]string{}
+	var roles []string
+	err := query(ctx, d.db, `SELECT DISTINCT r.rolname, db.datname
+		FROM pg_shdepend s
+		JOIN pg_roles r ON r.oid = s.refobjid
+		JOIN pg_database db ON db.oid = s.dbid
+		WHERE s.refclassid = 'pg_authid'::regclass AND s.dbid <> 0 AND s.deptype <> 'p'
+		ORDER BY 1, 2`,
+		func(rows *sql.Rows) error {
+			var role, db string
+			if err := rows.Scan(&role, &db); err != nil {
+				return err
+			}
+			var why string
+			switch {
+			case !prunable(role):
+				return nil
+			case matches(ignoreDBs, db):
+				why = "ignored"
+			case !st.connectable[db]:
+				why = "cannot connect"
+			default:
+				return nil
+			}
+			if _, ok := blocked[role]; !ok {
+				roles = append(roles, role)
+			}
+			blocked[role] = append(blocked[role], fmt.Sprintf("database %q (%s)", db, why))
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	warns := make([]string, 0, len(roles))
+	for _, role := range roles {
+		warns = append(warns, fmt.Sprintf("role %q owns objects or holds privileges in %s, where dbfence does not run REASSIGN OWNED and DROP OWNED, so dropping it with --prune will fail at DROP ROLE; reassign or drop them there first",
+			role, strings.Join(blocked[role], ", ")))
+	}
+	return warns, nil
+}
+
+func compileIgnore(patterns []string) []*regexp.Regexp {
+	var out []*regexp.Regexp
+	for _, p := range patterns {
+		if re, err := model.CompileIgnorePattern(p); err == nil {
+			out = append(out, re)
+		}
+	}
+	return out
 }
 
 // canAlter reports whether the connected user may ALTER role: from

@@ -493,6 +493,29 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("dependencies in unreachable databases are reported", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE sd_owner", "CREATE ROLE sd_grantee", "CREATE DATABASE sd_noconn", "CREATE DATABASE sd_ign")
+		s.exec(t, `\c sd_noconn`, "CREATE TABLE t (id int)", "ALTER TABLE t OWNER TO sd_owner", "GRANT SELECT ON t TO sd_grantee")
+		s.exec(t, `\c sd_ign`, "CREATE TABLE t (id int)", "ALTER TABLE t OWNER TO sd_owner")
+		s.exec(t, "ALTER DATABASE sd_noconn ALLOW_CONNECTIONS false")
+		d := s.open(t, "postgres")
+		cur, err := d.Inspect(t.Context(), &model.Desired{Engine: model.EnginePostgres, Ignore: model.Ignore{Databases: []string{"sd_ign"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := strings.Join(cur.Warnings, "\n")
+		for _, want := range []string{
+			`role "sd_owner" owns objects or holds privileges in database "sd_ign" (ignored), database "sd_noconn" (cannot connect), where dbfence does not run REASSIGN OWNED`,
+			`role "sd_grantee" owns objects or holds privileges in database "sd_noconn" (cannot connect)`,
+		} {
+			if !strings.Contains(w, want) {
+				t.Errorf("warnings lack %q:\n%s", want, w)
+			}
+		}
+		// Later subtests prune with these roles in sight.
+		s.exec(t, "ALTER DATABASE sd_noconn ALLOW_CONNECTIONS true", "DROP DATABASE sd_noconn", "DROP DATABASE sd_ign", "DROP ROLE sd_owner", "DROP ROLE sd_grantee")
+	})
+
 	t.Run("prune drops non-empty schemas", func(t *testing.T) {
 		s.exec(t, "CREATE DATABASE p_db")
 		s.exec(t, `\c p_db`, "CREATE SCHEMA junk", "CREATE SCHEMA junkfull", "CREATE TABLE junkfull.t (id int)")
