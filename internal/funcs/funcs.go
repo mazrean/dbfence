@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -271,7 +272,7 @@ func (r *Registry) gcpFunc() function.Function {
 			}
 			name, err := gcpVersionName(args[0].AsString(), args[1:])
 			if err != nil {
-				return cty.NilVal, function.NewArgError(0, err)
+				return cty.NilVal, err
 			}
 			return r.cached("gcp\x00"+name, func() (cty.Value, error) {
 				c, err := r.gcp(r.ctx)
@@ -288,19 +289,32 @@ func (r *Registry) gcpFunc() function.Function {
 	})
 }
 
+var (
+	gcpSecretName  = regexp.MustCompile(`^projects/[^/]+/secrets/[^/]+(/versions/[^/]+)?$`)
+	gcpVersionPart = regexp.MustCompile(`^[^/]+$`)
+)
+
+// gcpVersionName returns the version resource name, or a function.ArgError
+// pointing at the offending argument.
 func gcpVersionName(name string, rest []cty.Value) (string, error) {
-	if !strings.HasPrefix(name, "projects/") || !strings.Contains(name, "/secrets/") {
-		return "", fmt.Errorf("name must look like projects/<project>/secrets/<secret>, got %q", name)
+	if strings.HasPrefix(name, "projects/") && strings.Contains(name, "/locations/") {
+		return "", function.NewArgErrorf(0, "regional secrets (projects/<project>/locations/<location>/...) are not supported, got %q", name)
+	}
+	if !gcpSecretName.MatchString(name) {
+		return "", function.NewArgErrorf(0, "name must look like projects/<project>/secrets/<secret>[/versions/<version>], got %q", name)
 	}
 	version, hasVersion := optionalString(rest)
 	if strings.Contains(name, "/versions/") {
 		if hasVersion {
-			return "", fmt.Errorf("version given twice in %q", name)
+			return "", function.NewArgErrorf(0, "version given twice in %q", name)
 		}
 		return name, nil
 	}
 	if !hasVersion {
-		version = "latest"
+		return name + "/versions/latest", nil
+	}
+	if !gcpVersionPart.MatchString(version) {
+		return "", function.NewArgErrorf(1, "version must be a non-empty version number or alias without \"/\", got %q", version)
 	}
 	return name + "/versions/" + version, nil
 }
