@@ -93,16 +93,16 @@ func (st *state) revokeOwnerMemberships(role string) []plan.Statement {
 			continue
 		}
 		done = append(done, e.role)
-		q := "REVOKE " + Ident(e.role) + " FROM " + Ident(role)
+		var tail []plan.Fragment
 		if st.version >= pg16 && e.grantor != "" {
-			q += " GRANTED BY " + Ident(e.grantor)
+			tail = append(tail, grantedBy(e.grantor))
 		}
 		if st.version >= pg16 && len(st.memberDependents(role, e.role)) > 0 {
-			q += " CASCADE"
+			tail = append(tail, plan.Keyword(" CASCADE"))
 		}
 		note := fmt.Sprintf("revoked first: through it %s has the privileges of the owner of objects it granted privileges on, so DROP OWNED would not revoke those grants",
 			noteRole(role))
-		out = append(out, plan.SQL("", q).WithNote(note))
+		out = append(out, revokeMembership(role, e.role, false, tail...).WithNote(note))
 	}
 	return out
 }
@@ -173,7 +173,7 @@ func (d *Driver) DropSchema(s model.Schema) []plan.Statement {
 	if n == 0 {
 		return d.Dialect.DropSchema(s)
 	}
-	return []plan.Statement{plan.SQL(s.Database, "DROP SCHEMA "+Ident(s.Name)+" CASCADE").
+	return []plan.Statement{dropSchema(s, plan.Keyword(" CASCADE")).
 		WithNote(fmt.Sprintf("CASCADE: the schema contains %d objects, which are dropped too", n))}
 }
 
@@ -216,22 +216,28 @@ func (st *state) inheritOptions(r model.Role) ([]plan.Statement, []string) {
 			warns = append(warns, fmt.Sprintf("membership of %q in %q granted by %q has inherit = %v, but %q may not change it", e.member, e.role, e.grantor, e.inherit, st.user))
 			continue
 		}
-		stmts = append(stmts, plan.SQL("", grantMembership(e.member, e.role, model.MembershipOptions{Inherit: r.Inherit})+by))
+		stmts = append(stmts, grantMembership(e.member, e.role, model.MembershipOptions{Inherit: r.Inherit}, by))
 	}
 	return stmts, warns
 }
 
 // grantedBy returns the GRANTED BY clause that changes the grant made by
-// grantor, or false when the connected user may not act as grantor.
-func (st *state) grantedBy(grantor string) (string, bool) {
+// grantor (nil for the grant of the connected user), or false when the
+// connected user may not act as grantor.
+func (st *state) grantedBy(grantor string) (plan.Fragment, bool) {
 	switch {
 	case grantor == "":
-		return "", true
+		return nil, true
 	case st.superuser || grantor == st.user:
-		return " GRANTED BY " + Ident(grantor), true
+		return grantedBy(grantor), true
 	default:
-		return "", false
+		return nil, false
 	}
+}
+
+// grantedBy renders GRANTED BY grantor.
+func grantedBy(grantor string) plan.Seq {
+	return plan.Seq{plan.Keyword(" GRANTED BY "), Ident(grantor)}
 }
 
 // AlterMembership implements diff.Dialect. From PostgreSQL 16 on each
@@ -277,21 +283,25 @@ func (st *state) alterMembership(member, role string, want model.MembershipOptio
 			continue
 		}
 		if revokeAdmin && e.admin {
-			q := "REVOKE ADMIN OPTION FOR " + Ident(role) + " FROM " + Ident(member) + by
+			var tail []plan.Fragment
+			if by != nil {
+				tail = append(tail, by)
+			}
 			if len(dependents) == 0 {
-				out = append(out, plan.SQL("", q))
+				out = append(out, revokeMembership(member, role, true, tail...))
 			} else {
-				out = append(out, plan.SQL("", q+" CASCADE").WithNote(cascadeNote("memberships in "+strconv.Quote(role), member, dependents)))
+				tail = append(tail, plan.Keyword(" CASCADE"))
+				out = append(out, revokeMembership(member, role, true, tail...).WithNote(cascadeNote("memberships in "+strconv.Quote(role), member, dependents)))
 			}
 		}
 		if opts != (model.MembershipOptions{}) {
-			out = append(out, plan.SQL("", grantMembership(member, role, opts)+by))
+			out = append(out, grantMembership(member, role, opts, by))
 		}
 	}
 	if want.Admin != nil && *want.Admin && !have.Admin {
 		// The new grant may be a separate row (another grantor), so it
 		// carries the declared INHERIT and SET options too.
-		out = append(out, plan.SQL("", grantMembership(member, role, want)))
+		out = append(out, grantMembership(member, role, want, nil))
 	}
 	if revokeAdmin {
 		stmts, regrantWarns := st.regrantMembers(role, dependents)
@@ -459,7 +469,6 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 	}
 	slices.Sort(grantors)
 
-	db, target := onObject(obj)
 	var out, regrants []plan.Statement
 	var warns []string
 	for _, g := range grantors {
@@ -474,17 +483,13 @@ func (st *state) revoke(grantee string, obj model.Object, privs []string, option
 			continue
 		}
 		dependents := st.aclDependents(obj, grantee, ps)
-		q := "REVOKE "
-		if optionOnly {
-			q += "GRANT OPTION FOR "
-		}
-		q += strings.Join(ps, ", ") + " ON " + target + " FROM " + Grantee(grantee)
+		var tail []plan.Fragment
 		if len(dependents) > 0 {
-			q += " CASCADE"
+			tail = append(tail, plan.Keyword(" CASCADE"))
 		}
 		// Exec runs a statement with AsRole in a transaction of its own,
 		// under SET LOCAL ROLE, so the role never outlives it.
-		stmt := plan.SQL(db, q).WithRole(g)
+		stmt := revokePrivileges(grantee, obj, ps, optionOnly, tail...).WithRole(g)
 		if len(dependents) > 0 {
 			stmt = stmt.WithNote(cascadeNote("privileges on "+objectLabel(obj), grantee, dependents))
 		}
@@ -585,13 +590,13 @@ func (st *state) revokeMembership(member, role string) ([]plan.Statement, []stri
 			warns = append(warns, st.membershipDenied("revoke", member, role, e.grantor))
 			continue
 		}
-		q := "REVOKE " + Ident(role) + " FROM " + Ident(member)
+		var tail []plan.Fragment
 		if e.grantor != "" {
-			q += " GRANTED BY " + Ident(e.grantor)
+			tail = append(tail, grantedBy(e.grantor))
 		}
-		stmt := plan.SQL("", q)
+		stmt := revokeMembership(member, role, false, tail...)
 		if len(dependents) > 0 {
-			stmt = plan.SQL("", q+" CASCADE").WithNote(cascadeNote("memberships in "+strconv.Quote(role), member, dependents))
+			stmt = revokeMembership(member, role, false, append(tail, plan.Keyword(" CASCADE"))...).WithNote(cascadeNote("memberships in "+strconv.Quote(role), member, dependents))
 		}
 		out = append(out, stmt)
 	}
@@ -599,7 +604,7 @@ func (st *state) revokeMembership(member, role string) ([]plan.Statement, []stri
 		if !st.canManageMembership(role, "") {
 			return nil, []string{st.membershipDenied("revoke", member, role, "")}
 		}
-		out = []plan.Statement{plan.SQL("", "REVOKE "+Ident(role)+" FROM "+Ident(member))}
+		out = []plan.Statement{revokeMembership(member, role, false)}
 	}
 	if len(out) == 0 {
 		// Nothing is revoked, so nothing cascades.

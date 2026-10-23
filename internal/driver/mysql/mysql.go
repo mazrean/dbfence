@@ -785,15 +785,28 @@ func escapeWildcards(s string) string {
 }
 
 // grantTarget renders the target of a database level GRANT or REVOKE.
-func (d Dialect) grantTarget(obj model.Object) string {
+func (d Dialect) grantTarget(obj model.Object) plan.Seq {
+	var db plan.Ident
 	switch {
 	case obj.Pattern != "":
-		return Ident(obj.Pattern) + ".*"
+		db = Ident(obj.Pattern)
 	case d.PartialRevokes:
-		return Ident(obj.Database) + ".*"
+		db = Ident(obj.Database)
 	default:
-		return Ident(escapeWildcards(obj.Database)) + ".*"
+		db = Ident(escapeWildcards(obj.Database))
 	}
+	return plan.Seq{db, plan.Keyword(".*")}
+}
+
+// privileges renders a privilege list. The names are validated words:
+// the configuration accepts only the privileges MySQL knows, and Inspect
+// reads them from fixed mysql.db columns.
+func privileges(ps []string) plan.Seq {
+	toks := make([]plan.Token, len(ps))
+	for i, p := range ps {
+		toks[i] = plan.NewToken(p)
+	}
+	return plan.Join(", ", toks...)
 }
 
 func query(ctx context.Context, db *sql.DB, q string, scan func(*sql.Rows) error) error {
@@ -824,19 +837,21 @@ type Dialect struct {
 }
 
 // Ident quotes an identifier.
-func Ident(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
+func Ident(s string) plan.Ident {
+	return plan.QuotedIdent("`" + strings.ReplaceAll(s, "`", "``") + "`")
+}
 
 // Literal quotes a string literal.
-func (d Dialect) Literal(s string) string {
+func (d Dialect) Literal(s string) plan.Literal {
 	if !d.NoBackslashEscapes {
 		s = strings.ReplaceAll(s, `\`, `\\`)
 	}
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	return plan.EscapedLiteral("'" + strings.ReplaceAll(s, "'", "''") + "'")
 }
 
 // Account quotes 'user'@'host'.
-func (d Dialect) Account(id model.RoleID) string {
-	return d.Literal(id.Name) + "@" + d.Literal(id.Host)
+func (d Dialect) Account(id model.RoleID) plan.Seq {
+	return plan.Seq{d.Literal(id.Name), plan.Keyword("@"), d.Literal(id.Host)}
 }
 
 // IsSystemRole implements diff.Dialect.
@@ -861,11 +876,11 @@ func (Dialect) IsSystemSchema(string) bool { return true }
 
 // Name renders a charset, collation or plugin name: bare when it is a
 // plain word, quoted as an identifier otherwise.
-func Name(s string) string {
+func Name(s string) plan.Fragment {
 	if s != "" && strings.IndexFunc(s, func(r rune) bool {
 		return r != '_' && (r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
 	}) < 0 {
-		return s
+		return plan.NewToken(s)
 	}
 	return Ident(s)
 }
@@ -878,18 +893,20 @@ func isPasswordPlugin(plugin string) bool {
 	return slices.ContainsFunc(passwordPlugins, func(p string) bool { return strings.EqualFold(p, plugin) })
 }
 
-func (d Dialect) identified(plugin string, pw *string) []any {
+// identified renders the IDENTIFIED clause, or nil when neither a plugin
+// nor a password is set.
+func (d Dialect) identified(plugin string, pw *string) plan.Fragment {
 	switch {
 	case pw == nil && plugin == "":
 		return nil
 	case pw == nil:
-		return []any{" IDENTIFIED WITH " + Name(plugin)}
+		return plan.Seq{plan.Keyword(" IDENTIFIED WITH "), Name(plugin)}
 	}
-	clause := " IDENTIFIED"
+	clause := plan.Seq{plan.Keyword(" IDENTIFIED")}
 	if plugin != "" {
-		clause += " WITH " + Name(plugin)
+		clause = append(clause, plan.Keyword(" WITH "), Name(plugin))
 	}
-	return []any{clause + " BY ", plan.Secret(d.Literal(*pw))}
+	return append(clause, plan.Keyword(" BY "), plan.NewSecret(d.Literal(*pw)))
 }
 
 // CreateRole implements diff.Dialect. Non-login roles are locked accounts,
@@ -898,13 +915,24 @@ func (d Dialect) CreateRole(r model.Role) []plan.Statement {
 	return d.createUser("CREATE USER ", r)
 }
 
-func (d Dialect) createUser(verb string, r model.Role) []plan.Statement {
-	parts := []any{verb + d.Account(r.ID)}
-	parts = append(parts, d.identified(r.AuthPlugin, r.Password)...)
-	if r.Login != nil && !*r.Login {
-		parts = append(parts, " ACCOUNT LOCK")
+func (d Dialect) createUser(verb plan.Keyword, r model.Role) []plan.Statement {
+	parts := plan.Seq{verb, d.Account(r.ID)}
+	var change plan.RoleChange
+	if id := d.identified(r.AuthPlugin, r.Password); id != nil {
+		parts = append(parts, id)
+		change.SetsPassword = true
 	}
-	return []plan.Statement{plan.SQL("", parts...)}
+	if r.Login != nil && !*r.Login {
+		parts = append(parts, plan.Keyword(" ACCOUNT LOCK"))
+		change.LocksAccount = true
+	}
+	return []plan.Statement{plan.New("", plan.KindCreateRole, plan.RoleTarget(r.ID), parts...).WithRoleChange(change)}
+}
+
+// alterUser renders ALTER USER r followed by parts.
+func (d Dialect) alterUser(id model.RoleID, change plan.RoleChange, parts ...plan.Fragment) plan.Statement {
+	all := append(plan.Seq{plan.Keyword("ALTER USER "), d.Account(id)}, parts...)
+	return plan.New("", plan.KindAlterRole, plan.RoleTarget(id), all...).WithRoleChange(change)
 }
 
 // EnsureRole implements diff.Dialect. IF NOT EXISTS leaves an existing
@@ -915,13 +943,13 @@ func (d Dialect) EnsureRole(r model.Role) []plan.Statement {
 
 // AlterRole implements diff.Dialect.
 func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.Statement, []string) {
+	setsPassword := plan.RoleChange{SetsPassword: true}
 	if cur.AttributesUnknown {
 		// Nothing can be compared; only an explicitly forced password is set.
 		if !force || r.Password == nil {
 			return nil, nil
 		}
-		parts := append([]any{"ALTER USER " + d.Account(r.ID)}, d.identified(r.AuthPlugin, r.Password)...)
-		return []plan.Statement{plan.SQL("", parts...)}, nil
+		return []plan.Statement{d.alterUser(r.ID, setsPassword, d.identified(r.AuthPlugin, r.Password))}, nil
 	}
 	var out []plan.Statement
 	var warns []string
@@ -950,16 +978,16 @@ func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]pla
 		}
 	}
 	if identify {
-		parts := append([]any{"ALTER USER " + d.Account(r.ID)}, d.identified(plugin, r.Password)...)
-		out = append(out, plan.SQL("", parts...))
+		out = append(out, d.alterUser(r.ID, setsPassword, d.identified(plugin, r.Password)))
 	}
 	if r.Password != nil && cur.RetainedPassword {
 		// The old password would keep working next to the declared one;
 		// IDENTIFIED BY without RETAIN CURRENT PASSWORD keeps it too.
-		out = append(out, plan.SQL("", "ALTER USER "+d.Account(r.ID)+" DISCARD OLD PASSWORD"))
+		out = append(out, d.alterUser(r.ID, setsPassword, plan.Keyword(" DISCARD OLD PASSWORD")))
 	}
 	if r.Login != nil && *r.Login != cur.Login {
-		out = append(out, plan.SQL("", "ALTER USER "+d.Account(r.ID)+" ACCOUNT "+map[bool]string{true: "UNLOCK", false: "LOCK"}[*r.Login]))
+		out = append(out, d.alterUser(r.ID, plan.RoleChange{LocksAccount: !*r.Login},
+			map[bool]plan.Keyword{true: " ACCOUNT UNLOCK", false: " ACCOUNT LOCK"}[*r.Login]))
 	}
 	return out, warns
 }
@@ -973,7 +1001,7 @@ func cmpOr(a, b string) string {
 
 // DropRole implements diff.Dialect.
 func (d Dialect) DropRole(id model.RoleID, _ []string) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "DROP USER "+d.Account(id))}
+	return []plan.Statement{plan.New("", plan.KindDropRole, plan.RoleTarget(id), plan.Keyword("DROP USER "), d.Account(id))}
 }
 
 // GrantMembership implements diff.Dialect. SetDefaultRoles activates the role.
@@ -982,11 +1010,12 @@ func (d Dialect) GrantMembership(member, role model.RoleID, opts model.Membershi
 }
 
 func (d Dialect) grantMembership(member, role model.RoleID, opts model.MembershipOptions) []plan.Statement {
-	q := "GRANT " + d.Account(role) + " TO " + d.Account(member)
-	if opts.Admin != nil && *opts.Admin {
-		q += " WITH ADMIN OPTION"
+	admin := opts.Admin != nil && *opts.Admin
+	parts := plan.Seq{plan.Keyword("GRANT "), d.Account(role), plan.Keyword(" TO "), d.Account(member)}
+	if admin {
+		parts = append(parts, plan.Keyword(" WITH ADMIN OPTION"))
 	}
-	return []plan.Statement{plan.SQL("", q)}
+	return []plan.Statement{plan.New("", plan.KindGrantMembership, plan.MembershipTarget(member, role).WithOption(admin), parts...)}
 }
 
 // AlterMembership implements diff.Dialect. MySQL cannot revoke only the
@@ -1023,13 +1052,14 @@ func (d Dialect) SetDefaultRoles(r model.Role, cur model.RoleState) []plan.State
 		if cur.DefaultRolesUnknown {
 			return nil
 		}
-		return []plan.Statement{plan.SQL("", "SET DEFAULT ROLE NONE TO "+d.Account(r.ID))}
+		return []plan.Statement{plan.New("", plan.KindSetDefaultRole, plan.RoleTarget(r.ID), plan.Keyword("SET DEFAULT ROLE NONE TO "), d.Account(r.ID))}
 	}
-	roles := make([]string, 0, len(want))
+	roles := make([]plan.Seq, 0, len(want))
 	for _, id := range want {
 		roles = append(roles, d.Account(id))
 	}
-	return []plan.Statement{plan.SQL("", "SET DEFAULT ROLE "+strings.Join(roles, ", ")+" TO "+d.Account(r.ID))}
+	return []plan.Statement{plan.New("", plan.KindSetDefaultRole, plan.RoleTarget(r.ID),
+		plan.Keyword("SET DEFAULT ROLE "), plan.Join(", ", roles...), plan.Keyword(" TO "), d.Account(r.ID))}
 }
 
 // RevokeMembership implements diff.Dialect.
@@ -1038,21 +1068,27 @@ func (d Dialect) RevokeMembership(member, role model.RoleID) ([]plan.Statement, 
 }
 
 func (d Dialect) revokeMembership(member, role model.RoleID) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "REVOKE "+d.Account(role)+" FROM "+d.Account(member))}
+	return []plan.Statement{plan.New("", plan.KindRevokeMembership, plan.MembershipTarget(member, role),
+		plan.Keyword("REVOKE "), d.Account(role), plan.Keyword(" FROM "), d.Account(member))}
 }
 
 // CreateDatabase implements diff.Dialect.
 func (Dialect) CreateDatabase(db model.Database) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "CREATE DATABASE "+Ident(db.Name)+charsetClause(db.Charset, db.Collation))}
+	return []plan.Statement{plan.New("", plan.KindCreateDatabase, databaseTarget(db.Name),
+		plan.Keyword("CREATE DATABASE "), Ident(db.Name), charsetClause(db.Charset, db.Collation))}
 }
 
-func charsetClause(charset, collation string) string {
-	var s string
+func databaseTarget(name string) plan.Target {
+	return plan.ObjectTarget(model.Object{Type: model.ObjectDatabase, Database: name})
+}
+
+func charsetClause(charset, collation string) plan.Seq {
+	var s plan.Seq
 	if charset != "" {
-		s += " CHARACTER SET " + Name(charset)
+		s = append(s, plan.Keyword(" CHARACTER SET "), Name(charset))
 	}
 	if collation != "" {
-		s += " COLLATE " + Name(collation)
+		s = append(s, plan.Keyword(" COLLATE "), Name(collation))
 	}
 	return s
 }
@@ -1082,12 +1118,13 @@ func (Dialect) AlterDatabase(db, cur model.Database) ([]plan.Statement, []string
 	if charset == "" && collation == "" {
 		return nil, nil
 	}
-	return []plan.Statement{plan.SQL("", "ALTER DATABASE "+Ident(db.Name)+charsetClause(charset, collation))}, nil
+	return []plan.Statement{plan.New("", plan.KindAlterDatabase, databaseTarget(db.Name),
+		plan.Keyword("ALTER DATABASE "), Ident(db.Name), charsetClause(charset, collation))}, nil
 }
 
 // DropDatabase implements diff.Dialect.
 func (Dialect) DropDatabase(name string) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "DROP DATABASE "+Ident(name))}
+	return []plan.Statement{plan.New("", plan.KindDropDatabase, databaseTarget(name), plan.Keyword("DROP DATABASE "), Ident(name))}
 }
 
 // CreateSchema implements diff.Dialect; schemas are rejected at load time.
@@ -1101,20 +1138,22 @@ func (Dialect) DropSchema(model.Schema) []plan.Statement { return nil }
 
 // Grant implements diff.Dialect.
 func (d Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, grantOption bool) []plan.Statement {
-	q := "GRANT " + strings.Join(privs, ", ") + " ON " + d.grantTarget(obj) + " TO " + d.Account(grantee)
+	parts := plan.Seq{plan.Keyword("GRANT "), privileges(privs), plan.Keyword(" ON "), d.grantTarget(obj), plan.Keyword(" TO "), d.Account(grantee)}
 	if grantOption {
-		q += " WITH GRANT OPTION"
+		parts = append(parts, plan.Keyword(" WITH GRANT OPTION"))
 	}
-	return []plan.Statement{plan.SQL("", q)}
+	return []plan.Statement{plan.New("", plan.KindGrant, plan.PrivilegeTarget(grantee, obj).WithOption(grantOption), parts...)}
 }
 
 // Revoke implements diff.Dialect.
 func (d Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
-	return []plan.Statement{plan.SQL("", "REVOKE "+strings.Join(privs, ", ")+" ON "+d.grantTarget(obj)+" FROM "+d.Account(grantee))}, nil
+	return []plan.Statement{plan.New("", plan.KindRevoke, plan.PrivilegeTarget(grantee, obj),
+		plan.Keyword("REVOKE "), privileges(privs), plan.Keyword(" ON "), d.grantTarget(obj), plan.Keyword(" FROM "), d.Account(grantee))}, nil
 }
 
 // RevokeGrantOption implements diff.Dialect. MySQL tracks the grant
 // option per level, not per privilege.
 func (d Dialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, _ []string) ([]plan.Statement, []string) {
-	return []plan.Statement{plan.SQL("", "REVOKE GRANT OPTION ON "+d.grantTarget(obj)+" FROM "+d.Account(grantee))}, nil
+	return []plan.Statement{plan.New("", plan.KindRevoke, plan.PrivilegeTarget(grantee, obj).WithOption(true),
+		plan.Keyword("REVOKE GRANT OPTION ON "), d.grantTarget(obj), plan.Keyword(" FROM "), d.Account(grantee))}, nil
 }

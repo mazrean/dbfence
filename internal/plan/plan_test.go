@@ -7,7 +7,7 @@ import (
 
 func TestStatementRedaction(t *testing.T) {
 	t.Parallel()
-	s := SQL("", "CREATE ROLE \"a\" WITH PASSWORD ", Secret("'p@ss'"))
+	s := SQL("", Keyword("CREATE ROLE \"a\" WITH PASSWORD "), NewSecret(EscapedLiteral("'p@ss'")))
 	if got, want := s.SQL(), `CREATE ROLE "a" WITH PASSWORD 'p@ss'`; got != want {
 		t.Errorf("SQL() = %q, want %q", got, want)
 	}
@@ -21,7 +21,7 @@ func TestStatementRedaction(t *testing.T) {
 
 func TestStatementNotesAreNotSQL(t *testing.T) {
 	t.Parallel()
-	s := SQL("", "REVOKE X").WithNote("x\nDROP DATABASE prod; --")
+	s := SQL("", Keyword("REVOKE X")).WithNote("x\nDROP DATABASE prod; --")
 	if got, want := s.SQL(), "REVOKE X"; got != want {
 		t.Errorf("SQL() = %q, want %q", got, want)
 	}
@@ -43,15 +43,15 @@ func TestStatementWithRole(t *testing.T) {
 		wantWhere string
 		stmt      Statement
 	}{
-		{name: "configured connection", stmt: SQL("", "REVOKE X")},
-		{name: "database only", stmt: SQL("app", "REVOKE X"), wantWhere: `on database "app"`},
-		{name: "role only", stmt: SQL("", "REVOKE X").WithRole("ro"), wantRole: "ro", wantWhere: `as role "ro"`},
+		{name: "configured connection", stmt: SQL("", Keyword("REVOKE X"))},
+		{name: "database only", stmt: SQL("app", Keyword("REVOKE X")), wantWhere: `on database "app"`},
+		{name: "role only", stmt: SQL("", Keyword("REVOKE X")).WithRole("ro"), wantRole: "ro", wantWhere: `as role "ro"`},
 		{
-			name: "database and role", stmt: SQL("app", "REVOKE X").WithRole(`r"o`).WithNote("n"),
+			name: "database and role", stmt: SQL("app", Keyword("REVOKE X")).WithRole(`r"o`).WithNote("n"),
 			wantRole: `r"o`, wantWhere: `on database "app", as role "r\"o"`,
 		},
-		{name: "last role wins", stmt: SQL("", "REVOKE X").WithRole("a").WithRole("b"), wantRole: "b", wantWhere: `as role "b"`},
-		{name: "control characters escaped", stmt: SQL("", "REVOKE X").WithRole("x\n-- y"), wantRole: "x\n-- y", wantWhere: `as role "x\n-- y"`},
+		{name: "last role wins", stmt: SQL("", Keyword("REVOKE X")).WithRole("a").WithRole("b"), wantRole: "b", wantWhere: `as role "b"`},
+		{name: "control characters escaped", stmt: SQL("", Keyword("REVOKE X")).WithRole("x\n-- y"), wantRole: "x\n-- y", wantWhere: `as role "x\n-- y"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -76,7 +76,7 @@ func TestRender(t *testing.T) {
 	t.Parallel()
 	schema := Change{
 		Action: ActionCreate, Resource: `schema "api"`,
-		Statements: []Statement{SQL("app", `CREATE SCHEMA "api"`)},
+		Statements: []Statement{SQL("app", Keyword(`CREATE SCHEMA "api"`))},
 	}
 	tests := []struct {
 		name string
@@ -93,11 +93,11 @@ func TestRender(t *testing.T) {
 			name: "every action with drops",
 			plan: &Plan{Changes: []Change{
 				schema,
-				{Action: ActionUpdate, Resource: `role "a"`, Statements: []Statement{SQL("", "A"), SQL("", "B")}},
-				{Action: ActionGrant, Resource: "g", Statements: []Statement{SQL("", "G")}},
-				{Action: ActionRevoke, Resource: "r", Statements: []Statement{SQL("", "R")}},
-				{Action: ActionDrop, Resource: `database "d"`, Statements: []Statement{SQL("", "D")}},
-				{Action: ActionDrop, Resource: `role "x"`, Statements: []Statement{SQL("", "X")}},
+				{Action: ActionUpdate, Resource: `role "a"`, Statements: []Statement{SQL("", Keyword("A")), SQL("", Keyword("B"))}},
+				{Action: ActionGrant, Resource: "g", Statements: []Statement{SQL("", Keyword("G"))}},
+				{Action: ActionRevoke, Resource: "r", Statements: []Statement{SQL("", Keyword("R"))}},
+				{Action: ActionDrop, Resource: `database "d"`, Statements: []Statement{SQL("", Keyword("D"))}},
+				{Action: ActionDrop, Resource: `role "x"`, Statements: []Statement{SQL("", Keyword("X"))}},
 			}},
 			want: "-- Plan: 1 to create, 1 to change, 1 to grant, 1 to revoke, 2 to drop (7 statements).\n" +
 				"-- DESTRUCTIVE: this plan drops 2 objects: database \"d\", role \"x\"\n",
@@ -106,7 +106,7 @@ func TestRender(t *testing.T) {
 			name: "notes are shown before the statement",
 			plan: &Plan{Changes: []Change{{
 				Action: ActionRevoke, Resource: "r",
-				Statements: []Statement{SQL("app", "REVOKE X CASCADE").WithNote("second").WithNote("first")},
+				Statements: []Statement{SQL("app", Keyword("REVOKE X CASCADE")).WithNote("second").WithNote("first")},
 			}}},
 			want: "-- [revoke] r\n-- (on database \"app\")\n-- first\n-- second\nREVOKE X CASCADE;\n\n" +
 				"-- Plan: 0 to create, 0 to change, 1 to revoke, 0 to drop (1 statement).\n",
@@ -115,7 +115,7 @@ func TestRender(t *testing.T) {
 			name: "statement run as another role",
 			plan: &Plan{Changes: []Change{{
 				Action: ActionRevoke, Resource: "r",
-				Statements: []Statement{SQL("app", `REVOKE X FROM "u"`).WithRole("ro\n-- x"), SQL("", "R").WithRole("g")},
+				Statements: []Statement{SQL("app", Keyword(`REVOKE X FROM "u"`)).WithRole("ro\n-- x"), SQL("", Keyword("R")).WithRole("g")},
 			}}},
 			want: "-- [revoke] r\n-- (on database \"app\", as role \"ro\\n-- x\")\nREVOKE X FROM \"u\";\n-- (as role \"g\")\nR;\n\n" +
 				"-- Plan: 0 to create, 0 to change, 1 to revoke, 0 to drop (2 statements).\n",
@@ -168,7 +168,7 @@ func TestOutputEscapesControlCharacters(t *testing.T) {
 	p := &Plan{
 		Warnings: []string{"role " + evil},
 		Changes: []Change{{Action: ActionDrop, Resource: "role " + evil, Statements: []Statement{
-			SQL("", `DROP ROLE "`+evil+`" PASSWORD `, Secret("'"+evil+"'")).WithNote("note " + evil),
+			SQL("", Keyword(`DROP ROLE "`+evil+`" PASSWORD `), NewSecret(EscapedLiteral("'"+evil+"'"))).WithNote("note " + evil),
 		}}},
 	}
 	tests := []struct {
@@ -243,10 +243,10 @@ func TestCount(t *testing.T) {
 
 func TestStatementHasSecret(t *testing.T) {
 	t.Parallel()
-	if SQL("", "CREATE ROLE a").HasSecret() {
+	if SQL("", Keyword("CREATE ROLE a")).HasSecret() {
 		t.Error("statement without a secret reports one")
 	}
-	if !SQL("", "ALTER ROLE a PASSWORD ", Secret("'x'")).HasSecret() {
+	if !SQL("", Keyword("ALTER ROLE a PASSWORD "), NewSecret(EscapedLiteral("'x'"))).HasSecret() {
 		t.Error("statement with a secret reports none")
 	}
 }

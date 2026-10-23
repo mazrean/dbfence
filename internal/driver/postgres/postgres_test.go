@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
+	"github.com/mazrean/dbfence/internal/plan"
 )
 
 func TestOpenParseErrorHidesPassword(t *testing.T) {
@@ -115,7 +116,7 @@ func TestLiteral(t *testing.T) {
 		{`\'; DROP DATABASE prod; --`, `E'\\''; DROP DATABASE prod; --'`},
 	}
 	for _, tt := range tests {
-		if got := Literal(tt.in); got != tt.want {
+		if got := plan.SQL("", Literal(tt.in)).SQL(); got != tt.want {
 			t.Errorf("Literal(%q) = %s, want %s", tt.in, got, tt.want)
 		}
 	}

@@ -138,12 +138,17 @@ func TestPruneWarningsOwnerMembership(t *testing.T) {
 	}
 }
 
+// sqlOf renders stmts for comparison. It panics on a statement without
+// a Kind, so that every test through it checks that the builders set one.
 func sqlOf(stmts []plan.Statement) string {
 	out := make([]string, len(stmts))
 	for i, s := range stmts {
+		if s.Kind() == plan.KindOther {
+			panic("statement without a kind: " + s.SQL())
+		}
 		out[i] = s.SQL()
 		if s.AsRole != "" {
-			out[i] = "as " + Ident(s.AsRole) + ": " + out[i]
+			out[i] = "as " + Ident(s.AsRole).String() + ": " + out[i]
 		}
 		for _, n := range slices.Backward(s.Notes()) {
 			out[i] = "-- " + n + "\n" + out[i]

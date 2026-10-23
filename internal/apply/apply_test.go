@@ -40,10 +40,10 @@ func (r *recorder) Exec(_ context.Context, s plan.Statement) error {
 func testPlan() *plan.Plan {
 	return &plan.Plan{Changes: []plan.Change{
 		{Action: plan.ActionCreate, Resource: `role "a"`, Statements: []plan.Statement{
-			plan.SQL("", `CREATE ROLE "a" WITH PASSWORD `, plan.Secret("'hunter2'")),
+			plan.SQL("", plan.Keyword(`CREATE ROLE "a" WITH PASSWORD `), plan.NewSecret(plan.EscapedLiteral("'hunter2'"))),
 		}},
 		{Action: plan.ActionCreate, Resource: `schema "s"`, Statements: []plan.Statement{
-			plan.SQL("app", `CREATE SCHEMA "s"`),
+			plan.SQL("app", plan.Keyword(`CREATE SCHEMA "s"`)),
 		}},
 	}}
 }
@@ -150,10 +150,10 @@ func TestRunErrors(t *testing.T) {
 
 func TestRunPrintsNotesBeforeTheStatement(t *testing.T) {
 	t.Parallel()
-	revoke := `REVOKE CONNECT ON DATABASE "app" FROM "a" CASCADE`
+	const revoke = `REVOKE CONNECT ON DATABASE "app" FROM "a" CASCADE`
 	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionRevoke, Resource: `CONNECT on database "app" from "a"`, Statements: []plan.Statement{
-		plan.SQL("app", revoke).WithNote("two").WithNote("CASCADE: one"),
-		plan.SQL("", "GRANT X"),
+		plan.SQL("app", plan.Keyword(revoke)).WithNote("two").WithNote("CASCADE: one"),
+		plan.SQL("", plan.Keyword("GRANT X")),
 	}}}}
 	var out strings.Builder
 	r := &recorder{}
@@ -174,10 +174,10 @@ func TestRunPrintsNotesBeforeTheStatement(t *testing.T) {
 // with AsRole set, and output and errors name the role.
 func TestRunAsRole(t *testing.T) {
 	t.Parallel()
-	revoke := `REVOKE USAGE ON SCHEMA "api" FROM "app"`
+	const revoke = `REVOKE USAGE ON SCHEMA "api" FROM "app"`
 	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionRevoke, Resource: `USAGE on schema "api" from "app"`, Statements: []plan.Statement{
-		plan.SQL("app", revoke).WithRole("ro"),
-		plan.SQL("", "GRANT X").WithRole("g"),
+		plan.SQL("app", plan.Keyword(revoke)).WithRole("ro"),
+		plan.SQL("", plan.Keyword("GRANT X")).WithRole("g"),
 	}}}}
 	tests := []struct {
 		name    string
@@ -322,7 +322,7 @@ func TestRunWithholdsErrorsOfSecretStatements(t *testing.T) {
 func TestRunEscapesControlCharacters(t *testing.T) {
 	t.Parallel()
 	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionDrop, Resource: "r", Statements: []plan.Statement{
-		plan.SQL("", "DROP ROLE \"x\x1b[2K\r\n-- ok\"").WithNote("note \x1b[8m"),
+		plan.SQL("", plan.Keyword("DROP ROLE \"x\x1b[2K\r\n-- ok\"")).WithNote("note \x1b[8m"),
 	}}}}
 	var out strings.Builder
 	r := &recorder{}

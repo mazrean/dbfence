@@ -11,32 +11,48 @@ import (
 	"unicode"
 )
 
-// Secret is a SQL fragment that must be redacted in output.
-type Secret string
-
 // Statement is a single SQL statement executed on Database ("" means the
 // connection given in configuration). A Statement is always exactly one
 // SQL command: drivers send it so that the server rejects a second one.
+// Its text is built only from Fragments.
 type Statement struct {
+	role RoleChange
+	// Database is the database the statement runs on.
 	Database string
 	// AsRole, when set, is the role the statement runs as. The driver
 	// switches to it for this statement only, so the SQL never chains a
 	// SET ROLE in front of the statement.
 	AsRole string
-	parts  []any
+	kind   Kind
+	parts  []Fragment
 	notes  []string
+	target Target
 }
 
-// SQL builds a statement from string and Secret fragments.
-func SQL(database string, parts ...any) Statement {
-	for _, p := range parts {
-		switch p.(type) {
-		case string, Secret:
-		default:
-			panic(fmt.Sprintf("plan.SQL: unsupported fragment %T", p))
-		}
-	}
-	return Statement{Database: database, parts: parts}
+// New builds a statement of kind on target from SQL fragments. Dialect
+// builders use it, so that every planned statement says what it does.
+func New(database string, kind Kind, target Target, parts ...Fragment) Statement {
+	return Statement{Database: database, kind: kind, target: target, parts: parts}
+}
+
+// SQL builds a statement of KindOther from SQL fragments.
+func SQL(database string, parts ...Fragment) Statement {
+	return New(database, KindOther, Target{}, parts...)
+}
+
+// Kind returns what s does.
+func (s Statement) Kind() Kind { return s.kind }
+
+// Target returns the object s acts on.
+func (s Statement) Target() Target { return s.target }
+
+// RoleChange returns what s sets on the role it creates or alters.
+func (s Statement) RoleChange() RoleChange { return s.role }
+
+// WithRoleChange returns s with the role attributes it sets.
+func (s Statement) WithRoleChange(c RoleChange) Statement {
+	s.role = c
+	return s
 }
 
 // WithNote returns s with note in front of its other notes. Notes explain
@@ -79,28 +95,12 @@ func (s Statement) Display(showSecrets bool) string { return Escape(s.render(sho
 
 func (s Statement) render(showSecrets bool) string {
 	var sb strings.Builder
-	for _, p := range s.parts {
-		switch p := p.(type) {
-		case string:
-			sb.WriteString(p)
-		case Secret:
-			if showSecrets {
-				sb.WriteString(string(p))
-			} else {
-				sb.WriteString("'<redacted>'")
-			}
-		}
-	}
+	Seq(s.parts).render(&sb, showSecrets)
 	return sb.String()
 }
 
 // HasSecret reports whether s contains a Secret fragment.
-func (s Statement) HasSecret() bool {
-	return slices.ContainsFunc(s.parts, func(p any) bool {
-		_, ok := p.(Secret)
-		return ok
-	})
-}
+func (s Statement) HasSecret() bool { return hasSecret(Seq(s.parts)) }
 
 // Action is the kind of a change.
 type Action string

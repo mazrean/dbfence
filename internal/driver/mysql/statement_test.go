@@ -104,6 +104,9 @@ func TestStatementsHaveNoSeparator(t *testing.T) {
 				if s.AsRole != "" {
 					t.Errorf("%+v: MySQL statement runs as role %q:\n%s", d, s.AsRole, s.SQL())
 				}
+				if s.Kind() == plan.KindOther {
+					t.Errorf("%+v: statement has no kind:\n%s", d, s.SQL())
+				}
 			}
 		}
 		if n < len(stmts) {

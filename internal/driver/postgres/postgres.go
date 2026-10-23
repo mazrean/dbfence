@@ -256,7 +256,8 @@ func execAs(ctx context.Context, pc *pgconn.PgConn, role, query string) error {
 	if err := execOne(ctx, pc, "BEGIN"); err != nil {
 		return discardIfInTx(pc, classify(err, true))
 	}
-	for _, q := range []string{"SET LOCAL ROLE " + Ident(role), query} {
+	setRole := plan.SQL("", plan.Keyword("SET LOCAL ROLE "), Ident(role)).SQL()
+	for _, q := range []string{setRole, query} {
 		if err := execOne(ctx, pc, q); err != nil {
 			// Nothing was committed: the server rolls the transaction
 			// back on ROLLBACK or when the connection is lost.
@@ -367,13 +368,15 @@ type Dialect struct {
 }
 
 // Ident quotes an identifier.
-func Ident(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+func Ident(s string) plan.Ident {
+	return plan.QuotedIdent(`"` + strings.ReplaceAll(s, `"`, `""`) + `"`)
+}
 
 // Grantee renders the grantee of a GRANT or REVOKE: the PUBLIC
 // pseudo-role (model.PublicRole) unquoted, any other role as Ident.
-func Grantee(name string) string {
+func Grantee(name string) plan.Fragment {
 	if (model.RoleID{Name: name}).IsPublic() {
-		return "PUBLIC"
+		return plan.Keyword("PUBLIC")
 	}
 	return Ident(name)
 }
@@ -381,12 +384,23 @@ func Grantee(name string) string {
 // Literal quotes a string literal. A string containing a backslash is
 // rendered as an escape string, so it means the same whatever the value
 // of standard_conforming_strings.
-func Literal(s string) string {
+func Literal(s string) plan.Literal {
 	q := "'" + strings.ReplaceAll(s, "'", "''") + "'"
 	if !strings.Contains(s, `\`) {
-		return q
+		return plan.EscapedLiteral(q)
 	}
-	return "E" + strings.ReplaceAll(q, `\`, `\\`)
+	return plan.EscapedLiteral("E" + strings.ReplaceAll(q, `\`, `\\`))
+}
+
+// privileges renders a privilege list. The names are validated words:
+// the configuration accepts only the privileges of the object type, and
+// Inspect decodes ACL letters into fixed names.
+func privileges(ps []string) plan.Seq {
+	toks := make([]plan.Token, len(ps))
+	for i, p := range ps {
+		toks[i] = plan.NewToken(p)
+	}
+	return plan.Join(", ", toks...)
 }
 
 // IsSystemRole implements diff.Dialect. Besides PostgreSQL's own roles it
@@ -413,7 +427,7 @@ func hasAnyPrefix(s string, prefixes ...string) bool {
 	return slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(s, p) })
 }
 
-func flag(on bool, yes, no string) string {
+func flag(on bool, yes, no plan.Keyword) plan.Keyword {
 	if on {
 		return yes
 	}
@@ -422,8 +436,8 @@ func flag(on bool, yes, no string) string {
 
 type roleOpt struct {
 	want *bool
-	yes  string
-	no   string
+	yes  plan.Keyword
+	no   plan.Keyword
 	have bool
 }
 
@@ -441,26 +455,45 @@ func roleOpts(r model.Role, cur model.RoleState) []roleOpt {
 
 // CreateRole implements diff.Dialect.
 func (d Dialect) CreateRole(r model.Role) []plan.Statement {
-	parts := []any{"CREATE ROLE " + Ident(r.ID.Name)}
-	var opts []string
-	for _, o := range roleOpts(r, model.RoleState{}) {
-		if o.want != nil {
-			opts = append(opts, flag(*o.want, o.yes, o.no))
-		}
-	}
-	if r.ConnectionLimit != nil {
-		opts = append(opts, fmt.Sprintf("CONNECTION LIMIT %d", *r.ConnectionLimit))
-	}
+	parts := plan.Seq{plan.Keyword("CREATE ROLE "), Ident(r.ID.Name)}
+	opts, change := roleOptions(r, model.RoleState{}, false)
 	if len(opts) > 0 || r.Password != nil {
-		parts[0] = parts[0].(string) + " WITH"
+		parts = append(parts, plan.Keyword(" WITH"))
 	}
 	if len(opts) > 0 {
-		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
+		parts = append(parts, plan.Keyword(" "), plan.Join(" ", opts...))
 	}
 	if r.Password != nil {
-		parts = append(parts, passwordClause(*r.Password)...)
+		parts = append(parts, passwordClause(*r.Password))
+		change.SetsPassword = true
 	}
-	return []plan.Statement{plan.SQL("", parts...)}
+	return []plan.Statement{plan.New("", plan.KindCreateRole, plan.RoleTarget(r.ID), parts...).WithRoleChange(change)}
+}
+
+// roleOptions renders the declared role options of r, or with
+// onlyChanged those that differ from cur, and what they change.
+func roleOptions(r model.Role, cur model.RoleState, onlyChanged bool) ([]plan.Fragment, plan.RoleChange) {
+	var opts []plan.Fragment
+	var change plan.RoleChange
+	for _, o := range roleOpts(r, cur) {
+		if o.want == nil || (onlyChanged && *o.want == o.have) {
+			continue
+		}
+		opts = append(opts, flag(*o.want, o.yes, o.no))
+		switch {
+		case *o.want:
+		case o.no == "NOLOGIN":
+			change.DisablesLogin = true
+		case o.no == "NOSUPERUSER":
+			change.RemovesSuperuser = true
+		}
+	}
+	if r.ConnectionLimit != nil && (!onlyChanged || *r.ConnectionLimit != cur.ConnectionLimit) {
+		limit := *r.ConnectionLimit
+		opts = append(opts, plan.Seq{plan.Keyword("CONNECTION LIMIT "), plan.Number(limit)})
+		change.ConnectionLimit = &limit
+	}
+	return opts, change
 }
 
 // passwordClause renders the PASSWORD option. The plaintext is sent, so
@@ -468,11 +501,11 @@ func (d Dialect) CreateRole(r model.Role) []plan.Statement {
 // scram_iterations) and password check modules such as passwordcheck can
 // inspect it. PostgreSQL clears an empty password, so "" is rendered as
 // NULL.
-func passwordClause(pw string) []any {
+func passwordClause(pw string) plan.Fragment {
 	if pw == "" {
-		return []any{" PASSWORD NULL"}
+		return plan.Keyword(" PASSWORD NULL")
 	}
-	return []any{" PASSWORD ", plan.Secret(Literal(pw))}
+	return plan.Seq{plan.Keyword(" PASSWORD "), plan.NewSecret(Literal(pw))}
 }
 
 // passwordMatches reports whether the stored verifier already holds pw.
@@ -502,16 +535,8 @@ func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]pla
 // about an unreadable verifier, which Inspect then reports once for all
 // roles.
 func (d Dialect) alterRole(r model.Role, cur model.RoleState, force, groupedUnreadable bool) ([]plan.Statement, []string) {
-	var opts []string
 	var warns []string
-	for _, o := range roleOpts(r, cur) {
-		if o.want != nil && *o.want != o.have {
-			opts = append(opts, flag(*o.want, o.yes, o.no))
-		}
-	}
-	if r.ConnectionLimit != nil && *r.ConnectionLimit != cur.ConnectionLimit {
-		opts = append(opts, fmt.Sprintf("CONNECTION LIMIT %d", *r.ConnectionLimit))
-	}
+	opts, change := roleOptions(r, cur, true)
 	setPassword := false
 	if r.Password != nil {
 		switch {
@@ -533,14 +558,15 @@ func (d Dialect) alterRole(r model.Role, cur model.RoleState, force, groupedUnre
 	if len(opts) == 0 && !setPassword {
 		return nil, warns
 	}
-	parts := []any{"ALTER ROLE " + Ident(r.ID.Name) + " WITH"}
+	parts := plan.Seq{plan.Keyword("ALTER ROLE "), Ident(r.ID.Name), plan.Keyword(" WITH")}
 	if len(opts) > 0 {
-		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
+		parts = append(parts, plan.Keyword(" "), plan.Join(" ", opts...))
 	}
 	if setPassword {
-		parts = append(parts, passwordClause(*r.Password)...)
+		parts = append(parts, passwordClause(*r.Password))
+		change.SetsPassword = true
 	}
-	return []plan.Statement{plan.SQL("", parts...)}, warns
+	return []plan.Statement{plan.New("", plan.KindAlterRole, plan.RoleTarget(r.ID), parts...).WithRoleChange(change)}, warns
 }
 
 // DropRole implements diff.Dialect. Objects owned by the role are
@@ -552,12 +578,14 @@ func (Dialect) DropRole(id model.RoleID, databases []string) []plan.Statement {
 		if providerDatabase(db) {
 			continue
 		}
+		target := plan.RoleTarget(id)
+		target.Database = db
 		out = append(out,
-			plan.SQL(db, "REASSIGN OWNED BY "+Ident(id.Name)+" TO CURRENT_USER"),
-			plan.SQL(db, "DROP OWNED BY "+Ident(id.Name)),
+			plan.New(db, plan.KindReassign, target, plan.Keyword("REASSIGN OWNED BY "), Ident(id.Name), plan.Keyword(" TO CURRENT_USER")),
+			plan.New(db, plan.KindDropOwned, target, plan.Keyword("DROP OWNED BY "), Ident(id.Name)),
 		)
 	}
-	return append(out, plan.SQL("", "DROP ROLE "+Ident(id.Name)))
+	return append(out, plan.New("", plan.KindDropRole, plan.RoleTarget(id), plan.Keyword("DROP ROLE "), Ident(id.Name)))
 }
 
 // GrantMembership implements diff.Dialect.
@@ -572,30 +600,49 @@ func newMembership(member, role string, opts model.MembershipOptions) plan.State
 		// before PostgreSQL 16.
 		opts.Admin = nil
 	}
-	return plan.SQL("", grantMembership(member, role, opts))
+	return grantMembership(member, role, opts, nil)
 }
 
 // grantMembership renders GRANT role TO member with the declared
-// options. ADMIN alone uses WITH ADMIN OPTION, which every version
-// accepts; INHERIT and SET need the PostgreSQL 16 option list.
-func grantMembership(member, role string, opts model.MembershipOptions) string {
-	q := "GRANT " + Ident(role) + " TO " + Ident(member)
-	if opts.Inherit == nil && opts.Set == nil {
+// options, followed by grantedBy (a GRANTED BY clause or nil). ADMIN
+// alone uses WITH ADMIN OPTION, which every version accepts; INHERIT and
+// SET need the PostgreSQL 16 option list.
+func grantMembership(member, role string, opts model.MembershipOptions, grantedBy plan.Fragment) plan.Statement {
+	target := plan.MembershipTarget(model.RoleID{Name: member}, model.RoleID{Name: role}).WithOption(opts.Admin != nil && *opts.Admin)
+	parts := plan.Seq{plan.Keyword("GRANT "), Ident(role), plan.Keyword(" TO "), Ident(member)}
+	switch {
+	case opts.Inherit == nil && opts.Set == nil:
 		if opts.Admin != nil && *opts.Admin {
-			q += " WITH ADMIN OPTION"
+			parts = append(parts, plan.Keyword(" WITH ADMIN OPTION"))
 		}
-		return q
-	}
-	var list []string
-	for _, o := range []struct {
-		v    *bool
-		name string
-	}{{opts.Admin, "ADMIN"}, {opts.Inherit, "INHERIT"}, {opts.Set, "SET"}} {
-		if o.v != nil {
-			list = append(list, o.name+" "+flag(*o.v, "TRUE", "FALSE"))
+	default:
+		var list []plan.Keyword
+		for _, o := range []struct {
+			v    *bool
+			name plan.Keyword
+		}{{opts.Admin, "ADMIN"}, {opts.Inherit, "INHERIT"}, {opts.Set, "SET"}} {
+			if o.v != nil {
+				list = append(list, o.name+" "+flag(*o.v, "TRUE", "FALSE"))
+			}
 		}
+		parts = append(parts, plan.Keyword(" WITH "), plan.Join(", ", list...))
 	}
-	return q + " WITH " + strings.Join(list, ", ")
+	if grantedBy != nil {
+		parts = append(parts, grantedBy)
+	}
+	return plan.New("", plan.KindGrantMembership, target, parts...)
+}
+
+// revokeMembership renders REVOKE [ADMIN OPTION FOR] role FROM member
+// followed by the fragments in tail, such as GRANTED BY and CASCADE.
+func revokeMembership(member, role string, adminOnly bool, tail ...plan.Fragment) plan.Statement {
+	target := plan.MembershipTarget(model.RoleID{Name: member}, model.RoleID{Name: role}).WithOption(adminOnly)
+	parts := plan.Seq{plan.Keyword("REVOKE ")}
+	if adminOnly {
+		parts = append(parts, plan.Keyword("ADMIN OPTION FOR "))
+	}
+	parts = append(parts, Ident(role), plan.Keyword(" FROM "), Ident(member))
+	return plan.New("", plan.KindRevokeMembership, target, append(parts, tail...)...)
 }
 
 // AlterMembership implements diff.Dialect. Without inspected grants, the
@@ -603,42 +650,50 @@ func grantMembership(member, role string, opts model.MembershipOptions) string {
 func (Dialect) AlterMembership(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) ([]plan.Statement, []string) {
 	var out []plan.Statement
 	if want.Admin != nil && !*want.Admin && have.Admin {
-		out = append(out, plan.SQL("", "REVOKE ADMIN OPTION FOR "+Ident(role.Name)+" FROM "+Ident(member.Name)))
+		out = append(out, revokeMembership(member.Name, role.Name, true))
 	}
 	grant := model.MembershipOptions{Inherit: want.Inherit, Set: want.Set}
 	if want.Admin != nil && *want.Admin && !have.Admin {
 		grant.Admin = want.Admin
 	}
 	if grant != (model.MembershipOptions{}) {
-		out = append(out, plan.SQL("", grantMembership(member.Name, role.Name, grant)))
+		out = append(out, grantMembership(member.Name, role.Name, grant, nil))
 	}
 	return out, nil
 }
 
 // RevokeMembership implements diff.Dialect.
 func (Dialect) RevokeMembership(member, role model.RoleID) ([]plan.Statement, []string) {
-	return []plan.Statement{plan.SQL("", "REVOKE "+Ident(role.Name)+" FROM "+Ident(member.Name))}, nil
+	return []plan.Statement{revokeMembership(member.Name, role.Name, false)}, nil
 }
 
 // CreateDatabase implements diff.Dialect.
 func (Dialect) CreateDatabase(db model.Database) []plan.Statement {
-	q := "CREATE DATABASE " + Ident(db.Name)
+	parts := plan.Seq{plan.Keyword("CREATE DATABASE "), Ident(db.Name)}
 	if db.Owner != "" {
-		q += " OWNER " + Ident(db.Owner)
+		parts = append(parts, plan.Keyword(" OWNER "), Ident(db.Owner))
 	}
 	if db.Encoding != "" {
-		q += " ENCODING " + Literal(db.Encoding)
+		parts = append(parts, plan.Keyword(" ENCODING "), Literal(db.Encoding))
 	}
 	if db.LcCollate != "" {
-		q += " LC_COLLATE " + Literal(db.LcCollate)
+		parts = append(parts, plan.Keyword(" LC_COLLATE "), Literal(db.LcCollate))
 	}
 	if db.LcCtype != "" {
-		q += " LC_CTYPE " + Literal(db.LcCtype)
+		parts = append(parts, plan.Keyword(" LC_CTYPE "), Literal(db.LcCtype))
 	}
 	if db.Encoding != "" || db.LcCollate != "" || db.LcCtype != "" {
-		q += " TEMPLATE template0"
+		parts = append(parts, plan.Keyword(" TEMPLATE template0"))
 	}
-	return []plan.Statement{plan.SQL("", q)}
+	return []plan.Statement{plan.New("", plan.KindCreateDatabase, databaseTarget(db.Name), parts...)}
+}
+
+func databaseTarget(name string) plan.Target {
+	return plan.ObjectTarget(model.Object{Type: model.ObjectDatabase, Database: name})
+}
+
+func schemaTarget(s model.Schema) plan.Target {
+	return plan.ObjectTarget(model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name})
 }
 
 // encodingAliases maps cleaned encoding names that PostgreSQL accepts
@@ -704,23 +759,24 @@ func (Dialect) AlterDatabase(db, cur model.Database) ([]plan.Statement, []string
 	immutable("lc_collate", db.LcCollate, cur.LcCollate, sameLocale)
 	immutable("lc_ctype", db.LcCtype, cur.LcCtype, sameLocale)
 	if db.Owner != "" && db.Owner != cur.Owner {
-		return []plan.Statement{plan.SQL("", "ALTER DATABASE "+Ident(db.Name)+" OWNER TO "+Ident(db.Owner))}, warns
+		return []plan.Statement{plan.New("", plan.KindAlterDatabase, databaseTarget(db.Name),
+			plan.Keyword("ALTER DATABASE "), Ident(db.Name), plan.Keyword(" OWNER TO "), Ident(db.Owner))}, warns
 	}
 	return nil, warns
 }
 
 // DropDatabase implements diff.Dialect.
 func (Dialect) DropDatabase(name string) []plan.Statement {
-	return []plan.Statement{plan.SQL("", "DROP DATABASE "+Ident(name))}
+	return []plan.Statement{plan.New("", plan.KindDropDatabase, databaseTarget(name), plan.Keyword("DROP DATABASE "), Ident(name))}
 }
 
 // CreateSchema implements diff.Dialect.
 func (Dialect) CreateSchema(s model.Schema) []plan.Statement {
-	q := "CREATE SCHEMA " + Ident(s.Name)
+	parts := plan.Seq{plan.Keyword("CREATE SCHEMA "), Ident(s.Name)}
 	if s.Owner != "" {
-		q += " AUTHORIZATION " + Ident(s.Owner)
+		parts = append(parts, plan.Keyword(" AUTHORIZATION "), Ident(s.Owner))
 	}
-	return []plan.Statement{plan.SQL(s.Database, q)}
+	return []plan.Statement{plan.New(s.Database, plan.KindCreateSchema, schemaTarget(s), parts...)}
 }
 
 // AlterSchema implements diff.Dialect.
@@ -728,19 +784,39 @@ func (Dialect) AlterSchema(s, cur model.Schema) []plan.Statement {
 	if s.Owner == "" || s.Owner == cur.Owner {
 		return nil
 	}
-	return []plan.Statement{plan.SQL(s.Database, "ALTER SCHEMA "+Ident(s.Name)+" OWNER TO "+Ident(s.Owner))}
+	return []plan.Statement{plan.New(s.Database, plan.KindAlterSchema, schemaTarget(s),
+		plan.Keyword("ALTER SCHEMA "), Ident(s.Name), plan.Keyword(" OWNER TO "), Ident(s.Owner))}
 }
 
 // DropSchema implements diff.Dialect. It fails on non-empty schemas.
 func (Dialect) DropSchema(s model.Schema) []plan.Statement {
-	return []plan.Statement{plan.SQL(s.Database, "DROP SCHEMA "+Ident(s.Name))}
+	return []plan.Statement{dropSchema(s)}
 }
 
-func onObject(obj model.Object) (database, target string) {
+// dropSchema renders DROP SCHEMA s followed by tail, such as CASCADE.
+func dropSchema(s model.Schema, tail ...plan.Fragment) plan.Statement {
+	parts := plan.Seq{plan.Keyword("DROP SCHEMA "), Ident(s.Name)}
+	return plan.New(s.Database, plan.KindDropSchema, schemaTarget(s), append(parts, tail...)...)
+}
+
+func onObject(obj model.Object) (database string, target plan.Seq) {
 	if obj.Type == model.ObjectSchema {
-		return obj.Database, "SCHEMA " + Ident(obj.Schema)
+		return obj.Database, plan.Seq{plan.Keyword("SCHEMA "), Ident(obj.Schema)}
 	}
-	return "", "DATABASE " + Ident(obj.Database)
+	return "", plan.Seq{plan.Keyword("DATABASE "), Ident(obj.Database)}
+}
+
+// revokePrivileges renders REVOKE [GRANT OPTION FOR] privs ON obj FROM
+// grantee followed by tail, such as CASCADE.
+func revokePrivileges(grantee string, obj model.Object, privs []string, optionOnly bool, tail ...plan.Fragment) plan.Statement {
+	db, on := onObject(obj)
+	parts := plan.Seq{plan.Keyword("REVOKE ")}
+	if optionOnly {
+		parts = append(parts, plan.Keyword("GRANT OPTION FOR "))
+	}
+	parts = append(parts, privileges(privs), plan.Keyword(" ON "), on, plan.Keyword(" FROM "), Grantee(grantee))
+	target := plan.PrivilegeTarget(model.RoleID{Name: grantee}, obj).WithOption(optionOnly)
+	return plan.New(db, plan.KindRevoke, target, append(parts, tail...)...)
 }
 
 // pg15 is the server_version_num from which the public schema of a new
@@ -768,22 +844,20 @@ func defaultPublicPrivileges(obj model.Object, version int) []string {
 
 // Grant implements diff.Dialect.
 func (Dialect) Grant(grantee model.RoleID, obj model.Object, privs []string, grantOption bool) []plan.Statement {
-	db, target := onObject(obj)
-	q := "GRANT " + strings.Join(privs, ", ") + " ON " + target + " TO " + Grantee(grantee.Name)
+	db, on := onObject(obj)
+	parts := plan.Seq{plan.Keyword("GRANT "), privileges(privs), plan.Keyword(" ON "), on, plan.Keyword(" TO "), Grantee(grantee.Name)}
 	if grantOption {
-		q += " WITH GRANT OPTION"
+		parts = append(parts, plan.Keyword(" WITH GRANT OPTION"))
 	}
-	return []plan.Statement{plan.SQL(db, q)}
+	return []plan.Statement{plan.New(db, plan.KindGrant, plan.PrivilegeTarget(grantee, obj).WithOption(grantOption), parts...)}
 }
 
 // Revoke implements diff.Dialect.
 func (Dialect) Revoke(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
-	db, target := onObject(obj)
-	return []plan.Statement{plan.SQL(db, "REVOKE "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Grantee(grantee.Name))}, nil
+	return []plan.Statement{revokePrivileges(grantee.Name, obj, privs, false)}, nil
 }
 
 // RevokeGrantOption implements diff.Dialect.
 func (Dialect) RevokeGrantOption(grantee model.RoleID, obj model.Object, privs []string) ([]plan.Statement, []string) {
-	db, target := onObject(obj)
-	return []plan.Statement{plan.SQL(db, "REVOKE GRANT OPTION FOR "+strings.Join(privs, ", ")+" ON "+target+" FROM "+Grantee(grantee.Name))}, nil
+	return []plan.Statement{revokePrivileges(grantee.Name, obj, privs, true)}, nil
 }

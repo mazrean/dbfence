@@ -28,7 +28,7 @@ type simDialect struct {
 
 func (d *simDialect) op(f func(*model.Current) error) []plan.Statement {
 	d.ops = append(d.ops, f)
-	return []plan.Statement{plan.SQL("", "op "+strconv.Itoa(len(d.ops)-1))}
+	return []plan.Statement{plan.SQL("", plan.Keyword("op "), plan.Number(len(d.ops)-1))}
 }
 
 // apply runs the statements of p against cur.

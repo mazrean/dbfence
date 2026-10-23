@@ -377,7 +377,7 @@ func TestMySQLOneStatementPerExec(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = d.Close() }()
-	for _, q := range []string{
+	for _, q := range []plan.Keyword{
 		"SELECT 1; SELECT 2",
 		"CREATE USER 'dbf_ms1'@'%'; CREATE USER 'dbf_ms2'@'%'",
 		"DO 1;DO 2",
@@ -390,11 +390,11 @@ func TestMySQLOneStatementPerExec(t *testing.T) {
 	if got := h.query("SELECT User FROM mysql.user WHERE User LIKE 'dbf\\_ms%'"); len(got) != 0 {
 		t.Errorf("users created by rejected statements: %q", got)
 	}
-	if err := d.Exec(t.Context(), plan.SQL("", "DO 1")); err != nil {
+	if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("DO 1"))); err != nil {
 		t.Errorf("single statement: %v", err)
 	}
 	// MySQL statements never run as another role.
-	if err := d.Exec(t.Context(), plan.SQL("", "DO 1").WithRole("r")); err == nil || !strings.Contains(err.Error(), "not supported on MySQL") {
+	if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("DO 1")).WithRole("r")); err == nil || !strings.Contains(err.Error(), "not supported on MySQL") {
 		t.Errorf("Exec as role = %v", err)
 	}
 }
@@ -675,8 +675,9 @@ func TestMySQLErrorsDoNotLeakSecrets(t *testing.T) {
 	defer func() { _ = drv.Close() }()
 	long := strings.Repeat("SECRET0123456789", 6)
 	tests := []struct {
-		name, prefix, password, wantMsg string
-		leak                            []string
+		name, password, wantMsg string
+		prefix                  plan.Keyword
+		leak                    []string
 	}{
 		{
 			name: "truncated near fragment", prefix: "CREATE USER 'dbf_leak'@'%' IDENTIFIED WITH auth-pam BY ",
@@ -690,7 +691,7 @@ func TestMySQLErrorsDoNotLeakSecrets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionCreate, Resource: `role "dbf_leak"`, Statements: []plan.Statement{
-				plan.SQL("", tt.prefix, plan.Secret(drv.Literal(tt.password))),
+				plan.SQL("", tt.prefix, plan.NewSecret(drv.Literal(tt.password))),
 			}}}}
 			err := apply.Run(t.Context(), drv, p, io.Discard, false)
 			if err == nil {

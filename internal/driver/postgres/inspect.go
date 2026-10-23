@@ -283,7 +283,7 @@ func ownerActions(obj model.Object) string {
 // role (set) and use its privileges (use). Before PostgreSQL 16 plain
 // membership gives both.
 func (st *state) memberGrant(role string, set, use bool) string {
-	q := "GRANT " + Ident(role) + " TO " + Ident(st.user)
+	q := "GRANT " + Ident(role).String() + " TO " + Ident(st.user).String()
 	if st.version < pg16 {
 		return q
 	}
