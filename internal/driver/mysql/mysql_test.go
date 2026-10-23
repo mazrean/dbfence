@@ -186,6 +186,94 @@ func TestDBPrivilegesPatterns(t *testing.T) {
 	}
 }
 
+func TestDBPrivilegesDeclaredPatterns(t *testing.T) {
+	t.Parallel()
+	tenants := model.Object{Type: model.ObjectDatabase, Pattern: `tenant\_%`}
+	base := []model.Privilege{{Grantee: app, Object: tenants, Name: "SELECT"}}
+	tests := []struct {
+		name      string
+		dbs       []model.Database
+		privs     []model.Privilege
+		rows      []dbGrant
+		want      []string
+		wantWarns []string
+		d         Dialect
+	}{
+		{
+			name: "new pattern is granted verbatim",
+			want: []string{"GRANT SELECT ON `tenant\\_%`.* TO 'app'@'%'"},
+		},
+		{
+			name: "matching row is converged",
+			rows: []dbGrant{{grantee: app, db: `tenant\_%`, privs: []string{"SELECT"}}},
+		},
+		{
+			name: "undeclared privilege on the pattern is revoked",
+			rows: []dbGrant{{grantee: app, db: `tenant\_%`, privs: []string{"SELECT", "DELETE"}}},
+			want: []string{"REVOKE DELETE ON `tenant\\_%`.* FROM 'app'@'%'"},
+		},
+		{
+			name: "undeclared grant option on the pattern is revoked",
+			rows: []dbGrant{{grantee: app, db: `tenant\_%`, privs: []string{"SELECT"}, grantOption: true}},
+			want: []string{"REVOKE GRANT OPTION ON `tenant\\_%`.* FROM 'app'@'%'"},
+		},
+		{
+			name: "case-insensitive server matches the declared spelling",
+			d:    Dialect{CaseInsensitiveNames: true},
+			rows: []dbGrant{{grantee: app, db: `TENANT\_%`, privs: []string{"SELECT"}}},
+		},
+		{
+			name: "other undeclared patterns stay unmanaged",
+			rows: []dbGrant{{grantee: app, db: `tenant\_%`, privs: []string{"SELECT"}}, {grantee: app, db: "x%", privs: []string{"DELETE"}}},
+		},
+		{
+			name:      "database grant shadows the pattern",
+			dbs:       []model.Database{{Name: "tenant_a"}},
+			privs:     []model.Privilege{{Grantee: app, Object: dbObj("tenant_a"), Name: "UPDATE"}},
+			rows:      []dbGrant{{grantee: app, db: `tenant\_%`, privs: []string{"SELECT"}}, {grantee: app, db: `tenant\_a`, privs: []string{"UPDATE"}}},
+			wantWarns: []string{`has a grant on database "tenant_a", so MySQL ignores its grants on the matching database pattern "tenant\\_%" there`},
+		},
+		{
+			name:      "overlapping patterns",
+			dbs:       []model.Database{{Name: "tenant_a"}},
+			privs:     []model.Privilege{{Grantee: app, Object: model.Object{Type: model.ObjectDatabase, Pattern: "tenant%"}, Name: "UPDATE"}},
+			rows:      []dbGrant{{grantee: app, db: `tenant\_%`, privs: []string{"SELECT"}}, {grantee: app, db: "tenant%", privs: []string{"UPDATE"}}},
+			wantWarns: []string{`database patterns "tenant%" and "tenant\\_%" of "app"@"%" both match database "tenant_a"; MySQL applies only one of them there`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{
+				Engine:     model.EngineMySQL,
+				Roles:      []model.Role{{ID: app}},
+				Databases:  tt.dbs,
+				Privileges: append(slices.Clone(base), tt.privs...),
+			}
+			privs, warns := tt.d.dbPrivileges(tt.rows, desired)
+			cur := &model.Current{
+				CurrentUser: model.RoleID{Name: "root", Host: "%"},
+				Roles:       []model.RoleState{{ID: app, Login: true}},
+				Databases:   tt.dbs,
+				Privileges:  privs,
+				Warnings:    warns,
+			}
+			got, gotWarns := planSQL(t, desired, cur, tt.d)
+			if d := cmp.Diff(tt.want, got); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			if len(gotWarns) != len(tt.wantWarns) {
+				t.Fatalf("warnings = %q, want %q", gotWarns, tt.wantWarns)
+			}
+			for _, w := range tt.wantWarns {
+				if !slices.ContainsFunc(gotWarns, func(g string) bool { return strings.Contains(g, w) }) {
+					t.Errorf("missing warning %q in %q", w, gotWarns)
+				}
+			}
+		})
+	}
+}
+
 func TestDBPrivilegesGrantOption(t *testing.T) {
 	t.Parallel()
 	mixed := []model.Privilege{

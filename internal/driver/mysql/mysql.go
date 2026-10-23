@@ -140,6 +140,9 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	for i := range cur.Databases {
 		cur.Databases[i].Name = d.declaredName(cur.Databases[i].Name, desired)
 	}
+	if p := declaredPatterns(desired); len(p) > 0 && d.PartialRevokes {
+		return nil, fmt.Errorf("database_pattern %q needs partial_revokes = OFF: with partial_revokes ON, MySQL reads %% and _ in grants literally", p[0])
+	}
 	if err := d.inspectDBPrivileges(ctx, cur, desired); err != nil {
 		return nil, err
 	}
@@ -437,7 +440,12 @@ func (d Dialect) dbPrivileges(rows []dbGrant, desired *model.Desired) ([]model.P
 	}
 	var out []model.Privilege
 	var warns []string
+	patterns := declaredPatterns(desired)
 	for _, g := range rows {
+		if p, ok := d.declaredPattern(g.db, patterns); ok {
+			out = append(out, levelPrivileges(g, model.Object{Type: model.ObjectDatabase, Pattern: p}, desired)...)
+			continue
+		}
 		obj := d.dbObject(g.db)
 		obj.Database = d.declaredName(obj.Database, desired)
 		if stale, ok := d.staleEscapedRow(g.db, desired); ok {
@@ -447,14 +455,84 @@ func (d Dialect) dbPrivileges(rows []dbGrant, desired *model.Desired) ([]model.P
 			slices.ContainsFunc(desired.Roles, func(r model.Role) bool { return r.ID == g.grantee }) {
 			for _, db := range desired.Databases {
 				if matchPattern(obj.Pattern, db.Name) {
-					warns = append(warns, fmt.Sprintf("%q holds privileges on the database pattern %q, which also matches declared database %q; pattern grants are not managed", g.grantee, obj.Pattern, db.Name))
+					warns = append(warns, fmt.Sprintf("%q holds privileges on the database pattern %q, which also matches declared database %q; undeclared pattern grants are not managed (declare it with database_pattern)", g.grantee, obj.Pattern, db.Name))
 					break
 				}
 			}
 		}
 		out = append(out, levelPrivileges(g, obj, desired)...)
 	}
-	return out, append(warns, mixedGrantOptions(desired)...)
+	warns = append(warns, mixedGrantOptions(desired)...)
+	return out, append(warns, shadowedPatterns(desired)...)
+}
+
+// declaredPatterns returns the database patterns of declared grants.
+func declaredPatterns(desired *model.Desired) []string {
+	if desired == nil {
+		return nil
+	}
+	var out []string
+	for _, p := range desired.Privileges {
+		if p.Object.IsDeclaredPattern() && !slices.Contains(out, p.Object.Pattern) {
+			out = append(out, p.Object.Pattern)
+		}
+	}
+	return out
+}
+
+// declaredPattern returns the declared pattern a mysql.db row was granted
+// on, in its declared spelling.
+func (d Dialect) declaredPattern(raw string, patterns []string) (string, bool) {
+	for _, p := range patterns {
+		if p == raw || (d.CaseInsensitiveNames && strings.EqualFold(p, raw)) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// shadowedPatterns warns about declared patterns that MySQL does not apply
+// to some declared databases. Database level privileges are not added up:
+// for an account, the server uses only the most specific mysql.db row that
+// matches the database, so a literal grant (or another pattern) hides the
+// pattern's privileges there.
+func shadowedPatterns(desired *model.Desired) []string {
+	type level struct {
+		grantee model.RoleID
+		obj     model.Object
+	}
+	var levels []level
+	for _, p := range desired.Privileges {
+		l := level{p.Grantee, p.Object}
+		if !slices.Contains(levels, l) {
+			levels = append(levels, l)
+		}
+	}
+	var warns []string
+	for _, l := range levels {
+		if !l.obj.IsDeclaredPattern() {
+			continue
+		}
+		for _, db := range desired.Databases {
+			if !matchPattern(l.obj.Pattern, db.Name) {
+				continue
+			}
+			for _, o := range levels {
+				if o.grantee != l.grantee || o == l {
+					continue
+				}
+				switch {
+				case !o.obj.IsDeclaredPattern() && o.obj.Database == db.Name:
+					warns = append(warns, fmt.Sprintf("%q has a grant on database %q, so MySQL ignores its grants on the matching database pattern %q there; list every privilege it needs on %q in the database grant",
+						l.grantee, db.Name, l.obj.Pattern, db.Name))
+				case o.obj.IsDeclaredPattern() && matchPattern(o.obj.Pattern, db.Name) && l.obj.Pattern < o.obj.Pattern:
+					warns = append(warns, fmt.Sprintf("database patterns %q and %q of %q both match database %q; MySQL applies only one of them there",
+						l.obj.Pattern, o.obj.Pattern, l.grantee, db.Name))
+				}
+			}
+		}
+	}
+	return warns
 }
 
 // grantOptionPrivilege stands for a grant option that no declared
@@ -512,7 +590,7 @@ func mixedGrantOptions(desired *model.Desired) []string {
 	var warns []string
 	for _, l := range order {
 		if seen[l][true] && seen[l][false] {
-			warns = append(warns, fmt.Sprintf("MySQL keeps one grant option per database: %q can grant all of its privileges on database %q, not only those declared with with_grant_option", l.grantee, l.obj.Database))
+			warns = append(warns, fmt.Sprintf("MySQL keeps one grant option per database: %q can grant all of its privileges on %s, not only those declared with with_grant_option", l.grantee, targetLabel(l.obj)))
 		}
 	}
 	return warns
@@ -605,6 +683,14 @@ func matchPattern(p, name string) bool {
 	}
 	_, size := utf8.DecodeRuneInString(p)
 	return strings.HasPrefix(name, p[:size]) && matchPattern(p[size:], name[size:])
+}
+
+// targetLabel names a database level grant target in warnings.
+func targetLabel(o model.Object) string {
+	if o.Pattern != "" {
+		return fmt.Sprintf("database pattern %q", o.Pattern)
+	}
+	return fmt.Sprintf("database %q", o.Database)
 }
 
 // escapeWildcards escapes the LIKE wildcards of a database name for

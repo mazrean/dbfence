@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -424,6 +425,67 @@ user "dba" {
 	h.write("")
 	if _, out := h.plan(app.Options{Prune: true}); !strings.Contains(out, `user "dbf_dba"@"%" is the connected user; not pruned`) {
 		t.Errorf("plan lacks the connected user warning:\n%s", out)
+	}
+}
+
+// TestMySQLDatabasePattern manages a wildcard grant declared with
+// database_pattern.
+func TestMySQLDatabasePattern(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	for _, q := range []string{
+		"CREATE DATABASE dbf_tenant_a", "CREATE TABLE dbf_tenant_a.t (i INT)",
+		"CREATE DATABASE dbf_tenantXb", "CREATE TABLE dbf_tenantXb.t (i INT)",
+	} {
+		h.exec(q)
+	}
+	cfg := func(privs string) string {
+		return `
+user "app" {
+  name     = "dbf_pat"
+  password = "patpw"
+}
+grant {
+  role             = user.app.id
+  database_pattern = "dbf\\_tenant\\_%"
+  privileges       = [` + privs + `]
+}
+ignore {
+  databases = ["dbf_tenant.*"]
+}
+`
+	}
+	h.write(cfg(`"SELECT", "INSERT"`))
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if got := h.query("SELECT Db FROM mysql.db WHERE User = 'dbf_pat'"); !slices.Equal(got, []string{`dbf\_tenant\_%`}) {
+		t.Fatalf("mysql.db rows = %q, want the pattern verbatim", got)
+	}
+
+	u, err := sql.Open("mysql", strings.Replace(h.dsn, "root:root@", "dbf_pat:patpw@", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = u.Close() }()
+	if _, err = u.ExecContext(t.Context(), "INSERT INTO dbf_tenant_a.t VALUES (1)"); err != nil {
+		t.Errorf("insert into a database matching the pattern: %v", err)
+	}
+	if _, err = u.ExecContext(t.Context(), "SELECT * FROM dbf_tenantXb.t"); err == nil {
+		t.Error("select from dbf_tenantXb succeeded; the escaped _ must not match X")
+	}
+
+	h.write(cfg(`"SELECT"`))
+	if n, out := h.plan(app.Options{}); n != 1 || !strings.Contains(out, "REVOKE INSERT ON `dbf\\_tenant\\_%`.*") {
+		t.Fatalf("plan after dropping INSERT = %d statements:\n%s", n, out)
+	}
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+
+	h.exec("SET GLOBAL partial_revokes = ON")
+	a, out := h.app()
+	_, err = a.Plan(context.WithoutCancel(t.Context()), app.Options{Path: filepath.Join(h.dir, "dbfence.hcl")})
+	if err == nil || !strings.Contains(err.Error(), "needs partial_revokes = OFF") {
+		t.Errorf("plan with partial_revokes ON: err = %v\n%s", err, out)
 	}
 }
 

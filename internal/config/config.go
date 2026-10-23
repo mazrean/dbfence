@@ -83,8 +83,9 @@ type schemaBlock struct {
 type grantBlock struct {
 	Schema          *string  `hcl:"schema"`
 	WithGrantOption *bool    `hcl:"with_grant_option"`
+	Database        *string  `hcl:"database"`
+	DatabasePattern *string  `hcl:"database_pattern"`
 	Role            string   `hcl:"role"`
-	Database        string   `hcl:"database"`
 	Privileges      []string `hcl:"privileges"`
 }
 
@@ -666,13 +667,11 @@ func decodeGrant(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (decod
 		return g, diags
 	}
 	g.attrs, _ = b.Body.JustAttributes()
-	g.object = model.Object{Type: model.ObjectDatabase, Database: blk.Database}
-	if blk.Schema != nil {
-		if engine != model.EnginePostgres {
-			return g, append(diags, errAt(attrRange(g.attrs, "schema", b.DefRange), "Unsupported attribute", `"schema" is only supported for postgres.`))
-		}
-		g.object = model.Object{Type: model.ObjectSchema, Database: blk.Database, Schema: *blk.Schema}
+	obj, d := decodeGrantObject(b, g.attrs, blk, engine)
+	if d.HasErrors() {
+		return g, append(diags, d...)
 	}
+	g.object = obj
 	privRange := attrRange(g.attrs, "privileges", b.DefRange)
 	roleRange := attrRange(g.attrs, "role", b.DefRange)
 	public := strings.EqualFold(blk.Role, "public")
@@ -703,6 +702,65 @@ func decodeGrant(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (decod
 			fmt.Sprintf(`role %q has an empty host; use "name@%%" or user.<label>.id.`, blk.Role)))
 	}
 	return g, diags
+}
+
+// decodeGrantObject returns the target of a grant block: exactly one of
+// database and database_pattern, plus schema on PostgreSQL.
+func decodeGrantObject(b *hcl.Block, attrs hcl.Attributes, blk grantBlock, engine model.Engine) (model.Object, hcl.Diagnostics) {
+	switch {
+	case blk.Database != nil && blk.DatabasePattern != nil:
+		return model.Object{}, hcl.Diagnostics{errAt(attrRange(attrs, "database_pattern", b.DefRange), "Conflicting attributes",
+			`a grant block takes either "database" or "database_pattern", not both.`)}
+	case blk.DatabasePattern != nil:
+		return decodeDatabasePattern(b, attrs, blk, engine)
+	case blk.Database == nil:
+		detail := `a grant block needs "database".`
+		if engine == model.EngineMySQL {
+			detail = `a grant block needs "database" or "database_pattern".`
+		}
+		return model.Object{}, hcl.Diagnostics{errAt(b.DefRange, "Missing required argument", detail)}
+	case blk.Schema != nil:
+		if engine != model.EnginePostgres {
+			return model.Object{}, hcl.Diagnostics{errAt(attrRange(attrs, "schema", b.DefRange), "Unsupported attribute", `"schema" is only supported for postgres.`)}
+		}
+		return model.Object{Type: model.ObjectSchema, Database: *blk.Database, Schema: *blk.Schema}, nil
+	}
+	return model.Object{Type: model.ObjectDatabase, Database: *blk.Database}, nil
+}
+
+// maxMySQLDatabasePattern is the length of mysql.db.Db.
+const maxMySQLDatabasePattern = 64
+
+func decodeDatabasePattern(b *hcl.Block, attrs hcl.Attributes, blk grantBlock, engine model.Engine) (model.Object, hcl.Diagnostics) {
+	rng := attrRange(attrs, "database_pattern", b.DefRange)
+	p := *blk.DatabasePattern
+	switch {
+	case engine != model.EngineMySQL:
+		return model.Object{}, hcl.Diagnostics{errAt(rng, "Unsupported attribute", `"database_pattern" is only supported for mysql.`)}
+	case blk.Schema != nil:
+		return model.Object{}, hcl.Diagnostics{errAt(attrRange(attrs, "schema", b.DefRange), "Unsupported attribute", `"schema" is only supported for postgres.`)}
+	case utf8.RuneCountInString(p) > maxMySQLDatabasePattern:
+		return model.Object{}, hcl.Diagnostics{errAt(rng, "Pattern too long",
+			fmt.Sprintf("database_pattern %q is longer than %d characters.", p, maxMySQLDatabasePattern))}
+	case !hasWildcard(p):
+		return model.Object{}, hcl.Diagnostics{errAt(rng, "No wildcard",
+			fmt.Sprintf(`database_pattern %q has no unescaped "%%" or "_"; use database for a single database.`, p))}
+	}
+	return model.Object{Type: model.ObjectDatabase, Pattern: p}, nil
+}
+
+// hasWildcard reports whether a MySQL LIKE pattern contains an unescaped
+// % or _.
+func hasWildcard(p string) bool {
+	for i := 0; i < len(p); i++ {
+		switch p[i] {
+		case '\\':
+			i++
+		case '%', '_':
+			return true
+		}
+	}
+	return false
 }
 
 func decodeIgnore(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine, ig *model.Ignore) hcl.Diagnostics {

@@ -178,15 +178,25 @@ type Object struct {
 	Type     ObjectType
 	Database string
 	Schema   string
-	// Pattern is the raw MySQL grant target when an inspected grant is a
-	// wildcard pattern rather than a literal database name. Database then
-	// holds the pattern with escapes removed. Always empty in Desired.
+	// Pattern is a raw MySQL grant target with LIKE wildcards rather than
+	// a literal database name. A declared pattern (grant database_pattern)
+	// has an empty Database; an undeclared inspected one has Database set
+	// to the pattern with escapes removed.
 	Pattern string
 }
 
+// IsDeclaredPattern reports whether o is a database pattern declared with
+// database_pattern (or the inspected grant matching one).
+func (o Object) IsDeclaredPattern() bool {
+	return o.Pattern != "" && o.Database == ""
+}
+
 func (o Object) String() string {
-	if o.Type == ObjectSchema {
+	switch {
+	case o.Type == ObjectSchema:
 		return o.Database + "." + o.Schema
+	case o.IsDeclaredPattern():
+		return o.Pattern
 	}
 	return o.Database
 }

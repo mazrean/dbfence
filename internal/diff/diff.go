@@ -397,6 +397,12 @@ func (df *differ) managedDatabase(name string) bool {
 	return slices.ContainsFunc(df.desired.Databases, func(d model.Database) bool { return d.Name == name })
 }
 
+// managedPattern reports whether a MySQL database pattern is declared by a
+// grant block (database_pattern).
+func (df *differ) managedPattern(obj model.Object) bool {
+	return slices.ContainsFunc(df.desired.Privileges, func(p model.Privilege) bool { return p.Object == obj })
+}
+
 func (df *differ) managedSchema(db, name string) bool {
 	return slices.ContainsFunc(df.desired.Schemas, func(s model.Schema) bool { return s.Database == db && s.Name == name })
 }
@@ -509,6 +515,9 @@ func (df *differ) privileges() {
 			}
 		} else if !df.desiredRole(p.Grantee) {
 			return false
+		}
+		if p.Object.IsDeclaredPattern() {
+			return df.managedPattern(p.Object)
 		}
 		if !df.managedDatabase(p.Object.Database) {
 			return false
@@ -637,8 +646,8 @@ func objectLabel(obj model.Object) string {
 		return fmt.Sprintf("schema %q in database %q", obj.Schema, obj.Database)
 	}
 	if obj.Pattern != "" {
-		// An inspected MySQL wildcard grant, e.g. "my_app" written
-		// without escaping the '_'.
+		// A MySQL wildcard grant: declared with database_pattern, or
+		// inspected, e.g. "my_app" written without escaping the '_'.
 		return fmt.Sprintf("%s pattern %q", obj.Type, obj.Pattern)
 	}
 	return fmt.Sprintf("%s %q", obj.Type, obj.Database)
@@ -655,6 +664,7 @@ func sortedGroups[V any](m map[grantGroup]V) []grantGroup {
 			strings.Compare(string(a.obj.Type), string(b.obj.Type)),
 			strings.Compare(a.obj.Database, b.obj.Database),
 			strings.Compare(a.obj.Schema, b.obj.Schema),
+			strings.Compare(a.obj.Pattern, b.obj.Pattern),
 			cmp.Compare(boolInt(a.grantOption), boolInt(b.grantOption)),
 		)
 	})

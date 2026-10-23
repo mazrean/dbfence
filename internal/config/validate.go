@@ -67,7 +67,7 @@ func validateGrants(d *decoded, dbs map[string]resource, roles map[model.RoleID]
 	seen := map[model.PrivilegeKey]int{}
 	option := map[target]int{}
 	for i, g := range d.grants {
-		if _, ok := dbs[g.object.Database]; !ok {
+		if _, ok := dbs[g.object.Database]; !ok && !g.object.IsDeclaredPattern() {
 			diags = append(diags, errAt(attrRange(g.attrs, "database", g.block.DefRange), "Undeclared database",
 				fmt.Sprintf("grant to %q targets database %q, which is not declared.", g.grantee, g.object.Database)))
 		}
@@ -93,8 +93,8 @@ func validateGrants(d *decoded, dbs map[string]resource, roles map[model.RoleID]
 					loc(d.grants[j].block.DefRange), g.object)))
 		} else if d.engine == model.EngineMySQL && d.grants[j].option != g.option {
 			diags = append(diags, errAt(attrRange(g.attrs, "with_grant_option", g.block.DefRange), "Conflicting grant option",
-				fmt.Sprintf("MySQL keeps the grant option per account and database, so every grant block for %q on database %q must use the same with_grant_option; the grant block at %s uses %t.",
-					g.grantee, g.object.Database, loc(d.grants[j].block.DefRange), d.grants[j].option)))
+				fmt.Sprintf("MySQL keeps the grant option per account and database, so every grant block for %q on %s must use the same with_grant_option; the grant block at %s uses %t.",
+					g.grantee, grantTargetLabel(g.object), loc(d.grants[j].block.DefRange), d.grants[j].option)))
 		}
 
 		// Report overlapping privileges once per earlier block.
@@ -206,4 +206,12 @@ func otherHosts(roles map[model.RoleID]resource, id model.RoleID, ref string) st
 	}
 	slices.Sort(found)
 	return fmt.Sprintf(" Declared accounts named %q: %s; reference one with %s.<label>.id.", id.Name, strings.Join(found, ", "), ref)
+}
+
+// grantTargetLabel names a database level grant target in diagnostics.
+func grantTargetLabel(o model.Object) string {
+	if o.IsDeclaredPattern() {
+		return fmt.Sprintf("database pattern %q", o.Pattern)
+	}
+	return fmt.Sprintf("database %q", o.Database)
 }
