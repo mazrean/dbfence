@@ -451,6 +451,83 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("PUBLIC privileges", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE pub_owner", "CREATE ROLE pub_u LOGIN PASSWORD 'pw'", "CREATE DATABASE pub_db OWNER pub_owner")
+		d := s.open(t, "postgres")
+		db := model.Object{Type: model.ObjectDatabase, Database: "pub_db"}
+		public := model.Object{Type: model.ObjectSchema, Database: "pub_db", Schema: "public"}
+		pubPriv := func(obj model.Object, names ...string) []model.Privilege {
+			var out []model.Privilege
+			for _, n := range names {
+				out = append(out, model.Privilege{Grantee: model.PublicRole, Object: obj, Name: n})
+			}
+			return out
+		}
+		desired := func(name string, privs []model.Privilege, objs ...model.Object) *model.Desired {
+			return &model.Desired{
+				Engine:        model.EnginePostgres,
+				Roles:         []model.Role{{ID: pg("pub_owner")}, {ID: pg("pub_u")}},
+				Databases:     []model.Database{{Name: name, Owner: "pub_owner"}},
+				Schemas:       []model.Schema{{Database: name, Name: "public"}},
+				Privileges:    privs,
+				PublicObjects: objs,
+			}
+		}
+		has := func(t *testing.T, q string) string {
+			t.Helper()
+			return strings.Join(s.queryStrings(t, q), ",")
+		}
+
+		// A NULL datacl means the defaults, which PUBLIC holds too.
+		cur, err := d.Inspect(t.Context(), desired("pub_db", nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, p := range cur.Privileges {
+			if p.Grantee.IsPublic() && (p.Object == db || p.Object == public) {
+				got = append(got, p.Object.String()+":"+p.Name)
+			}
+		}
+		slices.Sort(got)
+		if want := []string{"pub_db.public:USAGE", "pub_db:CONNECT", "pub_db:TEMPORARY"}; !slices.Equal(got, want) {
+			t.Errorf("inspected PUBLIC privileges = %v, want %v", got, want)
+		}
+
+		// privileges = [] revokes every privilege of PUBLIC.
+		text := converge(t, d, desired("pub_db", nil, db, public), diff.Options{})
+		for _, w := range []string{`REVOKE CONNECT, TEMPORARY ON DATABASE "pub_db" FROM PUBLIC`, `REVOKE USAGE ON SCHEMA "public" FROM PUBLIC`} {
+			if !strings.Contains(text, w) {
+				t.Errorf("plan lacks %q:\n%s", w, text)
+			}
+		}
+		if got := has(t, "SELECT has_database_privilege('pub_u', 'pub_db', 'CONNECT')::text || has_database_privilege('pub_u', 'pub_db', 'TEMP')::text"); got != "falsefalse" {
+			t.Errorf("pub_u CONNECT, TEMP = %s, want falsefalse", got)
+		}
+
+		// Declared privileges are granted back.
+		text = converge(t, d, desired("pub_db", pubPriv(db, "CONNECT"), db, public), diff.Options{})
+		if !strings.Contains(text, `GRANT CONNECT ON DATABASE "pub_db" TO PUBLIC`) {
+			t.Errorf("plan lacks the grant to PUBLIC:\n%s", text)
+		}
+		if got := has(t, "SELECT has_database_privilege('pub_u', 'pub_db', 'CONNECT')::text"); got != "true" {
+			t.Errorf("pub_u CONNECT = %s, want true", got)
+		}
+
+		// A database created by the plan converges in one apply.
+		privs := append(pubPriv(model.Object{Type: model.ObjectDatabase, Database: "pub_new"}, "CONNECT"),
+			pubPriv(model.Object{Type: model.ObjectSchema, Database: "pub_new", Schema: "public"}, "USAGE")...)
+		converge(t, d, desired("pub_new", privs, privs[0].Object, privs[1].Object), diff.Options{})
+		if got := has(t, "SELECT has_database_privilege('pub_u', 'pub_new', 'CONNECT')::text || has_database_privilege('pub_u', 'pub_new', 'TEMP')::text"); got != "truefalse" {
+			t.Errorf("pub_u CONNECT, TEMP on pub_new = %s, want truefalse", got)
+		}
+		converge(t, d, desired("pub_new2", nil, model.Object{Type: model.ObjectDatabase, Database: "pub_new2"},
+			model.Object{Type: model.ObjectSchema, Database: "pub_new2", Schema: "public"}), diff.Options{})
+		if got := has(t, "SELECT has_database_privilege('pub_u', 'pub_new2', 'CONNECT')::text"); got != "false" {
+			t.Errorf("pub_u CONNECT on pub_new2 = %s, want false", got)
+		}
+	})
+
 	t.Run("exec errors carry detail", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE detail_owner", "CREATE DATABASE detail_db OWNER detail_owner")
 		d := s.open(t, "postgres")

@@ -75,7 +75,7 @@ func validateGrants(d *decoded, dbs map[string]resource, roles map[model.RoleID]
 			diags = append(diags, errAt(attrRange(g.attrs, "schema", g.block.DefRange), "Undeclared schema",
 				fmt.Sprintf("grant to %q targets schema %q, which is not declared.", g.grantee, g.object)))
 		}
-		if _, ok := roles[g.grantee]; !ok {
+		if _, ok := roles[g.grantee]; !ok && !g.grantee.IsPublic() {
 			diags = append(diags, errAt(attrRange(g.attrs, "role", g.block.DefRange), "Undeclared role",
 				fmt.Sprintf("grant targets role %q, which is not declared.%s", g.grantee, otherHosts(roles, g.grantee, "user"))))
 		}
@@ -85,6 +85,12 @@ func validateGrants(d *decoded, dbs map[string]resource, roles map[model.RoleID]
 		t := target{grantee: g.grantee, object: g.object}
 		if j, ok := option[t]; !ok {
 			option[t] = i
+		} else if g.grantee.IsPublic() && (len(g.names) == 0) != (len(d.grants[j].names) == 0) {
+			// privileges = [] revokes everything, so it cannot be
+			// combined with grants to PUBLIC on the same object.
+			diags = append(diags, errAt(attrRange(g.attrs, "privileges", g.block.DefRange), "Conflicting PUBLIC grants",
+				fmt.Sprintf("the grant block at %s also manages PUBLIC on %s; privileges = [] (revoke every privilege of PUBLIC) cannot be combined with other PUBLIC grants on the same object.",
+					loc(d.grants[j].block.DefRange), g.object)))
 		} else if d.engine == model.EngineMySQL && d.grants[j].option != g.option {
 			diags = append(diags, errAt(attrRange(g.attrs, "with_grant_option", g.block.DefRange), "Conflicting grant option",
 				fmt.Sprintf("MySQL keeps the grant option per account and database, so every grant block for %q on database %q must use the same with_grant_option; the grant block at %s uses %t.",

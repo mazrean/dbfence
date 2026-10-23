@@ -215,7 +215,10 @@ type Desired struct {
 	Roles      []Role
 	Schemas    []Schema
 	Privileges []Privilege
-	Ignore     Ignore
+	// PublicObjects lists the objects on which privileges of PUBLIC are
+	// managed (PostgreSQL only): those with at least one PUBLIC grant.
+	PublicObjects []Object
+	Ignore        Ignore
 }
 
 // Current is the state observed in the live server.

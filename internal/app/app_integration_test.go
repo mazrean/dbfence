@@ -244,6 +244,29 @@ grant {
 	if got := h.query("SELECT rolname FROM pg_roles WHERE rolname = 'dbf_it_stray'"); len(got) != 0 {
 		t.Errorf("stray role survived prune")
 	}
+
+	// Revoking a privilege PUBLIC still holds is warned about.
+	h.write(strings.Replace(config("second"), `privileges = ["CONNECT", "TEMPORARY"]`, `privileges = ["TEMPORARY"]`, 1))
+	if n, out := h.plan(app.Options{}); n != 1 || !strings.Contains(out, `"dbf_it_app" keeps CONNECT on database "dbf_it_app" through PUBLIC`) {
+		t.Fatalf("revoke plan: %d\n%s", n, out)
+	}
+
+	// PUBLIC is managed where a grant block names it.
+	h.write(config("second") + `
+grant {
+  role       = "PUBLIC"
+  database   = database.app.name
+  privileges = []
+}
+`)
+	if n, out := h.plan(app.Options{}); n != 1 || !strings.Contains(out, `REVOKE CONNECT, TEMPORARY ON DATABASE "dbf_it_app" FROM PUBLIC`) {
+		t.Fatalf("PUBLIC plan: %d\n%s", n, out)
+	}
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if got := h.query("SELECT has_database_privilege('dbf_it_ro', 'dbf_it_app', 'CONNECT')::text || has_database_privilege('dbf_it_app', 'dbf_it_app', 'CONNECT')::text"); len(got) != 1 || got[0] != "falsetrue" {
+		t.Errorf("CONNECT of dbf_it_ro, dbf_it_app = %v, want falsetrue", got)
+	}
 }
 
 func TestMySQLIntegration(t *testing.T) {

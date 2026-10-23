@@ -58,6 +58,15 @@ type DefaultRoleSetter interface {
 	SetDefaultRoles(r model.Role, cur model.RoleState) []plan.Statement
 }
 
+// PublicDefaulter is implemented by dialects whose new objects grant
+// privileges to PUBLIC (PostgreSQL). DefaultPublicPrivileges returns the
+// privileges PUBLIC holds on obj right after the plan creates it: obj is
+// a new database, or a system schema copied into a new database from its
+// template.
+type PublicDefaulter interface {
+	DefaultPublicPrivileges(obj model.Object) []string
+}
+
 // Execution phases. Roles come first because databases and schemas
 // reference owners. Memberships follow right after roles: creating a
 // database owned by another role, or handing it over, requires the
@@ -421,7 +430,15 @@ func (df *differ) privileges() {
 		return df.desired.Engine == model.EnginePostgres && p.Grantee.Name == df.owner(p.Object)
 	}
 	managed := func(p model.Privilege) bool {
-		if !df.desiredRole(p.Grantee) || !df.managedDatabase(p.Object.Database) {
+		if p.Grantee.IsPublic() {
+			// PUBLIC is managed only where a grant block names it.
+			if !slices.Contains(df.desired.PublicObjects, p.Object) {
+				return false
+			}
+		} else if !df.desiredRole(p.Grantee) {
+			return false
+		}
+		if !df.managedDatabase(p.Object.Database) {
 			return false
 		}
 		return p.Object.Type != model.ObjectSchema || df.managedSchema(p.Object.Database, p.Object.Schema)
@@ -441,6 +458,9 @@ func (df *differ) privileges() {
 	// Unknown privileges are re-granted (GRANT is idempotent) and never revoked.
 	unknown := df.current.Unreadable.Privileges
 	have := map[model.PrivilegeKey]model.Privilege{}
+	for _, p := range df.createdPublicPrivileges() {
+		have[p.Key()] = p
+	}
 	for _, p := range df.current.Privileges {
 		if unknown {
 			break
@@ -491,7 +511,50 @@ func (df *differ) privileges() {
 	for _, g := range sortedGroups(revokes) {
 		privs := sortedPrivs(revokes[g])
 		df.add(phaseRevoke, plan.ActionRevoke, res(g, privs, "from"), df.d.Revoke(g.grantee, g.obj, privs))
+		df.warnHeldByPublic(g, privs)
 	}
+}
+
+// createdPublicPrivileges returns the privileges PUBLIC will hold on the
+// PUBLIC-managed objects that the plan creates, before any grant or revoke.
+func (df *differ) createdPublicPrivileges() []model.Privilege {
+	pd, ok := df.d.(PublicDefaulter)
+	if !ok {
+		return nil
+	}
+	var out []model.Privilege
+	for _, obj := range df.desired.PublicObjects {
+		if slices.ContainsFunc(df.current.Databases, func(c model.Database) bool { return c.Name == obj.Database }) {
+			continue
+		}
+		if obj.Type == model.ObjectSchema && !df.d.IsSystemSchema(obj.Schema) {
+			continue
+		}
+		for _, n := range pd.DefaultPublicPrivileges(obj) {
+			out = append(out, model.Privilege{Grantee: model.PublicRole, Object: obj, Name: n})
+		}
+	}
+	return out
+}
+
+// warnHeldByPublic warns when privileges revoked from a role stay
+// available to it because PUBLIC holds them on an object where PUBLIC is
+// not managed.
+func (df *differ) warnHeldByPublic(g grantGroup, privs []string) {
+	if g.grantee.IsPublic() || slices.Contains(df.desired.PublicObjects, g.obj) {
+		return
+	}
+	var held []string
+	for _, p := range df.current.Privileges {
+		if p.Grantee.IsPublic() && p.Object == g.obj && slices.Contains(privs, p.Name) && !slices.Contains(held, p.Name) {
+			held = append(held, p.Name)
+		}
+	}
+	if len(held) == 0 {
+		return
+	}
+	df.warn("%q keeps %s on %s through PUBLIC; add a grant block with role = \"PUBLIC\" to manage the privileges of PUBLIC there",
+		g.grantee, strings.Join(sortedPrivs(held), ", "), objectLabel(g.obj))
 }
 
 // objectLabel names obj for plan output.

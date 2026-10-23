@@ -286,6 +286,9 @@ func (d *decoded) desired() *model.Desired {
 		out.Schemas = append(out.Schemas, s.schema)
 	}
 	for _, g := range d.grants {
+		if g.grantee.IsPublic() && !slices.Contains(out.PublicObjects, g.object) {
+			out.PublicObjects = append(out.PublicObjects, g.object)
+		}
 		for _, n := range g.names {
 			out.Privileges = append(out.Privileges, model.Privilege{Grantee: g.grantee, Object: g.object, Name: n, GrantOption: g.option})
 		}
@@ -662,20 +665,34 @@ func decodeGrant(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (decod
 		g.object = model.Object{Type: model.ObjectSchema, Database: blk.Database, Schema: *blk.Schema}
 	}
 	privRange := attrRange(g.attrs, "privileges", b.DefRange)
-	if len(blk.Privileges) == 0 {
-		return g, append(diags, errAt(privRange, "Empty privileges", "privileges must not be empty."))
+	roleRange := attrRange(g.attrs, "role", b.DefRange)
+	public := strings.EqualFold(blk.Role, "public")
+	g.option = blk.WithGrantOption != nil && *blk.WithGrantOption
+	switch {
+	case public && engine != model.EnginePostgres:
+		return g, append(diags, errAt(roleRange, "Unsupported grantee",
+			fmt.Sprintf(`role %q: grants to PUBLIC are only supported for postgres; to grant to an account named %q, use "%s@<host>" or user.<label>.id.`, blk.Role, blk.Role, blk.Role)))
+	case public && g.option:
+		return g, append(diags, errAt(attrRange(g.attrs, "with_grant_option", b.DefRange), "Invalid grant option",
+			"PostgreSQL cannot give the grant option to PUBLIC; remove with_grant_option."))
+	case len(blk.Privileges) == 0 && !public:
+		return g, append(diags, errAt(privRange, "Empty privileges",
+			`privileges must not be empty; only a grant to role = "PUBLIC" may use privileges = [] to revoke every privilege of PUBLIC.`))
 	}
 	names, err := ExpandPrivileges(engine, g.object.Type, blk.Privileges)
 	if err != nil {
 		return g, append(diags, errAt(privRange, "Invalid privilege", err.Error()))
+	}
+	g.names = names
+	if public {
+		g.grantee = model.PublicRole
+		return g, diags
 	}
 	g.grantee = ParseRoleID(blk.Role, engine)
 	if engine == model.EngineMySQL && g.grantee.Host == "" {
 		return g, append(diags, errAt(attrRange(g.attrs, "role", b.DefRange), "Empty host",
 			fmt.Sprintf(`role %q has an empty host; use "name@%%" or user.<label>.id.`, blk.Role)))
 	}
-	g.names = names
-	g.option = blk.WithGrantOption != nil && *blk.WithGrantOption
 	return g, diags
 }
 
@@ -789,9 +806,13 @@ func checkName(r resource, engine model.Engine) hcl.Diagnostics {
 		if n := len(r.name); n > pgMaxIdentBytes {
 			tooLong(r.nameRange, typ+" name", r.name, n, pgMaxIdentBytes, "bytes")
 		}
-		if isRole && (r.name == "public" || r.name == "none" || strings.HasPrefix(r.name, "pg_")) {
+		switch {
+		case isRole && (r.name == "public" || r.name == "none" || strings.HasPrefix(r.name, "pg_")):
 			diags = append(diags, errAt(r.nameRange, "Reserved name",
 				fmt.Sprintf(`%s name %q is reserved by PostgreSQL ("public", "none" and names starting with "pg_").`, typ, r.name)))
+		case isRole && strings.EqualFold(r.name, "public"):
+			diags = append(diags, errAt(r.nameRange, "Reserved name",
+				fmt.Sprintf(`%s name %q is reserved: grant blocks read role = %q as the PUBLIC pseudo-role.`, typ, r.name, r.name)))
 		}
 	case model.EngineMySQL:
 		limit := mysqlMaxDBChars
