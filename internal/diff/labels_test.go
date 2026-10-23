@@ -153,3 +153,42 @@ func TestComputeDeterministicOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestComputeUnmanagedLabels checks that the warning about an unmanaged
+// role names it as the --prune drop header does.
+func TestComputeUnmanagedLabels(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		wantWarn string
+		wantDrop string
+		login    bool
+	}{
+		{name: "login role", login: true, wantWarn: `unmanaged user "u1" (use --prune to drop it)`, wantDrop: `[drop] user "u1"`},
+		{name: "group role", login: false, wantWarn: `unmanaged role "u1" (use --prune to drop it)`, wantDrop: `[drop] role "u1"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cur := &model.Current{
+				CurrentUser: pgID("admin"),
+				Roles:       []model.RoleState{{ID: pgID("admin"), Login: true}, {ID: pgID("u1"), Login: tt.login}},
+			}
+			desired := &model.Desired{Engine: model.EnginePostgres}
+			p, err := diff.Compute(desired, cur, postgres.Dialect{}, diff.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff([]string{tt.wantWarn}, p.Warnings); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
+			}
+			p, err = diff.Compute(desired, cur, postgres.Dialect{}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff([]string{tt.wantDrop}, resources(p)); d != "" {
+				t.Errorf("resources (-want +got):\n%s", d)
+			}
+		})
+	}
+}

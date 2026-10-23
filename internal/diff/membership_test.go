@@ -82,7 +82,7 @@ func TestComputeMembershipOptions(t *testing.T) {
 			}
 			var warns []string
 			for _, w := range p.Warnings {
-				if !tt.unreadable && w != "unmanaged role \"admin\" (use --prune to drop it)" {
+				if !tt.unreadable && w != "unmanaged user \"admin\" (use --prune to drop it)" {
 					warns = append(warns, w)
 				}
 			}

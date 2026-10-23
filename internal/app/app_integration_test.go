@@ -311,7 +311,7 @@ func TestMySQLIntegration(t *testing.T) {
 	h.exec("CREATE DATABASE dbf_it_legacy")
 	n, out := h.plan(app.Options{})
 	if n != 4 || !strings.Contains(out, "REVOKE GRANT OPTION ON `dbf\\_it\\_app`.*") ||
-		!strings.Contains(out, "SET DEFAULT ROLE 'dbf_it_ro'@'%' TO 'dbf_it_app'@'%'") || !strings.Contains(out, `unmanaged role "dbf_it_stray"@"%"`) || !strings.Contains(out, `unmanaged database "dbf_it_legacy"`) {
+		!strings.Contains(out, "SET DEFAULT ROLE 'dbf_it_ro'@'%' TO 'dbf_it_app'@'%'") || !strings.Contains(out, `unmanaged user "dbf_it_stray"@"%"`) || !strings.Contains(out, `unmanaged database "dbf_it_legacy"`) {
 		t.Fatalf("drift plan: %d\n%s", n, out)
 	}
 	h.apply(app.Options{Prune: true})

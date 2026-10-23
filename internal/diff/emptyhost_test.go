@@ -25,7 +25,7 @@ func TestComputeMySQLEmptyHost(t *testing.T) {
 		{
 			name:         "warned without prune",
 			wantChanges:  []string{},
-			wantWarnings: []string{`unmanaged role "anon"@"" (use --prune to drop it)`},
+			wantWarnings: []string{`unmanaged user "anon"@"" (use --prune to drop it)`},
 		},
 		{
 			name:         "dropped with prune",

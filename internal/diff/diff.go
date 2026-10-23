@@ -666,7 +666,7 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 			continue
 		}
 		if !df.opts.Prune {
-			df.warn("unmanaged role %q (use --prune to drop it)", df.show(r.ID))
+			df.warn("unmanaged %s (use --prune to drop it)", df.roleResource(r.ID))
 			continue
 		}
 		df.add(phaseDropRole, plan.ActionDrop, df.roleResource(r.ID), df.d.DropRole(r.ID, surviving))
