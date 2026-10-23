@@ -151,6 +151,9 @@ type RoleState struct {
 	Superuser        bool
 	Login            bool
 	PasswordReadable bool
+	// RetainedPassword is set when a secondary password kept by MySQL's
+	// RETAIN CURRENT PASSWORD still authenticates the account.
+	RetainedPassword bool
 	// AttributesUnknown is set when the account exists but its login,
 	// authentication plugin and password could not be read.
 	AttributesUnknown bool

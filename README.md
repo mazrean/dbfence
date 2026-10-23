@@ -212,7 +212,7 @@ Each secret is fetched once per run. Secret payloads and `base64decode` results 
 dbfence compares a declared password with the stored verifier without changing it:
 
 - **PostgreSQL**: `SCRAM-SHA-256` and `md5`, read from `pg_authid`. Reading them needs superuser. Under `password_encryption = scram-sha-256` an `md5` verifier counts as a mismatch, so setting the password again upgrades it to SCRAM. A password that looks like a verifier (`md5` + 32 characters, or `SCRAM-SHA-256$...`) is an error, because PostgreSQL would store it as is.
-- **MySQL**: `caching_sha2_password`, `mysql_native_password` and `sha256_password`, read from `mysql.user`. Other plugins cannot be compared and always produce a warning.
+- **MySQL**: `caching_sha2_password`, `mysql_native_password` and `sha256_password`, read from `mysql.user`. Other plugins cannot be compared and always produce a warning. When a password is declared and the account still has a secondary password kept by `RETAIN CURRENT PASSWORD` (MySQL 8.0.14+), plan adds `ALTER USER ... DISCARD OLD PASSWORD`, so that only the declared password logs in.
 
 Passwords are sent in plaintext (`PASSWORD '...'`, `IDENTIFIED BY '...'`), so that the server hashes them with its own settings (`password_encryption`, `scram_iterations`) and password policies apply (`passwordcheck` / `credcheck`, MySQL `validate_password`). As a consequence, PostgreSQL statement logging (`log_statement = ddl` or `all`, and `log_min_error_statement` for failed statements) records the password; MySQL rewrites passwords in its logs. Disable such logging for the dbfence session or role if that matters.
 

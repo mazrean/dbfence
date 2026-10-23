@@ -347,6 +347,25 @@ func TestMySQLIntegration(t *testing.T) {
 	}
 }
 
+// TestMySQLRetainedPassword checks that a secondary password kept by
+// RETAIN CURRENT PASSWORD is discarded when the primary already matches.
+func TestMySQLRetainedPassword(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	h.write(mysqlConfig("first"))
+	h.apply(app.Options{})
+	h.exec("ALTER USER 'dbf_it_app'@'%' IDENTIFIED BY 'second' RETAIN CURRENT PASSWORD")
+	h.write(mysqlConfig("second"))
+	if n, out := h.plan(app.Options{}); n != 1 || !strings.Contains(out, "ALTER USER 'dbf_it_app'@'%' DISCARD OLD PASSWORD") {
+		t.Fatalf("retained password plan: %d\n%s", n, out)
+	}
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if got := h.query("SELECT User FROM mysql.user WHERE JSON_CONTAINS_PATH(User_attributes, 'one', '$.additional_password')"); len(got) != 0 {
+		t.Errorf("accounts with a secondary password = %q", got)
+	}
+}
+
 func mysqlConfig(pw string) string {
 	return fmt.Sprintf(`
 role "ro" { name = "dbf_it_ro" }

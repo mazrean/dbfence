@@ -307,6 +307,43 @@ func listsAllAccounts(accounts []model.RoleID) bool {
 }
 
 func (d *Driver) inspectMySQLUser(ctx context.Context, cur *model.Current) error {
+	if err := d.inspectMySQLUserRows(ctx, cur); err != nil {
+		return err
+	}
+	return d.inspectRetainedPasswords(ctx, cur)
+}
+
+// errBadField is ER_BAD_FIELD_ERROR, returned for mysql.user.User_attributes
+// before MySQL 8.0.14, which has no secondary passwords.
+const errBadField = 1054
+
+// inspectRetainedPasswords marks accounts that still have a secondary
+// password kept by ALTER USER ... RETAIN CURRENT PASSWORD.
+func (d *Driver) inspectRetainedPasswords(ctx context.Context, cur *model.Current) error {
+	retained := map[model.RoleID]bool{}
+	err := query(ctx, d.db, `SELECT User, LOWER(Host) FROM mysql.user
+		WHERE JSON_CONTAINS_PATH(User_attributes, 'one', '$.additional_password')`,
+		func(rows *sql.Rows) error {
+			var id model.RoleID
+			if err := rows.Scan(&id.Name, &id.Host); err != nil {
+				return err
+			}
+			retained[id] = true
+			return nil
+		})
+	switch {
+	case mysqlErrorIn(err, errBadField) || isAccessDenied(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read secondary passwords: %w", err)
+	}
+	for i := range cur.Roles {
+		cur.Roles[i].RetainedPassword = retained[cur.Roles[i].ID]
+	}
+	return nil
+}
+
+func (d *Driver) inspectMySQLUserRows(ctx context.Context, cur *model.Current) error {
 	return query(ctx, d.db, `SELECT User, LOWER(Host), plugin, COALESCE(HEX(authentication_string), ''), account_locked
 		FROM mysql.user ORDER BY User, Host`,
 		func(rows *sql.Rows) error {
@@ -899,6 +936,11 @@ func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]pla
 	if identify {
 		parts := append([]any{"ALTER USER " + d.Account(r.ID)}, d.identified(plugin, r.Password)...)
 		out = append(out, plan.SQL("", parts...))
+	}
+	if r.Password != nil && cur.RetainedPassword {
+		// The old password would keep working next to the declared one;
+		// IDENTIFIED BY without RETAIN CURRENT PASSWORD keeps it too.
+		out = append(out, plan.SQL("", "ALTER USER "+d.Account(r.ID)+" DISCARD OLD PASSWORD"))
 	}
 	if r.Login != nil && *r.Login != cur.Login {
 		out = append(out, plan.SQL("", "ALTER USER "+d.Account(r.ID)+" ACCOUNT "+map[bool]string{true: "UNLOCK", false: "LOCK"}[*r.Login]))
