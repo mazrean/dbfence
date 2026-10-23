@@ -654,10 +654,23 @@ func (Dialect) CreateDatabase(db model.Database) []plan.Statement {
 func charsetClause(charset, collation string) string {
 	var s string
 	if charset != "" {
-		s += " CHARACTER SET " + charset
+		s += " CHARACTER SET " + Name(charset)
 	}
 	if collation != "" {
-		s += " COLLATE " + collation
+		s += " COLLATE " + Name(collation)
+	}
+	return s
+}
+
+// canonicalCharset lower-cases a charset or collation name and resolves
+// the utf8 alias, which MySQL stores as utf8mb3.
+func canonicalCharset(s string) string {
+	s = strings.ToLower(s)
+	if s == "utf8" {
+		return "utf8mb3"
+	}
+	if rest, ok := strings.CutPrefix(s, "utf8_"); ok {
+		return "utf8mb3_" + rest
 	}
 	return s
 }
@@ -665,10 +678,10 @@ func charsetClause(charset, collation string) string {
 // AlterDatabase implements diff.Dialect.
 func (Dialect) AlterDatabase(db, cur model.Database) ([]plan.Statement, []string) {
 	var charset, collation string
-	if db.Charset != "" && !strings.EqualFold(db.Charset, cur.Charset) {
+	if db.Charset != "" && canonicalCharset(db.Charset) != canonicalCharset(cur.Charset) {
 		charset = db.Charset
 	}
-	if db.Collation != "" && !strings.EqualFold(db.Collation, cur.Collation) {
+	if db.Collation != "" && canonicalCharset(db.Collation) != canonicalCharset(cur.Collation) {
 		collation = db.Collation
 	}
 	if charset == "" && collation == "" {
