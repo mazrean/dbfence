@@ -10,6 +10,7 @@ import (
 	"github.com/mazrean/dbfence/internal/driver/mysql"
 	"github.com/mazrean/dbfence/internal/driver/postgres"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/password"
 )
 
 // TestComputeOrder checks the relative order of plan phases.
@@ -116,6 +117,14 @@ func TestComputeCurrentUser(t *testing.T) {
 			state:     model.RoleState{ID: myAdmin, Login: true},
 			want:      []string{},
 			wantWarns: []string{`not disabling login of the connected user "admin"@"%": it would lock dbfence out`},
+		},
+		{
+			name:      "mysql secondary password of the connected user is kept",
+			dialect:   mysql.Dialect{},
+			role:      model.Role{ID: myAdmin, Login: new(true), Password: new("pw")},
+			state:     model.RoleState{ID: myAdmin, Login: true, AuthPlugin: password.PluginNative, PasswordHash: []byte(password.MySQLNative("pw")), RetainedPassword: true},
+			want:      []string{},
+			wantWarns: []string{`not discarding the secondary password of the connected user "admin"@"%": dbfence may be using it`},
 		},
 		{
 			name:      "login already declared",

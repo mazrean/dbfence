@@ -254,6 +254,11 @@ func (df *differ) roles() {
 		self := r.ID == df.current.CurrentUser
 		if self {
 			r = df.protectCurrentUser(r, cur)
+			if cur.RetainedPassword && r.Password != nil {
+				// dbfence may be connected with the secondary password.
+				df.warn("not discarding the secondary password of the connected user %q: dbfence may be using it", r.ID)
+				cur.RetainedPassword = false
+			}
 		}
 		switch {
 		case !exists && u.Roles:
