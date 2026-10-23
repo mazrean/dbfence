@@ -2,6 +2,7 @@ package password
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -35,7 +36,12 @@ func TestSHA256Crypt(t *testing.T) {
 func TestMatchMySQL(t *testing.T) {
 	t.Parallel()
 	salt := "abcdefghij0123456789"
-	caching := "$A$005$" + salt + string(SHA256Crypt([]byte("secret"), []byte(salt), 5000))
+	// Created by MySQL 8.4 with CREATE USER ... IDENTIFIED WITH
+	// caching_sha2_password BY 'secret'.
+	caching := string(mustHex(t, "244124303035246D020A4123033B641C631C254520403121320A6E6C744F436E7057786F41434F723251563030716D6E4D6F566B774C444952356E6C6A786E596B2E63497336"))
+	// Created by MySQL 8.4 with CREATE USER ... IDENTIFIED WITH sha256_password.
+	sha256Short := mustHex(t, "2435240F7F76620F10740C012B7E5D67083E3457735A3E244F7537765A4E384E4F3957595534356E5553667A586C6E6641706A7A43642F55713439696636476E684834")
+	sha256Long := mustHex(t, "2435241758744E28563339437D1F0A4F616A346325550B2465534677756D6C6841624170562E4D66645350625664685A753341504D706E3475652E494B4C353932612F")
 	tests := []struct {
 		name, plugin, auth, password string
 		want, wantErr                bool
@@ -48,6 +54,14 @@ func TestMatchMySQL(t *testing.T) {
 		{"caching empty password", PluginCachingSHA2, "", "x", false, false},
 		{"caching hex rounds", PluginCachingSHA2, "$A$00A$" + salt + string(SHA256Crypt([]byte("secret"), []byte(salt), 10000)), "secret", true, false},
 		{"caching malformed", PluginCachingSHA2, "$A$005$short", "x", false, true},
+		{"sha256 match", PluginSHA256, sha256Short, "pw", true, false},
+		{"sha256 long password", PluginSHA256, sha256Long, "a much longer password exceeding thirty two bytes!!", true, false},
+		{"sha256 mismatch", PluginSHA256, sha256Short, "pW", false, false},
+		{"sha256 empty", PluginSHA256, "", "", true, false},
+		{"sha256 empty mismatch", PluginSHA256, "", "x", false, false},
+		{"sha256 malformed", PluginSHA256, "$5$short$x", "pw", false, true},
+		{"sha256 wrong prefix", PluginSHA256, "$6$" + sha256Short[3:], "pw", false, true},
+		{"sha256 missing separator", PluginSHA256, sha256Short[:23] + "#" + sha256Short[24:], "pw", false, true},
 		{"unknown plugin", "auth_socket", "", "x", false, true},
 	}
 	for _, tt := range tests {
@@ -71,8 +85,9 @@ func TestMatchPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scram := "SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" +
-		base64.StdEncoding.EncodeToString(key) + ":AAAA"
+	b64 := base64.StdEncoding.EncodeToString
+	key32 := b64(make([]byte, 32))
+	scram := "SCRAM-SHA-256$4096:" + b64(salt) + "$" + b64(key) + ":" + key32
 	tests := []struct {
 		name, verifier, user, password string
 		want, wantErr                  bool
@@ -80,9 +95,18 @@ func TestMatchPostgres(t *testing.T) {
 		{"scram match", scram, "app", "secret", true, false},
 		{"scram mismatch", scram, "app", "nope", false, false},
 		{"scram malformed", "SCRAM-SHA-256$x", "app", "secret", false, true},
+		{"scram zero iterations", "SCRAM-SHA-256$0:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram negative iterations", "SCRAM-SHA-256$-5:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram too many iterations", "SCRAM-SHA-256$10000001:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram empty salt", "SCRAM-SHA-256$4096:$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram empty keys", "SCRAM-SHA-256$4096:" + b64(salt) + "$:", "app", "secret", false, true},
+		{"scram short stored key", "SCRAM-SHA-256$4096:" + b64(salt) + "$AAAA:" + key32, "app", "secret", false, true},
+		{"scram short server key", "SCRAM-SHA-256$4096:" + b64(salt) + "$" + b64(key) + ":AAAA", "app", "secret", false, true},
+		{"scram missing server key", "SCRAM-SHA-256$4096:" + b64(salt) + "$" + b64(key), "app", "secret", false, true},
 		{"md5 match", PostgresMD5("app", "secret"), "app", "secret", true, false},
 		{"md5 other user", PostgresMD5("app", "secret"), "bob", "secret", false, false},
 		{"no password", "", "app", "secret", false, false},
+		{"no password empty declared", "", "app", "", true, false},
 		{"unknown", "plain", "app", "secret", false, true},
 	}
 	for _, tt := range tests {
@@ -94,6 +118,37 @@ func TestMatchPostgres(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func mustHex(t *testing.T, s string) string {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestPostgresVerifierKind(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, verifier string
+		want           VerifierKind
+	}{
+		{"null", "", VerifierNone},
+		{"md5", PostgresMD5("app", "secret"), VerifierMD5},
+		{"md5 wrong length", "md5abc", VerifierUnknown},
+		{"scram", "SCRAM-SHA-256$4096:c2FsdA==$a:b", VerifierSCRAM},
+		{"plain", "secret", VerifierUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := PostgresVerifierKind(tt.verifier); got != tt.want {
+				t.Errorf("PostgresVerifierKind() = %q, want %q", got, tt.want)
 			}
 		})
 	}

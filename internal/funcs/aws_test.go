@@ -1,6 +1,7 @@
 package funcs
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,7 +9,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/sivchari/kumo"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -48,6 +51,8 @@ func TestAWS(t *testing.T) {
 		{"secret missing key", `aws_secretsmanager("db/admin", "nope")`, cty.NilVal, `key "nope" not found`},
 		{"secret not json", `aws_secretsmanager("plain", "k")`, cty.NilVal, "not a JSON object"},
 		{"secret missing", `aws_secretsmanager("missing")`, cty.NilVal, `get secret "missing"`},
+		{"secret binary utf-8", `aws_secretsmanager("bin/text")`, cty.StringVal("hunter2"), ""},
+		{"secret binary not utf-8", `aws_secretsmanager("bin/raw")`, cty.NilVal, `secret "bin/raw" is not valid UTF-8`},
 		{"tfstate s3 attribute", `tfstate("s3://tfstate/prod/terraform.tfstate", "aws_db_instance.main.address")`, cty.StringVal("main.rds.amazonaws.com"), ""},
 		{"tfstate s3 output", `tfstate("s3://tfstate/prod/terraform.tfstate", "output.db_host")`, cty.StringVal("db.internal"), ""},
 		{"tfstate s3 missing object", `tfstate("s3://tfstate/none.tfstate", "output.db_host")`, cty.NilVal, "failed to read tfstate"},
@@ -101,8 +106,27 @@ func putSecret(t *testing.T, endpoint, name, value string, create bool) {
 	var err error
 	if create {
 		_, err = c.CreateSecret(t.Context(), &secretsmanager.CreateSecretInput{Name: aws.String(name), SecretString: aws.String(value)})
-	} else {
+		// The emulator keeps state for the whole process, so with -count>1
+		// the secret may already exist from an earlier run.
+		if _, exists := errors.AsType[*smtypes.ResourceExistsException](err); exists {
+			err = nil
+			create = false
+		}
+	}
+	if !create {
 		_, err = c.PutSecretValue(t.Context(), &secretsmanager.PutSecretValueInput{SecretId: aws.String(name), SecretString: aws.String(value)})
+	}
+	if err != nil {
+		t.Fatalf("put secret %s: %v", name, err)
+	}
+}
+
+func putSecretBinary(t *testing.T, endpoint, name string, value []byte) {
+	t.Helper()
+	c := secretsmanager.NewFromConfig(awsConfig(endpoint))
+	_, err := c.CreateSecret(t.Context(), &secretsmanager.CreateSecretInput{Name: aws.String(name), SecretBinary: value})
+	if _, exists := errors.AsType[*smtypes.ResourceExistsException](err); exists {
+		_, err = c.PutSecretValue(t.Context(), &secretsmanager.PutSecretValueInput{SecretId: aws.String(name), SecretBinary: value})
 	}
 	if err != nil {
 		t.Fatalf("put secret %s: %v", name, err)
@@ -114,9 +138,11 @@ func seed(t *testing.T, endpoint string) {
 	putSecret(t, endpoint, "plain", "hunter2", true)
 	putSecret(t, endpoint, "db/admin", `{"username":"admin","password":"p@ss","port":5432}`, true)
 	putSecret(t, endpoint, "rotating", "v1", true)
+	putSecretBinary(t, endpoint, "bin/text", []byte("hunter2"))
+	putSecretBinary(t, endpoint, "bin/raw", []byte{0xff, 0xfe})
 
 	c := s3.NewFromConfig(awsConfig(endpoint), func(o *s3.Options) { o.UsePathStyle = true })
-	if _, err := c.CreateBucket(t.Context(), &s3.CreateBucketInput{Bucket: aws.String("tfstate")}); err != nil {
+	if _, err := c.CreateBucket(t.Context(), &s3.CreateBucketInput{Bucket: aws.String("tfstate")}); err != nil && !bucketExists(err) {
 		t.Fatalf("create bucket: %v", err)
 	}
 	body, err := testdata.ReadFile("testdata/terraform.tfstate")
@@ -128,4 +154,12 @@ func seed(t *testing.T, endpoint string) {
 	}); err != nil {
 		t.Fatalf("put tfstate: %v", err)
 	}
+}
+
+func bucketExists(err error) bool {
+	if _, ok := errors.AsType[*s3types.BucketAlreadyOwnedByYou](err); ok {
+		return true
+	}
+	_, ok := errors.AsType[*s3types.BucketAlreadyExists](err)
+	return ok
 }

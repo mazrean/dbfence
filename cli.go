@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 
 	"github.com/alecthomas/kong"
 	"github.com/mazrean/dbfence/internal/app"
@@ -27,8 +29,23 @@ type cli struct {
 	Version  kong.VersionFlag `help:"Print the version and exit."`
 }
 
+const defaultFile = "dbfence.hcl"
+
 type configFlags struct {
 	File string `short:"f" default:"dbfence.hcl" env:"DBFENCE_FILE" help:"Configuration file or directory of *.hcl files."`
+}
+
+// path returns the configuration path. An empty -f or DBFENCE_FILE falls
+// back to the default, and a missing path is reported with a hint.
+func (f configFlags) path() (string, error) {
+	p := f.File
+	if p == "" {
+		p = defaultFile
+	}
+	if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("configuration %q not found (set -f/--file or DBFENCE_FILE): %w", p, fs.ErrNotExist)
+	}
+	return p, nil
 }
 
 type diffFlags struct {
@@ -37,18 +54,26 @@ type diffFlags struct {
 	ShowSecrets   bool `help:"Print passwords in SQL output instead of '<redacted>'."`
 }
 
-func (f diffFlags) options(file string) app.Options {
-	return app.Options{Path: file, Prune: f.Prune, ForcePassword: f.ForcePassword, ShowSecrets: f.ShowSecrets}
+func (f diffFlags) options(file configFlags) (app.Options, error) {
+	p, err := file.path()
+	if err != nil {
+		return app.Options{}, err
+	}
+	return app.Options{Path: p, Prune: f.Prune, ForcePassword: f.ForcePassword, ShowSecrets: f.ShowSecrets}, nil
 }
 
 type planCmd struct {
 	configFlags
 	diffFlags
-	DetailedExitcode bool `help:"Exit with 2 when there are changes."`
+	DetailedExitcode bool `help:"Exit with 2 when there are changes. Warnings alone (unmanaged objects without --prune, passwords not compared) exit with 0."`
 }
 
 func (c *planCmd) Run(ctx context.Context, a *app.App) error {
-	p, err := a.Plan(ctx, c.options(c.File))
+	o, err := c.options(c.configFlags)
+	if err != nil {
+		return err
+	}
+	p, err := a.Plan(ctx, o)
 	if err != nil {
 		return err
 	}
@@ -65,7 +90,10 @@ type applyCmd struct {
 }
 
 func (c *applyCmd) Run(ctx context.Context, a *app.App) error {
-	o := c.options(c.File)
+	o, err := c.options(c.configFlags)
+	if err != nil {
+		return err
+	}
 	o.AutoApprove = c.AutoApprove
 	return a.Apply(ctx, o)
 }
@@ -75,7 +103,11 @@ type validateCmd struct {
 }
 
 func (c *validateCmd) Run(ctx context.Context, a *app.App) error {
-	return a.Validate(ctx, app.Options{Path: c.File})
+	p, err := c.path()
+	if err != nil {
+		return err
+	}
+	return a.Validate(ctx, app.Options{Path: p})
 }
 
 // run parses args and executes the selected command.
@@ -85,7 +117,7 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Write
 	parser, err := kong.New(&c,
 		kong.Name("dbfence"),
 		kong.Description("Declarative management of databases, roles, schemas and privileges for MySQL and PostgreSQL."),
-		kong.UsageOnError(),
+		kong.ShortUsageOnError(),
 		kong.Vars{"version": getVersion()},
 		kong.Writers(stdout, stderr),
 		kong.Exit(func(code int) { exitCode = code }),
@@ -93,7 +125,7 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Write
 		kong.Bind(a),
 	)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "dbfence: error: %v\n", err)
 		return exitError
 	}
 	kctx, err := parser.Parse(args)
@@ -102,11 +134,11 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Write
 		return exitCode
 	}
 	if err != nil {
-		parser.Errorf("%v", err)
-		if exitCode < 0 {
-			exitCode = exitError
-		}
-		return exitCode
+		// Print the usage hint with the error on stderr; stdout may be
+		// redirected to a plan file.
+		parser.Stdout = stderr
+		parser.FatalIfErrorf(err)
+		return exitError
 	}
 	switch err := kctx.Run(); {
 	case err == nil:
@@ -114,7 +146,9 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Write
 	case errors.Is(err, errChanges):
 		return exitChanges
 	default:
-		_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
+		// Written directly: kong's Errorf indents every line after the
+		// first, which garbles multi-line HCL diagnostics.
+		_, _ = fmt.Fprintf(stderr, "dbfence: error: %v\n", err)
 		return exitError
 	}
 }

@@ -3,7 +3,11 @@
 package model
 
 import (
+	"cmp"
+	"fmt"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -21,11 +25,54 @@ type RoleID struct {
 	Host string
 }
 
+// PublicRole is PostgreSQL's PUBLIC pseudo-role, which every role is
+// implicitly a member of. Its name is reserved by PostgreSQL, so no real
+// role can collide with it.
+var PublicRole = RoleID{Name: "public"}
+
+// IsPublic reports whether id is the PUBLIC pseudo-role.
+func (id RoleID) IsPublic() bool { return id == PublicRole }
+
 func (id RoleID) String() string {
+	if id.IsPublic() {
+		return "PUBLIC"
+	}
 	if id.Host == "" {
 		return id.Name
 	}
 	return id.Name + "@" + id.Host
+}
+
+// Format implements fmt.Formatter. %q quotes the name and the host
+// separately ("name"@"host") so that names containing '@' stay
+// unambiguous; other verbs, and PUBLIC, print String.
+func (id RoleID) Format(f fmt.State, verb rune) {
+	if verb != 'q' || id.IsPublic() {
+		_, _ = f.Write([]byte(id.String()))
+		return
+	}
+	s := strconv.Quote(id.Name)
+	if id.Host != "" {
+		s += "@" + strconv.Quote(id.Host)
+	}
+	_, _ = f.Write([]byte(s))
+}
+
+// Account is a RoleID shown as a MySQL account: the host is always
+// printed, so that an account with an empty host ("name"@"") is not
+// mistaken for a PostgreSQL role.
+type Account RoleID
+
+func (a Account) String() string { return a.Name + "@" + a.Host }
+
+// Format implements fmt.Formatter. %q prints "name"@"host"; other verbs
+// print String.
+func (a Account) Format(f fmt.State, verb rune) {
+	s := a.String()
+	if verb == 'q' {
+		s = strconv.Quote(a.Name) + "@" + strconv.Quote(a.Host)
+	}
+	_, _ = f.Write([]byte(s))
 }
 
 // Database is a database (MySQL: schema).
@@ -59,8 +106,28 @@ type Role struct {
 	ID RoleID
 	// AuthPlugin is MySQL only.
 	AuthPlugin string
+	// MemberOptions holds the managed options of memberships in MemberOf.
+	// A membership without an entry has no managed options.
+	MemberOptions map[RoleID]MembershipOptions
 	// MemberOf is nil when membership is not managed.
 	MemberOf []RoleID
+}
+
+// MembershipOptions are the options of a membership. Nil fields are not
+// managed. Inherit and Set are PostgreSQL 16+ only.
+type MembershipOptions struct {
+	Admin   *bool
+	Inherit *bool
+	Set     *bool
+}
+
+// MembershipState is the observed state of a membership. When a membership
+// was granted more than once (by several grantors on PostgreSQL 16+), an
+// option is true if any of the grants carries it.
+type MembershipState struct {
+	Admin   bool
+	Inherit bool
+	Set     bool
 }
 
 // RoleState is the observed state of a role.
@@ -69,8 +136,12 @@ type RoleState struct {
 	AuthPlugin string
 	// PasswordHash is the stored verifier. PasswordReadable is false
 	// when the connected user cannot read verifiers.
-	PasswordHash     []byte
-	MemberOf         []RoleID
+	PasswordHash []byte
+	MemberOf     []RoleID
+	// MemberOptions is the state of each membership in MemberOf.
+	MemberOptions map[RoleID]MembershipState
+	// DefaultRoles are the roles activated at login (MySQL only).
+	DefaultRoles     []RoleID
 	ConnectionLimit  int
 	CreateDB         bool
 	Replication      bool
@@ -83,6 +154,8 @@ type RoleState struct {
 	// AttributesUnknown is set when the account exists but its login,
 	// authentication plugin and password could not be read.
 	AttributesUnknown bool
+	// DefaultRolesUnknown is set when DefaultRoles could not be read.
+	DefaultRolesUnknown bool
 }
 
 // Schema is a PostgreSQL schema inside Database.
@@ -105,11 +178,25 @@ type Object struct {
 	Type     ObjectType
 	Database string
 	Schema   string
+	// Pattern is a raw MySQL grant target with LIKE wildcards rather than
+	// a literal database name. A declared pattern (grant database_pattern)
+	// has an empty Database; an undeclared inspected one has Database set
+	// to the pattern with escapes removed.
+	Pattern string
+}
+
+// IsDeclaredPattern reports whether o is a database pattern declared with
+// database_pattern (or the inspected grant matching one).
+func (o Object) IsDeclaredPattern() bool {
+	return o.Pattern != "" && o.Database == ""
 }
 
 func (o Object) String() string {
-	if o.Type == ObjectSchema {
+	switch {
+	case o.Type == ObjectSchema:
 		return o.Database + "." + o.Schema
+	case o.IsDeclaredPattern():
+		return o.Pattern
 	}
 	return o.Database
 }
@@ -135,11 +222,25 @@ type PrivilegeKey struct {
 }
 
 // Ignore lists regular expressions of unmanaged objects that must not
-// be reported or pruned.
+// be reported or pruned. Patterns match the whole name (see
+// CompileIgnorePattern). Role patterns match the name or, for a MySQL
+// account, "name@host"; schema patterns match the schema name or
+// "<database>.<schema>".
 type Ignore struct {
 	Roles     []string
 	Databases []string
 	Schemas   []string
+}
+
+// CompileIgnorePattern compiles an ignore pattern anchored to match the
+// whole name. Config validation and diff both use it, so a pattern that
+// validates is matched exactly as written.
+func CompileIgnorePattern(p string) (*regexp.Regexp, error) {
+	re, err := regexp.Compile("^(?:" + p + ")$")
+	if err != nil {
+		return nil, fmt.Errorf("compile ignore pattern: %w", err)
+	}
+	return re, nil
 }
 
 // Unreadable records facets of the current state that the connected
@@ -163,7 +264,10 @@ type Desired struct {
 	Roles      []Role
 	Schemas    []Schema
 	Privileges []Privilege
-	Ignore     Ignore
+	// PublicObjects lists the objects on which privileges of PUBLIC are
+	// managed (PostgreSQL only): those with at least one PUBLIC grant.
+	PublicObjects []Object
+	Ignore        Ignore
 }
 
 // Current is the state observed in the live server.
@@ -177,6 +281,11 @@ type Current struct {
 	Privileges []Privilege
 	// InspectedDatabases lists databases whose schemas were inspected.
 	InspectedDatabases []string
+	// CurrentDatabase is the database dbfence is connected to
+	// (PostgreSQL only). It is never pruned.
+	CurrentDatabase string
+	// Warnings are inspection notes that diff adds to the plan.
+	Warnings []string
 	// Unreadable lists what could not be inspected.
 	Unreadable Unreadable
 }
@@ -186,10 +295,13 @@ func NormalizePrivilege(p string) string {
 	return strings.Join(strings.Fields(strings.ToUpper(p)), " ")
 }
 
+// CompareRoleIDs orders role IDs by name, then host.
+func CompareRoleIDs(a, b RoleID) int {
+	return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.Host, b.Host))
+}
+
 // SortRoleIDs sorts ids in place and returns them.
 func SortRoleIDs(ids []RoleID) []RoleID {
-	slices.SortFunc(ids, func(a, b RoleID) int {
-		return strings.Compare(a.String(), b.String())
-	})
+	slices.SortFunc(ids, CompareRoleIDs)
 	return ids
 }

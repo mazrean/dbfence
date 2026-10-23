@@ -16,8 +16,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"golang.org/x/text/secure/precis"
 )
 
 // ErrUnsupported is returned when the verifier format is unknown.
@@ -27,6 +25,9 @@ var ErrUnsupported = errors.New("unsupported password verifier")
 const (
 	PluginNative       = "mysql_native_password"
 	PluginCachingSHA2  = "caching_sha2_password"
+	PluginSHA256       = "sha256_password"
+	sha256Prefix       = "$5$"
+	sha256Rounds       = 5000
 	cachingSHA2Prefix  = "$A$"
 	cachingSHA2SaltLen = 20
 	sha256CryptDigest  = 43
@@ -48,6 +49,11 @@ func MatchMySQL(plugin string, authString []byte, password string) (bool, error)
 			return password == "", nil
 		}
 		return matchCachingSHA2(authString, password)
+	case PluginSHA256:
+		if len(authString) == 0 {
+			return password == "", nil
+		}
+		return matchSHA256(authString, password)
 	default:
 		return false, fmt.Errorf("%w: mysql plugin %q", ErrUnsupported, plugin)
 	}
@@ -75,6 +81,19 @@ func matchCachingSHA2(authString []byte, password string) (bool, error) {
 	digest := authString[header+cachingSHA2SaltLen:]
 	got := SHA256Crypt([]byte(password), salt, int(iter)*cachingSHA2RoundsUnit)
 	return subtle.ConstantTimeCompare(got, digest) == 1, nil
+}
+
+// matchSHA256 checks sha256_password's "$5$<20 byte salt>$<43 byte digest>"
+// (SHA256Crypt with the default 5000 rounds).
+func matchSHA256(authString []byte, password string) (bool, error) {
+	const header = len(sha256Prefix) + cachingSHA2SaltLen
+	if len(authString) != header+1+sha256CryptDigest ||
+		!bytes.HasPrefix(authString, []byte(sha256Prefix)) || authString[header] != '$' {
+		return false, fmt.Errorf("%w: malformed sha256_password string", ErrUnsupported)
+	}
+	salt := authString[len(sha256Prefix):header]
+	got := SHA256Crypt([]byte(password), salt, sha256Rounds)
+	return subtle.ConstantTimeCompare(got, authString[header+1:]) == 1, nil
 }
 
 // SHA256Crypt implements the SHA-256 based crypt by Ulrich Drepper
@@ -175,19 +194,50 @@ func repeat(seq []byte, n int) []byte {
 	return out
 }
 
+// VerifierKind is the hashing scheme of a PostgreSQL rolpassword. The md5
+// and SCRAM values equal the matching password_encryption setting.
+type VerifierKind string
+
+// PostgreSQL verifier kinds.
+const (
+	VerifierNone    VerifierKind = ""
+	VerifierMD5     VerifierKind = "md5"
+	VerifierSCRAM   VerifierKind = "scram-sha-256"
+	VerifierUnknown VerifierKind = "unknown"
+)
+
+// PostgresVerifierKind classifies a rolpassword value, e.g. to detect an
+// md5 verifier that should be re-hashed under password_encryption =
+// scram-sha-256.
+func PostgresVerifierKind(verifier string) VerifierKind {
+	switch {
+	case verifier == "":
+		return VerifierNone
+	case strings.HasPrefix(verifier, "SCRAM-SHA-256$"):
+		return VerifierSCRAM
+	case strings.HasPrefix(verifier, "md5") && len(verifier) == 35:
+		return VerifierMD5
+	default:
+		return VerifierUnknown
+	}
+}
+
 // MatchPostgres reports whether password matches the rolpassword
 // verifier of role user.
 func MatchPostgres(verifier, user, password string) (bool, error) {
-	switch {
-	case verifier == "":
-		return false, nil
-	case strings.HasPrefix(verifier, "SCRAM-SHA-256$"):
+	switch PostgresVerifierKind(verifier) {
+	case VerifierNone:
+		// No stored password (NULL rolpassword). PostgreSQL stores an
+		// empty password this way, so only "" matches.
+		return password == "", nil
+	case VerifierSCRAM:
 		return matchSCRAM(verifier, password)
-	case strings.HasPrefix(verifier, "md5") && len(verifier) == 35:
+	case VerifierMD5:
 		return subtle.ConstantTimeCompare([]byte(verifier), []byte(PostgresMD5(user, password))) == 1, nil
-	default:
-		return false, fmt.Errorf("%w: postgres verifier", ErrUnsupported)
+	case VerifierUnknown:
+		// Reported as unsupported below.
 	}
+	return false, fmt.Errorf("%w: postgres verifier", ErrUnsupported)
 }
 
 // PostgresMD5 returns the legacy md5 verifier.
@@ -195,6 +245,10 @@ func PostgresMD5(user, password string) string {
 	sum := md5.Sum([]byte(password + user)) //nolint:gosec // protocol defined.
 	return "md5" + hex.EncodeToString(sum[:])
 }
+
+// maxSCRAMIterations bounds the PBKDF2 work a stored verifier can demand
+// from plan; PostgreSQL's default is 4096.
+const maxSCRAMIterations = 10_000_000
 
 // matchSCRAM checks "SCRAM-SHA-256$<iter>:<salt>$<StoredKey>:<ServerKey>".
 func matchSCRAM(verifier, password string) (bool, error) {
@@ -204,20 +258,27 @@ func matchSCRAM(verifier, password string) (bool, error) {
 		return false, malformed
 	}
 	iterStr, saltStr, ok1 := strings.Cut(params, ":")
-	storedStr, _, ok2 := strings.Cut(keys, ":")
+	storedStr, serverStr, ok2 := strings.Cut(keys, ":")
 	if !ok1 || !ok2 {
 		return false, malformed
 	}
 	iter, err := strconv.Atoi(iterStr)
-	if err != nil {
+	if err != nil || iter < 1 {
 		return false, malformed
 	}
+	if iter > maxSCRAMIterations {
+		return false, fmt.Errorf("%w: SCRAM iteration count above %d", ErrUnsupported, maxSCRAMIterations)
+	}
 	salt, err := base64.StdEncoding.DecodeString(saltStr)
-	if err != nil {
+	if err != nil || len(salt) == 0 {
 		return false, malformed
 	}
 	storedKey, err := base64.StdEncoding.DecodeString(storedStr)
-	if err != nil {
+	if err != nil || len(storedKey) != sha256.Size {
+		return false, malformed
+	}
+	serverKey, err := base64.StdEncoding.DecodeString(serverStr)
+	if err != nil || len(serverKey) != sha256.Size {
 		return false, malformed
 	}
 	got, err := SCRAMStoredKey(password, salt, iter)
@@ -237,12 +298,4 @@ func SCRAMStoredKey(password string, salt []byte, iter int) ([]byte, error) {
 	mac.Write([]byte("Client Key"))
 	stored := sha256.Sum256(mac.Sum(nil))
 	return stored[:], nil
-}
-
-// saslPrep normalizes like PostgreSQL: on failure the raw password is used.
-func saslPrep(password string) string {
-	if p, err := precis.OpaqueString.String(password); err == nil {
-		return p
-	}
-	return password
 }

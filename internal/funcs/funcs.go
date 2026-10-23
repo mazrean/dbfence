@@ -7,9 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
@@ -101,16 +106,52 @@ func onceClient[T any](f func(context.Context) (T, error)) func(context.Context)
 	}
 }
 
-// Functions returns the function table including the cty stdlib.
+// Functions returns the function table including the cty stdlib. Results
+// of the secret sources (secretenv and the secret stores) are marked
+// Sensitive, and no function reports details of an error about a
+// Sensitive argument. env is not a secret source.
 func (r *Registry) Functions() map[string]function.Function {
 	fns := map[string]function.Function{
-		"env":                r.envFunc(),
-		"aws_secretsmanager": r.awsFunc(),
-		"gcp_secretmanager":  r.gcpFunc(),
-		"tfstate":            r.tfstateFunc(),
+		"env":                r.envFunc("env", "Returns the value of an environment variable, or the default when unset."),
+		"secretenv":          markSensitive(r.envFunc("secretenv", "Returns the value of an environment variable that holds a secret, or the default when unset.")),
+		"aws_secretsmanager": markSensitive(r.awsFunc()),
+		"gcp_secretmanager":  markSensitive(r.gcpFunc()),
+		"tfstate":            markSensitive(r.tfstateFunc()),
 	}
 	maps.Copy(fns, stdlibFunctions())
-	return fns
+	return guardAll(fns)
+}
+
+// ResolvePathsFrom returns fns with tfstate resolving a relative local
+// path against dir (the configuration directory) instead of the working
+// directory. URLs and absolute paths are left alone.
+func ResolvePathsFrom(fns map[string]function.Function, dir string) map[string]function.Function {
+	fn, ok := fns["tfstate"]
+	if !ok {
+		return fns
+	}
+	out := maps.Clone(fns)
+	out["tfstate"] = function.New(&function.Spec{
+		Description: fn.Description(),
+		Params:      fn.Params(),
+		VarParam:    fn.VarParam(),
+		Type:        fn.ReturnTypeForValues,
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			args = slices.Clone(args)
+			// fn is guarded, so args may be marked.
+			v, marks := args[0].Unmark()
+			loc := v.AsString()
+			if u, err := url.Parse(loc); err == nil && u.Scheme == "" && !filepath.IsAbs(loc) {
+				abs, err := filepath.Abs(filepath.Join(dir, loc))
+				if err != nil {
+					return cty.NilVal, function.NewArgError(0, fmt.Errorf("resolve %q: %w", loc, err))
+				}
+				args[0] = cty.StringVal(abs).WithMarks(marks)
+			}
+			return fn.Call(args)
+		},
+	})
+	return out
 }
 
 func stdlibFunctions() map[string]function.Function {
@@ -146,6 +187,7 @@ func stdlibFunctions() map[string]function.Function {
 		"tostring":     stdlib.MakeToFunc(cty.String),
 		"trimspace":    stdlib.TrimSpaceFunc,
 		"upper":        stdlib.UpperFunc,
+		"urlencode":    urlencodeFunc,
 		"values":       stdlib.ValuesFunc,
 	}
 }
@@ -175,15 +217,15 @@ func optionalString(args []cty.Value) (string, bool) {
 	return args[0].AsString(), true
 }
 
-func (r *Registry) envFunc() function.Function {
+func (r *Registry) envFunc(fnName, description string) function.Function {
 	return function.New(&function.Spec{
-		Description: "Returns the value of an environment variable, or the default when unset.",
+		Description: description,
 		Params:      []function.Parameter{{Name: "name", Type: cty.String}},
 		VarParam:    &function.Parameter{Name: "default", Type: cty.String, AllowNull: true},
 		Type:        function.StaticReturnType(cty.String),
 		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
 			if len(args) > maxArgs {
-				return cty.NilVal, function.NewArgErrorf(maxArgs, "env accepts at most one default")
+				return cty.NilVal, function.NewArgErrorf(maxArgs, "%s accepts at most one default", fnName)
 			}
 			name := args[0].AsString()
 			if v, ok := r.lookup(name); ok {
@@ -217,37 +259,48 @@ func (r *Registry) awsFunc() function.Function {
 				if err != nil {
 					return cty.NilVal, fmt.Errorf("get secret %q: %w", id, err)
 				}
+				if !utf8.ValidString(s) {
+					return cty.NilVal, fmt.Errorf("secret %q is not valid UTF-8", id)
+				}
 				return cty.StringVal(s), nil
 			})
 			if err != nil {
 				return cty.NilVal, err
 			}
 			if key, ok := optionalString(args[1:]); ok {
-				return jsonKey(v.AsString(), key)
+				return jsonKey(id, v.AsString(), key)
 			}
 			return v, nil
 		},
 	})
 }
 
-func jsonKey(doc, key string) (cty.Value, error) {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(doc), &m); err != nil {
-		return cty.NilVal, fmt.Errorf("secret is not a JSON object: %w", err)
+// jsonKey extracts key from the JSON object doc. Strings are returned
+// as is; numbers and booleans as their exact JSON text. Errors never
+// quote doc, which holds secret material.
+func jsonKey(id, doc, key string) (cty.Value, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(doc), &m); err != nil || m == nil {
+		return cty.NilVal, fmt.Errorf("secret %q is not a JSON object", id)
 	}
-	v, ok := m[key]
+	raw, ok := m[key]
 	if !ok {
-		return cty.NilVal, fmt.Errorf("key %q not found in secret", key)
+		return cty.NilVal, fmt.Errorf("key %q not found in secret %q", key, id)
 	}
-	switch v := v.(type) {
-	case string:
-		return cty.StringVal(v), nil
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return cty.NilVal, err
+	text := strings.TrimSpace(string(raw))
+	switch {
+	case text == "null":
+		return cty.NilVal, fmt.Errorf("key %q in secret %q is null", key, id)
+	case strings.HasPrefix(text, `"`):
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return cty.NilVal, fmt.Errorf("key %q in secret %q is not a valid JSON string", key, id)
 		}
-		return cty.StringVal(string(b)), nil
+		return cty.StringVal(v), nil
+	case strings.HasPrefix(text, "{"), strings.HasPrefix(text, "["):
+		return cty.NilVal, fmt.Errorf("key %q in secret %q is an object or array, not a string; use jsondecode(aws_secretsmanager(%q)) instead", key, id, id)
+	default: // number, true or false: keep the exact text, e.g. no float rounding.
+		return cty.StringVal(text), nil
 	}
 }
 
@@ -263,7 +316,7 @@ func (r *Registry) gcpFunc() function.Function {
 			}
 			name, err := gcpVersionName(args[0].AsString(), args[1:])
 			if err != nil {
-				return cty.NilVal, function.NewArgError(0, err)
+				return cty.NilVal, err
 			}
 			return r.cached("gcp\x00"+name, func() (cty.Value, error) {
 				c, err := r.gcp(r.ctx)
@@ -274,25 +327,44 @@ func (r *Registry) gcpFunc() function.Function {
 				if err != nil {
 					return cty.NilVal, fmt.Errorf("access secret %q: %w", name, err)
 				}
+				if !utf8.ValidString(s) {
+					return cty.NilVal, fmt.Errorf("secret %q is not valid UTF-8", name)
+				}
 				return cty.StringVal(s), nil
 			})
 		},
 	})
 }
 
+var (
+	gcpSecretName  = regexp.MustCompile(`^projects/[^/]+/secrets/[^/]+(/versions/[^/]+)?$`)
+	gcpVersionPart = regexp.MustCompile(`^[^/]+$`)
+)
+
+// gcpVersionName returns the version resource name, or a function.ArgError
+// pointing at the offending argument.
 func gcpVersionName(name string, rest []cty.Value) (string, error) {
-	if !strings.HasPrefix(name, "projects/") || !strings.Contains(name, "/secrets/") {
-		return "", fmt.Errorf("name must look like projects/<project>/secrets/<secret>, got %q", name)
+	// Classify by segment: the project ID itself may be "locations" or
+	// "versions".
+	if seg := strings.Split(name, "/"); len(seg) > 2 && seg[0] == "projects" && seg[2] == "locations" {
+		return "", function.NewArgErrorf(0, "regional secrets (projects/<project>/locations/<location>/...) are not supported, got %q", name)
+	}
+	m := gcpSecretName.FindStringSubmatch(name)
+	if m == nil {
+		return "", function.NewArgErrorf(0, "name must look like projects/<project>/secrets/<secret>[/versions/<version>], got %q", name)
 	}
 	version, hasVersion := optionalString(rest)
-	if strings.Contains(name, "/versions/") {
+	if m[1] != "" {
 		if hasVersion {
-			return "", fmt.Errorf("version given twice in %q", name)
+			return "", function.NewArgErrorf(0, "version given twice in %q", name)
 		}
 		return name, nil
 	}
 	if !hasVersion {
-		version = "latest"
+		return name + "/versions/latest", nil
+	}
+	if !gcpVersionPart.MatchString(version) {
+		return "", function.NewArgErrorf(1, "version must be a non-empty version number or alias without \"/\", got %q", version)
 	}
 	return name + "/versions/" + version, nil
 }

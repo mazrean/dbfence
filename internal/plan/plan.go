@@ -5,6 +5,7 @@ package plan
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -53,21 +54,12 @@ func (s Statement) render(showSecrets bool) string {
 	return sb.String()
 }
 
-// Redact replaces every secret of s found in text, so that server error
-// messages quoting the statement do not leak them.
-func (s Statement) Redact(text string) string {
-	for _, p := range s.parts {
-		sec, ok := p.(Secret)
-		if !ok || sec == "" {
-			continue
-		}
-		text = strings.ReplaceAll(text, string(sec), "'<redacted>'")
-		// Also cover the value without its surrounding quotes.
-		if inner := strings.Trim(string(sec), "'"); inner != "" {
-			text = strings.ReplaceAll(text, inner, "<redacted>")
-		}
-	}
-	return text
+// HasSecret reports whether s contains a Secret fragment.
+func (s Statement) HasSecret() bool {
+	return slices.ContainsFunc(s.parts, func(p any) bool {
+		_, ok := p.(Secret)
+		return ok
+	})
 }
 
 // Action is the kind of a change.
@@ -115,8 +107,15 @@ func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 	if len(p.Warnings) > 0 {
 		sb.WriteString("\n")
 	}
-	if p.Empty() {
+	switch {
+	case !p.Empty():
+	case len(p.Warnings) == 0:
 		sb.WriteString("-- No changes. The server matches the configuration.\n")
+	default:
+		// Warnings report drift that is not changed, or attributes that
+		// were not compared, so the server is not known to match.
+		fmt.Fprintf(&sb, "-- No changes to apply. See the %s above for differences that are not changed and items that were not compared.\n",
+			Count(len(p.Warnings), "warning"))
 	}
 	for _, c := range p.Changes {
 		fmt.Fprintf(&sb, "-- [%s] %s\n", c.Action, c.Resource)
@@ -129,6 +128,52 @@ func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 		}
 		sb.WriteString("\n")
 	}
+	if !p.Empty() {
+		p.summary(&sb)
+	}
 	_, err := io.WriteString(w, sb.String())
 	return err
+}
+
+// summary writes the number of changes per action and lists the drops.
+func (p *Plan) summary(sb *strings.Builder) {
+	counts := map[Action]int{}
+	var drops []string
+	for _, c := range p.Changes {
+		counts[c.Action]++
+		if c.Action == ActionDrop {
+			drops = append(drops, c.Resource)
+		}
+	}
+	parts := []string{fmt.Sprintf("%d to create", counts[ActionCreate]), fmt.Sprintf("%d to change", counts[ActionUpdate])}
+	if n := counts[ActionGrant]; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d to grant", n))
+	}
+	if n := counts[ActionRevoke]; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d to revoke", n))
+	}
+	parts = append(parts, fmt.Sprintf("%d to drop", counts[ActionDrop]))
+	fmt.Fprintf(sb, "-- Plan: %s (%s).\n", strings.Join(parts, ", "), Count(len(p.Statements()), "statement"))
+	if len(drops) > 0 {
+		fmt.Fprintf(sb, "-- DESTRUCTIVE: this plan drops %s: %s\n", Count(len(drops), "object"), strings.Join(drops, ", "))
+	}
+}
+
+// WriteWarnings writes one "warning:" line per warning, for stderr.
+func (p *Plan) WriteWarnings(w io.Writer) error {
+	var sb strings.Builder
+	for _, warn := range p.Warnings {
+		fmt.Fprintf(&sb, "warning: %s\n", warn)
+	}
+	_, err := io.WriteString(w, sb.String())
+	return err
+}
+
+// Count formats n with noun, adding "s" unless n is 1 ("1 statement",
+// "2 statements").
+func Count(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }

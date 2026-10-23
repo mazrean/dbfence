@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/driver/mysql"
 	"github.com/mazrean/dbfence/internal/driver/postgres"
@@ -38,7 +39,7 @@ func scram(t *testing.T, pw string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return []byte("SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(key) + ":x")
+	return []byte("SCRAM-SHA-256$4096:" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(key) + ":" + base64.StdEncoding.EncodeToString(make([]byte, 32)))
 }
 
 func pgDesired() *model.Desired {
@@ -53,8 +54,6 @@ func pgDesired() *model.Desired {
 		Privileges: []model.Privilege{
 			{Grantee: pgID("app"), Object: dbObj("app"), Name: "CONNECT"},
 			{Grantee: pgID("app"), Object: model.Object{Type: model.ObjectSchema, Database: "app", Schema: "api"}, Name: "USAGE"},
-			// Owner privileges are implicit and must be ignored.
-			{Grantee: pgID("owner"), Object: dbObj("app"), Name: "CREATE"},
 		},
 	}
 }
@@ -96,8 +95,8 @@ func TestComputeCreateAll(t *testing.T) {
 	want := []string{
 		`CREATE ROLE "owner" WITH NOLOGIN`,
 		`CREATE ROLE "app" WITH LOGIN PASSWORD '<redacted>'`,
-		`CREATE DATABASE "app" OWNER "owner"`,
 		`GRANT "owner" TO "app"`,
+		`CREATE DATABASE "app" OWNER "owner"`,
 		`app: CREATE SCHEMA "api" AUTHORIZATION "owner"`,
 		`GRANT CONNECT ON DATABASE "app" TO "app"`,
 		`app: GRANT USAGE ON SCHEMA "api" TO "app"`,
@@ -145,11 +144,13 @@ func TestComputeDrift(t *testing.T) {
 	}
 	want := []string{
 		`ALTER ROLE "app" WITH LOGIN CONNECTION LIMIT -1`,
-		`ALTER DATABASE "app" OWNER TO "owner"`,
 		`REVOKE "postgres" FROM "app"`,
+		`ALTER DATABASE "app" OWNER TO "owner"`,
 		`app: ALTER SCHEMA "api" OWNER TO "owner"`,
-		`REVOKE GRANT OPTION FOR CONNECT ON DATABASE "app" FROM "app"`,
-		`REVOKE TEMPORARY ON DATABASE "app" FROM "app"`,
+		// ALTER ... OWNER TO moves the ACL entries of the old owner "app"
+		// to "owner", so the declared privileges are granted again.
+		`GRANT CONNECT ON DATABASE "app" TO "app"`,
+		`app: GRANT USAGE ON SCHEMA "api" TO "app"`,
 	}
 	if d := cmp.Diff(want, statements(p)); d != "" {
 		t.Errorf("statements (-want +got):\n%s", d)
@@ -188,10 +189,10 @@ func TestComputeUnmanaged(t *testing.T) {
 	want := []string{
 		`app: DROP SCHEMA "junk"`,
 		`DROP DATABASE "legacy"`,
-		`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
-		`postgres: DROP OWNED BY "stray"`,
 		`app: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
 		`app: DROP OWNED BY "stray"`,
+		`postgres: REASSIGN OWNED BY "stray" TO CURRENT_USER`,
+		`postgres: DROP OWNED BY "stray"`,
 		`DROP ROLE "stray"`,
 	}
 	if d := cmp.Diff(want, statements(p)); d != "" {
@@ -284,9 +285,9 @@ func TestComputeMySQL(t *testing.T) {
 	want := []string{
 		`CREATE USER 'reader'@'%' ACCOUNT LOCK`,
 		`CREATE USER 'app'@'%' IDENTIFIED WITH caching_sha2_password BY '<redacted>'`,
-		"CREATE DATABASE `app` CHARACTER SET utf8mb4",
 		`GRANT 'reader'@'%' TO 'app'@'%'`,
-		`SET DEFAULT ROLE ALL TO 'app'@'%'`,
+		`SET DEFAULT ROLE 'reader'@'%' TO 'app'@'%'`,
+		"CREATE DATABASE `app` CHARACTER SET utf8mb4",
 		"GRANT INSERT, SELECT ON `app`.* TO 'app'@'%'",
 	}
 	if diff := cmp.Diff(want, statements(p)); diff != "" {
@@ -300,7 +301,7 @@ func TestComputeMySQL(t *testing.T) {
 	salt := "abcdefghij0123456789"
 	cur.Roles = append(cur.Roles,
 		model.RoleState{ID: reader},
-		model.RoleState{ID: app, Login: true, AuthPlugin: password.PluginCachingSHA2, MemberOf: []model.RoleID{reader}, PasswordReadable: true,
+		model.RoleState{ID: app, Login: true, AuthPlugin: password.PluginCachingSHA2, MemberOf: []model.RoleID{reader}, DefaultRoles: []model.RoleID{reader}, PasswordReadable: true,
 			PasswordHash: []byte("$A$005$" + salt + string(password.SHA256Crypt([]byte(`p'w\`), []byte(salt), 5000)))},
 	)
 	cur.Databases = append(cur.Databases, model.Database{Name: "app", Charset: "utf8mb4", Collation: "utf8mb4_0900_ai_ci"})
@@ -358,16 +359,16 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 			want: []string{
 				`CREATE USER 'reader'@'%' ACCOUNT LOCK`,
 				`GRANT 'reader'@'%' TO 'app'@'%'`,
-				`SET DEFAULT ROLE ALL TO 'app'@'%'`,
+				`SET DEFAULT ROLE 'reader'@'%' TO 'app'@'%'`,
 				"GRANT SELECT ON `app`.* TO 'app'@'%'",
 			},
-			wantWarns: []string{"cannot read login state", "cannot read role memberships", "cannot read privileges", `unmanaged role "stray@%"`},
+			wantWarns: []string{"cannot read login state", "cannot read role memberships", "cannot read privileges", `unmanaged role "stray"@"%"`},
 		},
 		{
 			name: "forced password with unknown credentials",
 			current: &model.Current{
 				CurrentUser: me,
-				Roles:       []model.RoleState{{ID: me, AttributesUnknown: true}, {ID: reader, AttributesUnknown: true}, {ID: app, AttributesUnknown: true, MemberOf: []model.RoleID{reader}}},
+				Roles:       []model.RoleState{{ID: me, AttributesUnknown: true}, {ID: reader, AttributesUnknown: true}, {ID: app, AttributesUnknown: true, MemberOf: []model.RoleID{reader}, DefaultRoles: []model.RoleID{reader}}},
 				Databases:   []model.Database{{Name: "app"}},
 				Privileges:  []model.Privilege{{Grantee: app, Object: dbObj("app"), Name: "SELECT"}},
 				Unreadable:  model.Unreadable{RoleAttributes: true},
@@ -389,7 +390,7 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 				`CREATE USER IF NOT EXISTS 'reader'@'%' ACCOUNT LOCK`,
 				`CREATE USER IF NOT EXISTS 'app'@'%' IDENTIFIED BY '<redacted>'`,
 				`GRANT 'reader'@'%' TO 'app'@'%'`,
-				`SET DEFAULT ROLE ALL TO 'app'@'%'`,
+				`SET DEFAULT ROLE 'reader'@'%' TO 'app'@'%'`,
 				"GRANT SELECT ON `app`.* TO 'app'@'%'",
 				"REVOKE DELETE ON `app`.* FROM 'app'@'%'",
 				"DROP DATABASE `legacy`",
@@ -414,6 +415,46 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 				if !slices.ContainsFunc(p.Warnings, func(got string) bool { return strings.Contains(got, w) }) {
 					t.Errorf("missing warning %q in %q", w, p.Warnings)
 				}
+			}
+		})
+	}
+}
+
+func TestComputeIgnoreSchemas(t *testing.T) {
+	t.Parallel()
+	pruneStaging := func(db string) string { return db + `: DROP SCHEMA "staging"` }
+	tests := []struct {
+		name     string
+		patterns []string
+		want     []string
+	}{
+		{"no pattern", nil, []string{pruneStaging("analytics"), pruneStaging("app")}},
+		{"bare name ignores every database", []string{"staging"}, nil},
+		{"qualified name ignores one database", []string{`analytics\.staging`}, []string{pruneStaging("app")}},
+		{"unescaped dot also matches the qualified name", []string{"app.staging"}, []string{pruneStaging("analytics")}},
+		{"database wildcard", []string{`a.*\.staging`}, nil},
+		{"anchored: database prefix alone does not match", []string{"app"}, []string{pruneStaging("analytics"), pruneStaging("app")}},
+		{"anchored: partial qualified name does not match", []string{`app\.stag`}, []string{pruneStaging("analytics"), pruneStaging("app")}},
+		{"anchored: no suffix match on the qualified name", []string{`pp\.staging`}, []string{pruneStaging("analytics"), pruneStaging("app")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cur := pgMatching(t)
+			cur.Databases = append(cur.Databases, model.Database{Name: "analytics", Owner: "owner"})
+			cur.Schemas = append(cur.Schemas,
+				model.Schema{Database: "app", Name: "staging", Owner: "owner"},
+				model.Schema{Database: "analytics", Name: "staging", Owner: "owner"})
+			d := pgDesired()
+			d.Databases = append(d.Databases, model.Database{Name: "analytics", Owner: "owner"})
+			d.Ignore.Schemas = tt.patterns
+
+			p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
 			}
 		})
 	}
