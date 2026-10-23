@@ -13,8 +13,11 @@
 // contain a Keyword, instantiations of generics defined outside
 // internal/plan with a type argument that contains a Keyword, and imports
 // of unsafe, reflect and encoding/gob (which decodes registered types into
-// interface fields such as plan.Fragment). Values carried only through an
-// interface are not tracked further.
+// interface fields such as plan.Fragment). Code the analyzer cannot read
+// is reported too: outside internal/plan, function declarations without a
+// Go body (implemented in assembly, which can return or store a Keyword)
+// and non-Go files compiled into the package (.s, .syso, C sources). Values
+// carried only through an interface are not tracked further.
 package sqlfragment
 
 import (
@@ -47,7 +50,7 @@ var Analyzer = &analysis.Analyzer{
 	Name: "sqlfragment",
 	Doc: "reports conversions of non-constant values to plan.Keyword or to types that contain it (SQL text must be a constant); " +
 		"outside internal/plan and test files, pointers to values that contain plan.Keyword, generic instantiations with such type " +
-		"arguments and imports of encoding/gob, reflect and unsafe; and uses of plan.QuotedIdent, plan.EscapedLiteral and plan.NewToken outside " +
+		"arguments, imports of encoding/gob, reflect and unsafe, function declarations without a Go body and non-Go files; and uses of plan.QuotedIdent, plan.EscapedLiteral and plan.NewToken outside " +
 		"internal/driver, internal/plan and test files",
 	Run: run,
 }
@@ -55,6 +58,9 @@ var Analyzer = &analysis.Analyzer{
 func run(pass *analysis.Pass) (any, error) {
 	inPlan := pass.Pkg.Path() == PlanPath
 	trusted := inPlan || strings.Contains(pass.Pkg.Path()+"/", "/internal/driver/")
+	if !inPlan {
+		checkOtherFiles(pass)
+	}
 	for _, f := range pass.Files {
 		test := strings.HasSuffix(filepath.ToSlash(pass.Fset.File(f.Pos()).Name()), "_test.go")
 		strict := !inPlan && !test
@@ -64,6 +70,10 @@ func run(pass *analysis.Pass) (any, error) {
 		convFuns := map[ast.Expr]bool{}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
+			case *ast.FuncDecl:
+				if strict && n.Body == nil {
+					pass.Reportf(n.Name.Pos(), "function %s has no Go body; code in assembly could fill plan.Keyword unseen, so write it in Go", n.Name.Name)
+				}
 			case *ast.CallExpr:
 				if checkConversion(pass, n) {
 					convFuns[ast.Unparen(n.Fun)] = true
@@ -103,6 +113,18 @@ func checkImports(pass *analysis.Pass, f *ast.File) {
 		if err == nil && slices.Contains(Forbidden, path) {
 			pass.Reportf(imp.Pos(), "package %s can build plan.Keyword from a runtime string; only internal/plan and tests may import it", path)
 		}
+	}
+}
+
+// checkOtherFiles reports the non-Go files compiled into the package
+// (assembly, object and C files), whose code could build a Keyword from a
+// runtime string without anything the analyzer sees.
+func checkOtherFiles(pass *analysis.Pass) {
+	for _, name := range pass.OtherFiles {
+		content, _ := pass.ReadFile(name) // the position only needs the line table
+		tf := pass.Fset.AddFile(name, -1, len(content))
+		tf.SetLinesForContent(content)
+		pass.Reportf(tf.LineStart(1), "non-Go file %s is compiled into the package; its code could fill plan.Keyword unseen, so write it in Go", filepath.Base(name))
 	}
 }
 
