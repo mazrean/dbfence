@@ -20,6 +20,7 @@ import (
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
+	"github.com/mazrean/dbfence/internal/secret"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 	"github.com/zclconf/go-cty/cty/function"
@@ -654,6 +655,10 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 	} else if l := blk.ConnectionLimit; l != nil && (*l < -1 || *l > math.MaxInt32) {
 		diags = append(diags, errAt(attrRange(r.attrs, "connection_limit", r.block.DefRange), "Invalid connection_limit",
 			fmt.Sprintf("connection_limit must be -1 (unlimited) or between 0 and %d, got %d.", math.MaxInt32, *l)))
+	}
+	if blk.Password != nil {
+		// Output redacts it wherever it appears (see secret.Writer).
+		secret.Register(*blk.Password)
 	}
 	diags = append(diags, checkPassword(r, typ, blk.Password, engine)...)
 	login := blk.Login

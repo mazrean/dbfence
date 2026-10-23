@@ -20,6 +20,7 @@ import (
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
 	"github.com/mazrean/dbfence/internal/plan"
+	"github.com/mazrean/dbfence/internal/secret"
 )
 
 // sqlstateInsufficientPrivilege is returned when pg_authid is not readable.
@@ -141,6 +142,8 @@ func parseConfig(dsn string) (*pgx.ConnConfig, error) {
 	if err != nil {
 		return nil, parseError(err)
 	}
+	// Output redacts the password wherever it appears.
+	secret.Register(cfg.Password)
 	if cfg.ConnectTimeout == 0 {
 		cfg.ConnectTimeout = defaultConnectTimeout
 	}
