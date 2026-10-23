@@ -30,6 +30,12 @@ type server struct {
 
 func startServer(t *testing.T) *server {
 	t.Helper()
+	return startServerTag(t, "17")
+}
+
+// startServerTag starts a postgres:<tag> server.
+func startServerTag(t *testing.T, tag string) *server {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("integration test")
 	}
@@ -44,7 +50,7 @@ func startServer(t *testing.T) *server {
 		t.Skipf("docker is unavailable: %v", err)
 	}
 	pool.MaxWait = 3 * time.Minute
-	res, err := pool.RunWithOptions(&dockertest.RunOptions{Repository: "postgres", Tag: "17", Env: []string{"POSTGRES_PASSWORD=pw"}},
+	res, err := pool.RunWithOptions(&dockertest.RunOptions{Repository: "postgres", Tag: tag, Env: []string{"POSTGRES_PASSWORD=pw"}},
 		func(hc *docker.HostConfig) {
 			hc.AutoRemove = true
 			hc.RestartPolicy = docker.RestartPolicy{Name: "no"}
@@ -545,6 +551,67 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("non-superuser owner needs INHERIT for schemas and grants", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE oi_admin LOGIN CREATEROLE CREATEDB PASSWORD 'pw'")
+		d := s.open(t, "oi_admin")
+		desired := &model.Desired{
+			Engine:     model.EnginePostgres,
+			Roles:      []model.Role{{ID: pg("oi_g1")}, {ID: pg("oi_u")}},
+			Databases:  []model.Database{{Name: "oi_db", Owner: "oi_g1"}},
+			Schemas:    []model.Schema{{Database: "oi_db", Name: "s", Owner: "oi_g1"}},
+			Privileges: []model.Privilege{{Grantee: pg("oi_u"), Object: model.Object{Type: model.ObjectDatabase, Database: "oi_db"}, Name: "CONNECT"}},
+			Ignore:     model.Ignore{Roles: []string{"[^o].*|oi_admin"}, Databases: []string{"[^o].*"}},
+		}
+		// oi_admin creates oi_g1, so it holds ADMIN OPTION on it, but
+		// neither SET nor INHERIT (createrole_self_grant is empty).
+		if _, err := planFor(t, d, &model.Desired{Engine: model.EnginePostgres, Roles: desired.Roles, Ignore: desired.Ignore}, diff.Options{}); err != nil {
+			t.Fatal(err)
+		}
+		s.exec(t, "SET ROLE oi_admin; GRANT oi_g1 TO oi_admin WITH SET TRUE, INHERIT FALSE; RESET ROLE")
+		res, err := planFor(t, d, desired, diff.Options{})
+		want := `database "oi_db": "oi_admin" does not have the privileges of its owner "oi_g1", so creating schemas in it or granting on it will fail; run GRANT "oi_g1" TO "oi_admin" WITH INHERIT TRUE first`
+		if !strings.Contains(res.text, want) {
+			t.Errorf("plan lacks %q:\n%s", want, res.text)
+		}
+		if err == nil {
+			t.Fatalf("apply succeeded despite the warning:\n%s", res.text)
+		}
+		s.exec(t, "SET ROLE oi_admin; GRANT oi_g1 TO oi_admin WITH INHERIT TRUE; RESET ROLE")
+		if out := converge(t, d, desired, diff.Options{}); strings.Contains(out, "privileges of its owner") {
+			t.Errorf("warning persists after the suggested GRANT:\n%s", out)
+		}
+	})
+
+	t.Run("non-superuser membership and grantor limits are reported", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE ml_admin LOGIN CREATEROLE PASSWORD 'pw'", "CREATE ROLE ml_ext", "CREATE ROLE ml_ext2", "GRANT ml_ext2 TO ml_ext",
+			"CREATE ROLE ml_h1", "GRANT ml_h1 TO ml_admin WITH INHERIT TRUE, SET TRUE", "CREATE ROLE ml_h3", "CREATE ROLE ml_hu",
+			"CREATE DATABASE ml_db OWNER ml_h1",
+			"SET ROLE ml_h1; GRANT CONNECT ON DATABASE ml_db TO ml_h3 WITH GRANT OPTION; SET ROLE ml_h3; GRANT CONNECT ON DATABASE ml_db TO ml_hu; RESET ROLE")
+		d := s.open(t, "ml_admin")
+		desired := &model.Desired{
+			Engine: model.EnginePostgres,
+			Roles: []model.Role{
+				{ID: pg("ml_ext"), MemberOf: []model.RoleID{}}, {ID: pg("ml_ext2")}, {ID: pg("ml_hu")},
+				{ID: pg("ml_new"), MemberOf: []model.RoleID{pg("ml_ext2")}},
+			},
+			Databases: []model.Database{{Name: "ml_db"}},
+			Ignore:    model.Ignore{Roles: []string{"[^m].*|ml_admin|ml_h.*"}, Databases: []string{"[^m].*"}},
+		}
+		res, err := planFor(t, d, desired, diff.Options{})
+		if err != nil {
+			t.Fatalf("apply: %v\n%s", err, res.text)
+		}
+		for _, want := range []string{
+			`membership of "ml_ext" in "ml_ext2" granted by "postgres" differs from the configuration, but "ml_admin" may not revoke it`,
+			`membership of "ml_new" in "ml_ext2" differs from the configuration, but "ml_admin" may not grant it`,
+			`CONNECT on database "ml_db" granted by "ml_h3" to "ml_hu" differs from the configuration, but "ml_admin" may not SET ROLE "ml_h3"`,
+		} {
+			if !strings.Contains(res.text, want) {
+				t.Errorf("plan lacks %q:\n%s", want, res.text)
+			}
+		}
+	})
+
 	t.Run("prune drops non-empty schemas", func(t *testing.T) {
 		s.exec(t, "CREATE DATABASE p_db")
 		s.exec(t, `\c p_db`, "CREATE SCHEMA junk", "CREATE SCHEMA junkfull", "CREATE TABLE junkfull.t (id int)")
@@ -686,5 +753,30 @@ func TestIntegration(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "DETAIL: owner of database detail_db") {
 			t.Errorf("error = %v", err)
 		}
+	})
+}
+
+// TestIntegrationPostgres15 covers behaviour that differs before
+// PostgreSQL 16: memberships carry no options and need no GRANTED BY.
+func TestIntegrationPostgres15(t *testing.T) {
+	t.Parallel()
+	s := startServerTag(t, "15")
+
+	t.Run("owner warning suggests a plain GRANT", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE o15_admin LOGIN CREATEROLE CREATEDB PASSWORD 'pw'", "CREATE ROLE o15_ext")
+		d := s.open(t, "o15_admin")
+		desired := &model.Desired{
+			Engine:    model.EnginePostgres,
+			Roles:     []model.Role{{ID: pg("o15_ext")}},
+			Databases: []model.Database{{Name: "o15_db", Owner: "o15_ext"}},
+			Ignore:    model.Ignore{Roles: []string{"[^o].*|o15_admin"}, Databases: []string{"[^o].*"}},
+		}
+		res, _ := planFor(t, d, desired, diff.Options{})
+		want := `run GRANT "o15_ext" TO "o15_admin" first`
+		if !strings.Contains(res.text, want) {
+			t.Fatalf("plan lacks %q:\n%s", want, res.text)
+		}
+		s.exec(t, "SET ROLE o15_admin; GRANT o15_ext TO o15_admin; RESET ROLE")
+		converge(t, d, desired, diff.Options{})
 	})
 }
