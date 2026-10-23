@@ -157,17 +157,21 @@ func (d *Driver) inspectUsers(ctx context.Context, cur *model.Current) error {
 	case err != nil:
 		return err
 	}
-	// Without full visibility only the current account is listed. Every
-	// server also has system accounts such as mysql.sys, so seeing any
-	// other account proves the list is complete.
-	if !slices.ContainsFunc(accounts, func(id model.RoleID) bool { return id != cur.CurrentUser }) {
-		cur.Unreadable.Roles = true
-		return nil
-	}
 	for _, id := range accounts {
 		cur.Roles = append(cur.Roles, model.RoleState{ID: id, AttributesUnknown: true})
 	}
+	cur.Unreadable.Roles = !listsAllAccounts(accounts)
 	return nil
+}
+
+// listsAllAccounts reports whether USER_ATTRIBUTES showed every account.
+// Without SYSTEM_USER, accounts holding it are hidden. The built-in
+// mysql.sys, mysql.session and mysql.infoschema accounts hold it, so
+// seeing one of them proves that nothing is hidden.
+func listsAllAccounts(accounts []model.RoleID) bool {
+	return slices.ContainsFunc(accounts, func(id model.RoleID) bool {
+		return slices.Contains([]string{"mysql.sys", "mysql.session", "mysql.infoschema"}, id.Name)
+	})
 }
 
 func (d *Driver) inspectMySQLUser(ctx context.Context, cur *model.Current) error {

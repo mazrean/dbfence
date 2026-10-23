@@ -348,6 +348,10 @@ func TestMySQLWithoutSystemTableAccess(t *testing.T) {
 			h.apply(app.Options{})
 			// Unknown state is re-asserted idempotently, so applying again must succeed.
 			h.apply(app.Options{})
+			// Created accounts do not make a partial account list look complete.
+			if _, out := h.plan(app.Options{}); !strings.Contains(out, tt.wantWarn) {
+				t.Errorf("plan after apply lacks %q:\n%s", tt.wantWarn, out)
+			}
 
 			if got := h.query("SELECT CONCAT(FROM_USER, '>', TO_USER) FROM mysql.role_edges WHERE TO_USER = 'dbf_it_app'"); len(got) != 1 || got[0] != "dbf_it_ro>dbf_it_app" {
 				t.Errorf("role edges = %v", got)
