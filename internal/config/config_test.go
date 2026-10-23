@@ -212,3 +212,39 @@ func TestExpandPrivileges(t *testing.T) {
 		t.Error(diff)
 	}
 }
+
+func TestLoadResolvesTFStateRelativeToConfig(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	state := `{"version": 4, "serial": 1, "lineage": "x", "outputs": {"db_host": {"value": "db.internal", "type": "string"}}, "resources": []}`
+	cfgSrc := `connection {
+  engine = "postgres"
+  dsn    = "postgres://u@${tfstate("terraform.tfstate", "output.db_host")}/x"
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "terraform.tfstate"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dbfence.hcl"), []byte(cfgSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"file", filepath.Join(dir, "dbfence.hcl")},
+		{"directory", dir},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Load(tt.path, funcs.NewRegistry(t.Context()).Functions())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "postgres://u@db.internal/x"; cfg.DSN != want {
+				t.Errorf("DSN = %q, want %q", cfg.DSN, want)
+			}
+		})
+	}
+}
