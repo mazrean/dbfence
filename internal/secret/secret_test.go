@@ -153,3 +153,44 @@ func TestRegisterDefault(t *testing.T) {
 		t.Errorf("Default().Redact = %q", got)
 	}
 }
+
+// TestWriterRedactsEscapedForms covers forms whose printed text the
+// Writer escapes before it redacts: every form must match the escaped
+// line, not the raw one.
+func TestWriterRedactsEscapedForms(t *testing.T) {
+	t.Parallel()
+	jsonOf := func(s string) string {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	tests := []struct {
+		name, secret, printed, leaked string
+	}{
+		{name: "backslash-escaped SQL literal", secret: `Ab\Cd9xYz`, printed: `'Ab\\Cd9xYz'`, leaked: "Cd9xYz"},
+		{name: "JSON with bidi control and quote", secret: "Qw\"er‮Ty7u", printed: jsonOf("Qw\"er‮Ty7u"), leaked: "Ty7u"},
+		{name: "SQL literal with control and quote", secret: "Mn'bv\x01Cx5z", printed: "'Mn''bv\x01Cx5z'", leaked: "Cx5z"},
+		{name: "multi-line with control before newline", secret: "Lk8jHg\x01\nFd3sAa", printed: "Lk8jHg\x01\nFd3sAa", leaked: "Lk8jHg"},
+		{name: "multi-line with control after newline", secret: "Po9iUy\n\x02Tr4eWq", printed: "Po9iUy\n\x02Tr4eWq", leaked: "Tr4eWq"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reg := NewRegistry()
+			reg.Add(tt.secret)
+			var buf bytes.Buffer
+			w := NewWriter(&buf, reg)
+			if _, err := w.Write([]byte("near " + tt.printed + " at line 1\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if got := buf.String(); strings.Contains(got, tt.leaked) || !strings.Contains(got, Placeholder) {
+				t.Errorf("output = %q, want %q redacted", got, tt.leaked)
+			}
+		})
+	}
+}

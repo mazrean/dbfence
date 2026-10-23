@@ -67,10 +67,13 @@ func (r *Registry) Add(s string) {
 // Variants returns the forms of s that are redacted: s itself and its
 // NFC normalization, each URL-encoded (query, path, and with spaces as
 // %20), base64-encoded (standard and URL alphabets, padded and raw),
-// JSON-escaped, Go-quoted, SQL-literal-escaped (quotes doubled), and
-// with control characters escaped as in plan output. A form spanning
-// lines is also split into its lines, because output is redacted line
-// by line. Forms shorter than MinLength are dropped.
+// JSON-escaped, Go-quoted, and SQL-literal-escaped (quotes doubled, and
+// also with backslashes doubled as in MySQL and PostgreSQL E'' literals).
+// The output Writer escapes control characters before it redacts, so
+// every form is also kept with control characters escaped as by
+// plan.EscapeLines and plan.Escape. A form spanning lines is also split
+// into its lines, because output is redacted line by line. Forms shorter
+// than MinLength are dropped.
 func Variants(s string) []string {
 	bases := []string{s}
 	if n := norm.NFC.String(s); n != s {
@@ -79,12 +82,14 @@ func Variants(s string) []string {
 	seen := map[string]struct{}{}
 	var out []string
 	add := func(v string) {
-		for _, piece := range append(strings.Split(v, "\n"), v) {
-			if _, ok := seen[piece]; ok || len(piece) < MinLength {
-				continue
+		for _, form := range []string{v, plan.EscapeLines(v), plan.Escape(v)} {
+			for _, piece := range append(strings.Split(form, "\n"), form) {
+				if _, ok := seen[piece]; ok || len(piece) < MinLength {
+					continue
+				}
+				seen[piece] = struct{}{}
+				out = append(out, piece)
 			}
-			seen[piece] = struct{}{}
-			out = append(out, piece)
 		}
 	}
 	for _, b := range bases {
@@ -100,7 +105,7 @@ func Variants(s string) []string {
 		add(jsonEscape(b, false))
 		add(unquote(strconv.Quote(b)))
 		add(strings.ReplaceAll(b, "'", "''"))
-		add(plan.Escape(b))
+		add(strings.ReplaceAll(strings.ReplaceAll(b, `\`, `\\`), "'", "''"))
 	}
 	return out
 }
