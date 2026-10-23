@@ -94,8 +94,8 @@ func (t *tfstateReader) Lookup(ctx context.Context, loc, address string) ([]byte
 func (t *tfstateReader) state(ctx context.Context, loc string) (st *tfstate.TFState, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if st, ok := t.states[loc]; ok {
-		return st, nil
+	if cached, ok := t.states[loc]; ok {
+		return cached, nil
 	}
 	defer func() {
 		// tfstate-lookup panics on some malformed URLs (remote:// with
