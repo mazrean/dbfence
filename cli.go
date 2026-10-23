@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 
 	"github.com/alecthomas/kong"
 	"github.com/mazrean/dbfence/internal/app"
-	"github.com/mazrean/dbfence/internal/plan"
+	"github.com/mazrean/dbfence/internal/secret"
 )
 
 // Exit codes.
@@ -111,8 +110,14 @@ func (c *validateCmd) Run(ctx context.Context, a *app.App) error {
 	return a.Validate(ctx, app.Options{Path: p})
 }
 
-// run parses args and executes the selected command.
-func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Writer) int {
+// run parses args and executes the selected command. All output goes to
+// stdout and stderr, the program's redacting output sink (see
+// secret.Writer), which run flushes before it returns.
+func run(ctx context.Context, args []string, a *app.App, stdout, stderr *secret.Writer) int {
+	defer func() {
+		_ = stdout.Flush()
+		_ = stderr.Flush()
+	}()
 	exitCode := -1
 	var c cli
 	parser, err := kong.New(&c,
@@ -141,6 +146,10 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Write
 		parser.FatalIfErrorf(err)
 		return exitError
 	}
+	// --show-secrets prints passwords, so the sink must not redact them.
+	show := c.Plan.ShowSecrets || c.Apply.ShowSecrets
+	stdout.ShowSecrets(show)
+	stderr.ShowSecrets(show)
 	switch err := kctx.Run(); {
 	case err == nil:
 		return exitOK
@@ -150,8 +159,8 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr io.Write
 		// Written directly: kong's Errorf indents every line after the
 		// first, which garbles multi-line HCL diagnostics. Server errors
 		// and diagnostics may quote names or source text with control
-		// characters, which are escaped.
-		_, _ = fmt.Fprintf(stderr, "dbfence: error: %s\n", plan.EscapeLines(err.Error()))
+		// characters, which the sink escapes.
+		_, _ = fmt.Fprintf(stderr, "dbfence: error: %s\n", err)
 		return exitError
 	}
 }

@@ -55,7 +55,9 @@ func (DefaultOpener) Open(ctx context.Context, engine model.Engine, dsn string) 
 	}
 }
 
-// IO holds the standard streams.
+// IO holds the standard streams. Out and Err are the redacting
+// secret.Writer streams of the process; an Out with a Flush method is
+// flushed before the confirmation prompt is read.
 type IO struct {
 	In  io.Reader
 	Out io.Writer
@@ -148,6 +150,13 @@ func (a *App) Apply(ctx context.Context, o Options) error {
 func (a *App) confirm(ctx context.Context) error {
 	if _, err := fmt.Fprint(a.io.Out, "Apply these changes? Only 'yes' is accepted: "); err != nil {
 		return err
+	}
+	// The prompt has no line break: a line-buffered stream (secret.Writer)
+	// shows it only once flushed.
+	if f, ok := a.io.Out.(interface{ Flush() error }); ok {
+		if err := f.Flush(); err != nil {
+			return err
+		}
 	}
 	type answer struct {
 		err  error

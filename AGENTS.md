@@ -36,9 +36,10 @@ internal/driver/     mysql/ and postgres/: Driver (Inspect/Exec) + Dialect (SQL 
 internal/password/   stored-hash verification (SCRAM, md5, mysql_native, caching_sha2)
 internal/diff/       desired vs current -> ordered *plan.Plan via diff.Dialect (no I/O)
 internal/plan/       Statement / Secret fragments, redacted output (no I/O)
+internal/secret/     secret registry + redacting, control-escaping output Writer
 internal/apply/      sequential execution, stop at first error
 internal/di/         kessoku injectors
-tools/lint/          repo linter module
+tools/lint/          repo linter module (+ outputsink analyzer)
 ```
 
 ## Coding Standards
@@ -47,6 +48,7 @@ tools/lint/          repo linter module
 - Identifiers are quoted and literals escaped only through the engine Dialect; passwords go into SQL only as `plan.Secret`.
 - One `plan.Statement` is exactly one SQL command, sent alone (`;` never chains statements); to run as another role set `AsRole`, never prepend `SET ROLE`.
 - `diff` and `plan` do no I/O; engine-specific code only in `internal/driver/<engine>` and `internal/password`.
+- All output goes through the redacting `secret.Writer` streams wired in `internal/di/di.go` (`app.IO`); never use `os.Stdout`/`os.Stderr`/`fmt.Print*`/`print` elsewhere (lint `outputsink`), and `secret.Register` every new secret source.
 - Table-driven tests next to code; integration tests skip under `testing.Short()` or without Docker (fail if `CI` is set).
 
 ## Boundaries

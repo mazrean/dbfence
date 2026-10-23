@@ -29,7 +29,7 @@ dbfence apply    -f dbfence.hcl          # print the SQL, ask for "yes", then ex
 | `-f`, `--file` (`$DBFENCE_FILE`) | all | A configuration file, or a directory of `*.hcl` files (default `dbfence.hcl`; an empty value also means the default) |
 | `--prune` | plan, apply | Drop databases, schemas and roles that are not declared (without it they only produce warnings) |
 | `--force-password` | plan, apply | Set declared passwords even if they cannot be verified or already match. The plan then always contains a password statement for every role that declares one |
-| `--show-secrets` | plan, apply | Print passwords instead of `'<redacted>'` |
+| `--show-secrets` | plan, apply | Print passwords instead of `'<redacted>'`, and turn off the output redaction of known secrets (see [Output and exit codes](#output-and-exit-codes)) |
 | `--detailed-exitcode` | plan | Exit with 2 when there are changes. Warnings alone exit with 0 |
 | `--auto-approve` | apply | Skip the confirmation prompt |
 | `--version` | — | Print the version |
@@ -62,7 +62,8 @@ REVOKE CONNECT, TEMPORARY ON DATABASE "app" FROM PUBLIC;
 - When something is dropped, the summary is followed by `-- DESTRUCTIVE: this plan drops N objects: ...`.
 - An empty plan prints `-- No changes. The server matches the configuration.`, or, when there are warnings, `-- No changes to apply. See the N warnings above ...`.
 - Warnings are also written to stderr as `warning: ...`, so they stay visible when stdout is redirected.
-- Control characters in names read from the server, such as escape sequences or line breaks, are printed as Go escapes (`\x1b`, `\n`) in the plan, warnings, `apply` progress and errors. The SQL sent to the server is unchanged.
+- Control characters (other than line breaks and tabs that separate lines and columns of output) are printed as Go escapes (`\x1b`, `\r`) everywhere on stdout and stderr; control characters inside names read from the server, line breaks included, are escaped in the plan, warnings, `apply` progress and errors. The SQL sent to the server is unchanged.
+- As a last line of defense, every known secret is replaced by `<redacted>` wherever it appears in stdout and stderr, for example in a server error or a name that happens to equal a password. Known secrets are role passwords, the password of the `dsn`, and every string returned by `secretenv`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate` (including strings nested in their objects and lists). Besides its raw form, a secret is also found NFC-normalised, URL-encoded (as `urlencode` does, and as a URL query or path), base64-encoded (standard and URL alphabets), JSON-escaped, Go-quoted, SQL-quoted (`'` doubled) and with control characters escaped; a multi-line secret is found line by line. Secrets shorter than 4 bytes are not redacted, since they would match ordinary output. A name or host taken from `tfstate` (or equal to a password) is redacted too: use `env` or a literal for values that should stay visible. `--show-secrets` turns this redaction off.
 
 `apply` prints the same plan, asks for `yes` (anything else, or a closed stdin, cancels with exit 1), and prints `[k/N] <statement>` for each statement (its comment lines first). Statements run one by one, without a transaction, and apply stops at the first error. The error says how many statements were applied; run `plan` again to see what is left. An interrupted apply stops before the next statement, and the error ends with the cause, such as `interrupt signal received`.
 
