@@ -92,7 +92,59 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	if err := d.inspectDBPrivileges(ctx, cur, desired); err != nil {
 		return nil, err
 	}
+	plugins, err := d.activeAuthPlugins(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cur.Warnings = append(cur.Warnings, roleWarnings(desired, cur, plugins)...)
 	return cur, nil
+}
+
+// activeAuthPlugins lists the loaded authentication plugins, or nil when
+// they cannot be read.
+func (d *Driver) activeAuthPlugins(ctx context.Context) ([]string, error) {
+	var plugins []string
+	err := query(ctx, d.db, `SELECT PLUGIN_NAME FROM information_schema.PLUGINS
+		WHERE PLUGIN_TYPE = 'AUTHENTICATION' AND PLUGIN_STATUS = 'ACTIVE'`,
+		func(rows *sql.Rows) error {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return err
+			}
+			plugins = append(plugins, name)
+			return nil
+		})
+	if isAccessDenied(err) {
+		return nil, nil
+	}
+	return plugins, err
+}
+
+// roleWarnings reports declared accounts that will accept logins without
+// a password, and declared plugins the server has not loaded. plugins is
+// nil when the loaded plugins are unknown.
+func roleWarnings(desired *model.Desired, cur *model.Current, plugins []string) []string {
+	if desired == nil {
+		return nil
+	}
+	var warns []string
+	for _, r := range desired.Roles {
+		if r.AuthPlugin != "" && plugins != nil && !slices.ContainsFunc(plugins, func(p string) bool { return strings.EqualFold(p, r.AuthPlugin) }) {
+			hint := ""
+			if strings.EqualFold(r.AuthPlugin, password.PluginNative) {
+				hint = " (MySQL 8.4 loads it only with --mysql-native-password=ON)"
+			}
+			warns = append(warns, fmt.Sprintf("auth_plugin %q of %q is not an active authentication plugin on the server%s; creating or changing the account will fail", r.AuthPlugin, r.ID, hint))
+		}
+		if r.Login == nil || !*r.Login || r.Password != nil || (r.AuthPlugin != "" && !isPasswordPlugin(r.AuthPlugin)) {
+			continue
+		}
+		i := slices.IndexFunc(cur.Roles, func(s model.RoleState) bool { return s.ID == r.ID })
+		if i < 0 || (cur.Roles[i].PasswordReadable && len(cur.Roles[i].PasswordHash) == 0 && isPasswordPlugin(cur.Roles[i].AuthPlugin)) {
+			warns = append(warns, fmt.Sprintf("%q can log in without a password; declare a password or auth_plugin, or set login = false", r.ID))
+		}
+	}
+	return warns
 }
 
 func (d *Driver) inspectDatabases(ctx context.Context, cur *model.Current) error {
