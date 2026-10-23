@@ -91,8 +91,9 @@ func (a *App) Validate(_ context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(a.io.Out, "The configuration is valid (%s: %d databases, %d roles, %d schemas, %d privileges).\n",
-		cfg.Engine, len(cfg.Desired.Databases), len(cfg.Desired.Roles), len(cfg.Desired.Schemas), len(cfg.Desired.Privileges))
+	_, err = fmt.Fprintf(a.io.Out, "The configuration is valid (%s: %s, %s, %s, %s).\n", cfg.Engine,
+		plan.Count(len(cfg.Desired.Databases), "database"), plan.Count(len(cfg.Desired.Roles), "role"),
+		plan.Count(len(cfg.Desired.Schemas), "schema"), plan.Count(len(cfg.Desired.Privileges), "privilege"))
 	return err
 }
 
