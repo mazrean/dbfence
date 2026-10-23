@@ -28,6 +28,20 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 	return d.Dialect.DropRole(id, reachable)
 }
 
+// DropSchema implements diff.Dialect. A schema that still contains
+// objects is dropped with CASCADE, as DROP DATABASE drops the objects of
+// a pruned database, and the plan says so.
+func (d *Driver) DropSchema(s model.Schema) []plan.Statement {
+	n := 0
+	if d.st != nil {
+		n = d.st.objects[model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}]
+	}
+	if n == 0 {
+		return d.Dialect.DropSchema(s)
+	}
+	return []plan.Statement{plan.SQL(s.Database, fmt.Sprintf("-- CASCADE: the schema contains %d objects, which are dropped too\nDROP SCHEMA %s CASCADE", n, Ident(s.Name)))}
+}
+
 // AlterRole implements diff.Dialect. Changes to roles the connected user
 // may not alter are reported instead of planned, since they would stop
 // apply part-way.

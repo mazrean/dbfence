@@ -301,6 +301,32 @@ func TestInheritOptions(t *testing.T) {
 	}
 }
 
+func TestDropSchema(t *testing.T) {
+	t.Parallel()
+	full := model.Schema{Database: "app", Name: "full"}
+	tests := []struct {
+		name   string
+		st     *state
+		schema model.Schema
+		want   string
+	}{
+		{"not inspected", nil, full, `app: DROP SCHEMA "full"`},
+		{"empty", &state{objects: map[model.Object]int{}}, model.Schema{Database: "app", Name: "empty"}, `app: DROP SCHEMA "empty"`},
+		{
+			"not empty",
+			&state{objects: map[model.Object]int{{Type: model.ObjectSchema, Database: "app", Schema: "full"}: 2}},
+			full,
+			"app: -- CASCADE: the schema contains 2 objects, which are dropped too\nDROP SCHEMA \"full\" CASCADE",
+		},
+	}
+	for _, tt := range tests {
+		d := &Driver{st: tt.st}
+		if got := sqlOf(d.DropSchema(tt.schema)); got != tt.want {
+			t.Errorf("%s: got\n%s\nwant\n%s", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestDriverWithoutInspectBehavesLikeDialect(t *testing.T) {
 	t.Parallel()
 	d := &Driver{}

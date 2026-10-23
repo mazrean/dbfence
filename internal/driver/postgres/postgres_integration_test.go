@@ -393,6 +393,21 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("prune drops non-empty schemas", func(t *testing.T) {
+		s.exec(t, "CREATE DATABASE p_db")
+		s.exec(t, `\c p_db`, "CREATE SCHEMA junk", "CREATE SCHEMA junkfull", "CREATE TABLE junkfull.t (id int)")
+		d := s.open(t, "postgres")
+		desired := &model.Desired{
+			Engine:    model.EnginePostgres,
+			Databases: []model.Database{{Name: "p_db"}},
+			Ignore:    model.Ignore{Roles: []string{".*"}, Databases: []string{".*"}},
+		}
+		out := converge(t, d, desired, diff.Options{Prune: true})
+		if !strings.Contains(out, `DROP SCHEMA "junkfull" CASCADE`) || strings.Contains(out, `DROP SCHEMA "junk" CASCADE`) {
+			t.Errorf("plan:\n%s", out)
+		}
+	})
+
 	t.Run("statements without effect fail", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE w_grp", "CREATE ROLE w_u", "GRANT w_grp TO w_u")
 		d := s.open(t, "postgres")
