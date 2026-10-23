@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +27,6 @@ const sqlstateInsufficientPrivilege = "42501"
 // Driver is a PostgreSQL driver. Statements on other databases use a
 // separate connection with the database name replaced.
 type Driver struct {
-	Dialect
 	cfg   *pgx.ConnConfig
 	db    *sql.DB
 	conns map[string]*sql.DB
@@ -34,7 +34,8 @@ type Driver struct {
 	// override Dialect use it to render grantor-aware statements.
 	st      *state
 	notices noticeLog
-	mu      sync.Mutex
+	Dialect
+	mu sync.Mutex
 }
 
 // defaultConnectTimeout bounds connection attempts when the DSN does not
@@ -51,11 +52,35 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 	// Per-database connections copy the handler.
 	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { d.notices.add(n) }
 	d.db = stdlib.OpenDB(*cfg)
-	if err := d.db.PingContext(ctx); err != nil {
+	if err = d.db.PingContext(ctx); err != nil {
 		_ = d.db.Close()
 		return nil, fmt.Errorf("connect to postgres: %w", dedupLines(err))
 	}
+	iter, err := scramIterations(ctx, d.db)
+	if err != nil {
+		_ = d.db.Close()
+		return nil, err
+	}
+	d.SCRAMIterations = iter
 	return d, nil
+}
+
+// scramIterations reads scram_iterations, the work factor the server uses
+// for the verifiers it computes itself. It is 0 before PostgreSQL 16,
+// which has no such setting and always uses 4096.
+func scramIterations(ctx context.Context, db *sql.DB) (int, error) {
+	var v sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT current_setting('scram_iterations', true)").Scan(&v); err != nil {
+		return 0, fmt.Errorf("read scram_iterations: %w", err)
+	}
+	if !v.Valid || v.String == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v.String)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("read scram_iterations: unexpected value %q", v.String)
+	}
+	return n, nil
 }
 
 // dedupLinesError drops repeated timeouts from the text of a connect
@@ -241,7 +266,12 @@ func (d *Driver) Close() error {
 }
 
 // Dialect renders PostgreSQL SQL. It is usable without a connection.
-type Dialect struct{}
+type Dialect struct {
+	// SCRAMIterations is the server's scram_iterations (PostgreSQL 16+),
+	// used for the verifiers dbfence computes. Zero means 4096, the
+	// count before PostgreSQL 16.
+	SCRAMIterations int
+}
 
 // Ident quotes an identifier.
 func Ident(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
@@ -317,7 +347,7 @@ func roleOpts(r model.Role, cur model.RoleState) []roleOpt {
 }
 
 // CreateRole implements diff.Dialect.
-func (Dialect) CreateRole(r model.Role) []plan.Statement {
+func (d Dialect) CreateRole(r model.Role) []plan.Statement {
 	parts := []any{"CREATE ROLE " + Ident(r.ID.Name)}
 	var opts []string
 	for _, o := range roleOpts(r, model.RoleState{}) {
@@ -335,7 +365,7 @@ func (Dialect) CreateRole(r model.Role) []plan.Statement {
 		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
 	}
 	if r.Password != nil {
-		parts = append(parts, passwordClause(*r.Password)...)
+		parts = append(parts, passwordClause(*r.Password, d.SCRAMIterations)...)
 	}
 	return []plan.Statement{plan.SQL("", parts...)}
 }
@@ -345,11 +375,11 @@ func (Dialect) CreateRole(r model.Role) []plan.Statement {
 // the server, its logs or pg_stat_statements, and a declared password
 // that looks like a verifier is still hashed. PostgreSQL clears an empty
 // password, so "" is rendered as NULL.
-func passwordClause(pw string) []any {
+func passwordClause(pw string, iter int) []any {
 	if pw == "" {
 		return []any{" PASSWORD NULL"}
 	}
-	v, err := password.SCRAMVerifier(pw)
+	v, err := password.SCRAMVerifier(pw, iter)
 	if err != nil {
 		// Only reachable when crypto/pbkdf2 rejects its input (FIPS-only
 		// mode); the server then hashes the password itself.
@@ -383,7 +413,7 @@ func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]pla
 // alterRole renders AlterRole. groupedUnreadable suppresses the warning
 // about an unreadable verifier, which Inspect then reports once for all
 // roles.
-func (Dialect) alterRole(r model.Role, cur model.RoleState, force, groupedUnreadable bool) ([]plan.Statement, []string) {
+func (d Dialect) alterRole(r model.Role, cur model.RoleState, force, groupedUnreadable bool) ([]plan.Statement, []string) {
 	var opts []string
 	var warns []string
 	for _, o := range roleOpts(r, cur) {
@@ -420,7 +450,7 @@ func (Dialect) alterRole(r model.Role, cur model.RoleState, force, groupedUnread
 		parts[0] = parts[0].(string) + " " + strings.Join(opts, " ")
 	}
 	if setPassword {
-		parts = append(parts, passwordClause(*r.Password)...)
+		parts = append(parts, passwordClause(*r.Password, d.SCRAMIterations)...)
 	}
 	return []plan.Statement{plan.SQL("", parts...)}, warns
 }

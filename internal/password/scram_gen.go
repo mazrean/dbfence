@@ -12,19 +12,25 @@ import (
 
 // SCRAM parameters used by PostgreSQL's default verifier.
 const (
+	// SCRAMIterations is PostgreSQL's default iteration count, and the
+	// only one before PostgreSQL 16 added scram_iterations.
 	SCRAMIterations = 4096
 	scramSaltLen    = 16
 )
 
 // SCRAMVerifier returns a PostgreSQL SCRAM-SHA-256 verifier for password
-// with a random salt, as PQencryptPasswordConn does. Sending it instead of
-// the plaintext keeps the password out of server logs.
-func SCRAMVerifier(password string) (string, error) {
+// with a random salt and iter iterations (SCRAMIterations when iter <= 0),
+// as PQencryptPasswordConn does. Sending it instead of the plaintext keeps
+// the password out of server logs.
+func SCRAMVerifier(password string, iter int) (string, error) {
+	if iter <= 0 {
+		iter = SCRAMIterations
+	}
 	salt := make([]byte, scramSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("scram salt: %w", err)
 	}
-	return SCRAMVerifierWithSalt(password, salt, SCRAMIterations)
+	return SCRAMVerifierWithSalt(password, salt, iter)
 }
 
 // SCRAMVerifierWithSalt returns

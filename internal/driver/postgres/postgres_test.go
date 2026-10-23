@@ -331,12 +331,14 @@ func TestCreateRolePassword(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name, password, wantPrefix string
+		iterations                 int
 	}{
-		{"scram", "first'pw", `CREATE ROLE "a" WITH PASSWORD 'SCRAM-SHA-256$4096:`},
-		{"empty", "", `CREATE ROLE "a" WITH PASSWORD NULL`},
+		{name: "scram", password: "first'pw", wantPrefix: `CREATE ROLE "a" WITH PASSWORD 'SCRAM-SHA-256$4096:`},
+		{name: "server scram_iterations", password: "first'pw", iterations: 32768, wantPrefix: `CREATE ROLE "a" WITH PASSWORD 'SCRAM-SHA-256$32768:`},
+		{name: "empty", password: "", wantPrefix: `CREATE ROLE "a" WITH PASSWORD NULL`},
 	}
 	for _, tt := range tests {
-		stmts := Dialect{}.CreateRole(model.Role{ID: pg("a"), Password: &tt.password})
+		stmts := Dialect{SCRAMIterations: tt.iterations}.CreateRole(model.Role{ID: pg("a"), Password: &tt.password})
 		if got := stmts[0].SQL(); !strings.HasPrefix(got, tt.wantPrefix) || (tt.password != "" && strings.Contains(got, tt.password)) {
 			t.Errorf("%s: SQL = %s", tt.name, got)
 		}

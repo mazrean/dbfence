@@ -17,9 +17,9 @@ import (
 )
 
 type fakeDriver struct {
-	postgres.Dialect
 	executed []string
 	extra    []model.RoleState
+	postgres.Dialect
 }
 
 func (f *fakeDriver) Inspect(context.Context, *model.Desired) (*model.Current, error) {

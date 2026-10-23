@@ -23,7 +23,7 @@ func TestSCRAMVerifier(t *testing.T) {
 	t.Parallel()
 	tests := []string{"pencil", "first'pw", `back\slash`, "md5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "パスワード"}
 	for _, pw := range tests {
-		v, err := SCRAMVerifier(pw)
+		v, err := SCRAMVerifier(pw, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -37,7 +37,7 @@ func TestSCRAMVerifier(t *testing.T) {
 		if ok, _ := MatchPostgres(v, "u", pw+"x"); ok {
 			t.Errorf("verifier of %q matches a different password", pw)
 		}
-		other, _ := SCRAMVerifier(pw)
+		other, _ := SCRAMVerifier(pw, 0)
 		if other == v {
 			t.Errorf("salt is not random")
 		}

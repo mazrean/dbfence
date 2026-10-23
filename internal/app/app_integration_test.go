@@ -428,6 +428,33 @@ user "dba" {
 	}
 }
 
+// TestPostgresSCRAMIterations checks that verifiers computed by dbfence use
+// the server's scram_iterations instead of the default 4096.
+func TestPostgresSCRAMIterations(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EnginePostgres, postgresContainer)
+	h.exec("ALTER ROLE postgres SET scram_iterations = 8192")
+	h.write(`
+user "app" {
+  name     = "dbf_it_iter"
+  password = "iterpw"
+}
+`)
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if got := h.query("SELECT rolpassword FROM pg_authid WHERE rolname = 'dbf_it_iter'"); len(got) != 1 || !strings.HasPrefix(got[0], "SCRAM-SHA-256$8192:") {
+		t.Fatalf("verifier = %q, want 8192 iterations", got)
+	}
+	u, err := sql.Open("pgx", strings.Replace(h.dsn, "postgres:postgres@", "dbf_it_iter:iterpw@", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = u.Close() }()
+	if err = u.PingContext(t.Context()); err != nil {
+		t.Errorf("log in with the declared password: %v", err)
+	}
+}
+
 // TestMySQLDatabasePattern manages a wildcard grant declared with
 // database_pattern.
 func TestMySQLDatabasePattern(t *testing.T) {
