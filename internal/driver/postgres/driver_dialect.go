@@ -41,26 +41,44 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 }
 
 // KeepRole implements diff.RoleKeeper. A role is kept when dropping it
-// would take privileges or memberships from a role dbfence does not
-// manage: DROP ROLE removes its members, and DROP OWNED revokes with
-// CASCADE what it granted, directly or through other roles.
+// would change something dbfence does not manage (a role, database or
+// schema with such a name): DROP ROLE removes its memberships and its
+// members, REASSIGN OWNED changes the owner of what it owns, and DROP
+// OWNED revokes what it holds and, with CASCADE, what it granted,
+// directly or through other roles.
 func (d *Driver) KeepRole(id model.RoleID, databases []string) string {
 	if d.st == nil {
 		return ""
 	}
 	if d.st.dropReachesUnmanaged(id.Name, slices.ContainsFunc(databases, func(db string) bool { return d.st.connectable[db] })) {
-		return "has a member, or granted privileges or memberships (directly or through other roles) to a role, that dbfence does not manage (see its warning), which dropping it would revoke; handle it manually"
+		return "owns, holds or granted something that names a role, database or schema dbfence does not manage (see its warning), or granted privileges or memberships (directly or through other roles) to such a role, which dropping it would change; handle it manually"
 	}
 	return ""
 }
 
-// dropReachesUnmanaged reports whether dropping role takes something from
-// a role dbfence does not manage: its membership in role, or, when DROP
-// OWNED runs (owned), a privilege or (PostgreSQL 16+) membership granted
-// by role, directly or transitively. Grants on objects role owns survive
-// REASSIGN OWNED.
+// dropReachesUnmanaged reports whether dropping role changes something
+// that names a role, database or schema dbfence does not manage: a
+// membership of role or in role, an object role owns, a privilege role
+// holds or granted on such an object or that such a role granted to it,
+// or, when DROP OWNED runs (owned), a privilege or (PostgreSQL 16+)
+// membership granted by role, directly or transitively, to such a role
+// or in such a role. Grants on objects role owns survive REASSIGN OWNED.
 func (st *state) dropReachesUnmanaged(role string, owned bool) bool {
-	if slices.ContainsFunc(st.members, func(e memberEntry) bool { return e.role == role && unmanagedRole(e.member) }) {
+	if slices.ContainsFunc(st.members, func(e memberEntry) bool {
+		return (e.role == role || e.member == role) && (unmanagedRole(e.role) || unmanagedRole(e.member) || unmanagedRole(e.grantor))
+	}) {
+		return true
+	}
+	for _, owners := range []map[model.Object]string{st.owners, st.otherOwners} {
+		for obj, owner := range owners {
+			if owner == role && unmanagedObject(obj) {
+				return true
+			}
+		}
+	}
+	if slices.ContainsFunc(st.acl, func(e aclEntry) bool {
+		return (e.grantee == role || e.grantor == role) && unmanagedObject(e.obj) || e.grantee == role && unmanagedRole(e.grantor)
+	}) {
 		return true
 	}
 	if !owned {
@@ -78,7 +96,7 @@ func (st *state) dropReachesUnmanaged(role string, owned bool) bool {
 		}
 	}
 	return st.version >= pg16 && slices.ContainsFunc(st.members, func(e memberEntry) bool {
-		return e.grantor == role && anyUnmanaged(st.memberDependents(role, e.role))
+		return e.grantor == role && (unmanagedRole(e.role) || anyUnmanaged(st.memberDependents(role, e.role)))
 	})
 }
 

@@ -27,6 +27,9 @@ type Driver struct {
 	// keepDefaultRoles lists the accounts whose default roles include one
 	// dbfence does not manage (see SetDefaultRoles).
 	keepDefaultRoles map[model.RoleID]bool
+	// keepRoles lists the accounts whose DROP USER would change an
+	// account or database dbfence does not manage (see KeepRole).
+	keepRoles map[model.RoleID]bool
 	Dialect
 }
 
@@ -198,12 +201,31 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 // dropUntrusted removes the accounts and databases whose names dbfence
 // does not manage from cur (model.Current.DropUntrusted). SET DEFAULT
 // ROLE replaces all default roles, so the default roles of an account
-// that has one of them are left alone.
+// that has one of them are left alone. DROP USER removes the account
+// from the role grants and default roles of every account and revokes
+// its privileges, so accounts whose drop would change one of them are
+// recorded for KeepRole.
 func (d *Driver) dropUntrusted(cur *model.Current, desired *model.Desired) error {
+	untrusted := func(id model.RoleID) bool { return model.CheckRoleID(model.EngineMySQL, id) != "" }
 	d.keepDefaultRoles = map[model.RoleID]bool{}
+	d.keepRoles = map[model.RoleID]bool{}
 	for _, r := range cur.Roles {
-		if slices.ContainsFunc(r.DefaultRoles, func(id model.RoleID) bool { return model.CheckRoleID(model.EngineMySQL, id) != "" }) {
+		if slices.ContainsFunc(r.DefaultRoles, untrusted) {
 			d.keepDefaultRoles[r.ID] = true
+		}
+		if untrusted(r.ID) {
+			// Its memberships and default roles name these accounts.
+			for _, id := range slices.Concat(r.MemberOf, r.DefaultRoles) {
+				d.keepRoles[id] = true
+			}
+		} else if slices.ContainsFunc(r.MemberOf, untrusted) || slices.ContainsFunc(r.DefaultRoles, untrusted) {
+			d.keepRoles[r.ID] = true
+		}
+	}
+	for _, p := range cur.Privileges {
+		if !untrusted(p.Grantee) && (model.CheckName(model.EngineMySQL, model.NameDatabase, p.Object.Database) != "" ||
+			model.CheckName(model.EngineMySQL, model.NameDatabase, p.Object.Pattern) != "") {
+			d.keepRoles[p.Grantee] = true
 		}
 	}
 	if _, err := cur.DropUntrusted(model.EngineMySQL); err != nil {
@@ -218,6 +240,17 @@ func (d *Driver) dropUntrusted(cur *model.Current, desired *model.Desired) error
 		}
 	}
 	return nil
+}
+
+// KeepRole implements diff.RoleKeeper. An account is kept when DROP USER
+// would change an account or database dbfence does not manage: it is
+// granted to or a default role of such an account, has such an account
+// as a granted or default role, or holds privileges on such a database.
+func (d *Driver) KeepRole(id model.RoleID, _ []string) string {
+	if d.keepRoles[id] {
+		return "is granted to, has as a granted or default role, or holds privileges on an account or database that dbfence does not manage (see its warning), which dropping it would change; handle it manually"
+	}
+	return ""
 }
 
 // SetDefaultRoles implements diff.DefaultRoleSetter. The default roles of

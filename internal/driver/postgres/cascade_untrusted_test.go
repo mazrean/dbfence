@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -150,19 +151,66 @@ func TestCascadePlanSparesUnmanagedRoles(t *testing.T) {
 }
 
 // TestPruneSparesUnmanagedRoles checks that --prune keeps a role whose
-// DROP ROLE or DROP OWNED would take privileges or memberships from a role
-// Inspect left out, and says why.
+// DROP ROLE, REASSIGN OWNED or DROP OWNED would change a role, database
+// or schema Inspect left out, and says why.
 func TestPruneSparesUnmanagedRoles(t *testing.T) {
 	t.Parallel()
 	bad := "evil\n"
 	db := model.Object{Type: model.ObjectDatabase, Database: "app"}
+	badDB := model.Object{Type: model.ObjectDatabase, Database: bad}
+	badSchema := model.Object{Type: model.ObjectSchema, Database: "app", Schema: "evil\x01"}
 	tests := []struct {
-		name    string
-		acl     []aclEntry
-		members []memberEntry
-		version int
-		dropped bool
+		owners      map[model.Object]string
+		otherOwners map[model.Object]string
+		name        string
+		acl         []aclEntry
+		members     []memberEntry
+		version     int
+		dropped     bool
 	}{
+		{
+			name:    "member of an unmanaged role",
+			members: []memberEntry{{role: bad, member: "old", grantor: "postgres", admin: true}},
+			version: 150000,
+		},
+		{
+			name:    "membership granted by an unmanaged role",
+			members: []memberEntry{{role: "grp", member: "old", grantor: bad}},
+		},
+		{
+			name:    "membership in an unmanaged role granted to a managed role",
+			members: []memberEntry{{role: bad, member: "x", grantor: "old"}},
+		},
+		{
+			name:    "membership in an unmanaged role granted to a managed role before 16",
+			members: []memberEntry{{role: bad, member: "x", grantor: "old"}},
+			version: 150000,
+			dropped: true,
+		},
+		{
+			name:   "owns an unmanaged database",
+			owners: map[model.Object]string{badDB: "old"},
+		},
+		{
+			name:   "owns an unmanaged schema",
+			owners: map[model.Object]string{badSchema: "old"},
+		},
+		{
+			name:        "owns an unmanaged schema of another database",
+			otherOwners: map[model.Object]string{{Type: model.ObjectSchema, Database: "other", Schema: bad}: "old"},
+		},
+		{
+			name: "holds a privilege on an unmanaged database",
+			acl:  []aclEntry{{obj: badDB, grantee: "old", grantor: "postgres", priv: "CONNECT"}},
+		},
+		{
+			name: "granted a privilege on an unmanaged schema",
+			acl:  []aclEntry{{obj: badSchema, grantee: "x", grantor: "old", priv: "USAGE"}},
+		},
+		{
+			name: "privilege granted by an unmanaged role",
+			acl:  []aclEntry{{obj: db, grantee: "old", grantor: bad, priv: "CONNECT"}},
+		},
 		{
 			name:    "unmanaged member",
 			members: []memberEntry{{role: "old", member: bad, grantor: "postgres"}},
@@ -209,11 +257,13 @@ func TestPruneSparesUnmanagedRoles(t *testing.T) {
 			if version == 0 {
 				version = 170000
 			}
+			owners := map[model.Object]string{db: "postgres"}
+			maps.Copy(owners, tt.owners)
 			st := &state{
 				desired: desired, user: "postgres", superuser: true, version: version,
 				connectable: map[string]bool{"postgres": true, "app": true},
-				owners:      map[model.Object]string{db: "postgres"},
-				acl:         tt.acl, members: tt.members,
+				owners:      owners, otherOwners: tt.otherOwners,
+				acl: tt.acl, members: tt.members,
 			}
 			if _, err := cur.DropUntrusted(model.EnginePostgres); err != nil {
 				t.Fatal(err)
@@ -229,7 +279,7 @@ func TestPruneSparesUnmanagedRoles(t *testing.T) {
 			if strings.Contains(got, "evil") {
 				t.Errorf("plan names the unmanaged role:\n%s", got)
 			}
-			const keep = `role "old" has a member, or granted privileges or memberships (directly or through other roles) to a role, that dbfence does not manage`
+			const keep = `role "old" owns, holds or granted something that names a role, database or schema dbfence does not manage`
 			if w := strings.Join(p.Warnings, "\n"); strings.Contains(w, keep) == tt.dropped {
 				t.Errorf("warnings (want the keep reason: %v):\n%s", !tt.dropped, w)
 			}

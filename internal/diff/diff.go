@@ -67,8 +67,9 @@ type DefaultRoleSetter interface {
 }
 
 // RoleKeeper is implemented by dialects that know, from the inspected
-// state, more reasons to keep a role than diff sees (PostgreSQL: dropping
-// it would revoke what roles dbfence does not manage hold). KeepRole
+// state, more reasons to keep a role than diff sees: dropping it would
+// change a role, database or schema whose name dbfence does not manage,
+// which model.Current.DropUntrusted left out of the state. KeepRole
 // explains why --prune must not drop the undeclared role id, or returns
 // "". databases lists existing databases that survive the plan.
 type RoleKeeper interface {

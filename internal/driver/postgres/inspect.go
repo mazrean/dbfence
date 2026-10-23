@@ -32,6 +32,9 @@ type state struct {
 	connectable map[string]bool
 	// owners maps databases (Schema "") and inspected schemas to owners.
 	owners map[model.Object]string
+	// otherOwners maps the schemas of other databases (read when ignore
+	// lists schemas, see inspectSchemaOwners) to owners.
+	otherOwners map[model.Object]string
 	// objects counts the objects in inspected schemas.
 	objects map[model.Object]int
 	roles   map[string]roleAccess
@@ -143,6 +146,10 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 				delete(st.connectable, db)
 			}
 		}
+	}
+	st.otherOwners = map[model.Object]string{}
+	for _, s := range cur.OtherSchemas {
+		st.otherOwners[model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}] = s.Owner
 	}
 	// Names read from the server are untrusted: objects dbfence would
 	// have to name but does not manage are left out from here on.
@@ -458,6 +465,13 @@ func unmanagedName(kind model.NameKind, name string) bool {
 // unmanagedRole reports whether role is a role (or grantor) that
 // unmanagedName excludes. "" is no role.
 func unmanagedRole(role string) bool { return unmanagedName(model.NameRole, role) }
+
+// unmanagedObject reports whether unmanagedName excludes obj: its
+// database, or its schema.
+func unmanagedObject(obj model.Object) bool {
+	return unmanagedName(model.NameDatabase, obj.Database) ||
+		(obj.Type == model.ObjectSchema && unmanagedName(model.NameSchema, obj.Schema))
+}
 
 // unmanagedOwnerMembershipWarnings names the memberships that
 // revokeOwnerMemberships would revoke before pruning a role, but cannot
