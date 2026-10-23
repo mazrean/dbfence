@@ -81,6 +81,30 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			leaked: "Ff1Gt5yHn7",
 			shown:  "****",
 		},
+		{
+			name:   "dsn interpolation across lines, parse error",
+			src:    "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://${\n    \"app\"\n  }:Rr9DsnPw7@h/d\" 1\n}\n",
+			leaked: "Rr9DsnPw7",
+			shown:  "****",
+		},
+		{
+			name:   "dsn interpolation across lines, unknown variable",
+			src:    "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://${\n    \"app\"\n  }:Rr8DsnPw7@h/${nope}\"\n}\n",
+			leaked: "Rr8DsnPw7",
+			shown:  "****",
+		},
+		{
+			name:   "password interpolation across lines, parse error",
+			src:    pgConn + "user \"app\" {\n  password = \"Hh1Xy${\n    1 +\n  }Zz9Qw8Er7\"\n}\n",
+			leaked: "Zz9Qw8Er7",
+			shown:  "****",
+		},
+		{
+			name:   "literal argument after an interpolation across lines, parse error",
+			src:    pgConn + "user \"app\" {\n  password = format(\"%s%s\", \"Jj1${\n 1}\",\n \"Jj2SecretTail9\" 1)\n}\n",
+			leaked: "Jj2SecretTail9",
+			shown:  "****",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -118,6 +142,11 @@ func TestMaskSecrets(t *testing.T) {
 		{name: "brackets of a one-line block", in: "user \"a\" { password = \"x\" }\nlogin = true\n", want: "user \"a\" { password =******\nlogin = true\n"},
 		{name: "brackets in a comment", in: "password = \"x\" # (\nlogin = true\n", want: "password =********\nlogin = true\n"},
 		{name: "unclosed bracket masks the rest", in: "password = format(\nx = 1\n", want: "password =********\n*****\n"},
+		{name: "interpolation across lines", in: "dsn = \"a${\n  b\n}c\"\nx = 1\n", want: "dsn =*****\n***\n***\nx = 1\n"},
+		{name: "template directive across lines", in: "password = \"a%{ if\n  true }b%{ endif }\"\nx = 1\n", want: "password =********\n********************\nx = 1\n"},
+		{name: "escaped interpolation", in: "password = \"a$${\"\nx = 1\n", want: "password =*******\nx = 1\n"},
+		{name: "interpolation in a heredoc", in: "password = <<EOT\na${\nEOT\n}\nEOT\nx = 1\n", want: "password =******\n***\n***\n*\nEOT\nx = 1\n"},
+		{name: "unterminated string inside an interpolation", in: "dsn = \"a${\"b\n}\"\nx = 1\n", want: "dsn =*******\n**\nx = 1\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -182,6 +211,42 @@ func TestRegisterLiteralSecrets(t *testing.T) {
 			src:        pgConn + "database \"app\" {\n  name = tfstate(\"https://u:Gg1TfTok9q@h/x.tfstate\", \"out${nope}\")\n}\n",
 			registered: []string{"Gg1TfTok9q"},
 			visible:    []string{"https://u:", "@h/x.tfstate"},
+		},
+		{
+			name:       "tfstate URL token as the username",
+			src:        pgConn + "database \"app\" {\n  name = tfstate(\"https://Tk1UserTok9q@h/x.tfstate\", \"out${nope}\")\n}\n",
+			registered: []string{"Tk1UserTok9q"},
+			visible:    []string{"https://", "@h/x.tfstate"},
+		},
+		{
+			name:       "tfstate URL token in the query",
+			src:        pgConn + "database \"app\" {\n  name = tfstate(\"https://h/x.tfstate?token=Tk2QueryTok9q&v=Tk4Sig%2F9q\", \"out${nope}\")\n}\n",
+			registered: []string{"Tk2QueryTok9q", "token=Tk2QueryTok9q&v=Tk4Sig%2F9q", "Tk4Sig/9q"},
+			visible:    []string{"https://h/x.tfstate"},
+		},
+		{
+			name:       "dsn password after an interpolation",
+			src:        "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://${\n    \"app\"\n  }:Rr8DsnPw7${\"\"}Tail@h/${nope}\"\n}\n",
+			registered: []string{"Rr8DsnPw7", "Tail"},
+			visible:    []string{"postgres://", "@h/"},
+		},
+		{
+			name:       "MySQL dsn template",
+			src:        "connection {\n  engine = \"mysql\"\n  dsn    = \"${env(\"U\")}:My1DsnPw9@tcp(h:3306)/${nope}\"\n}\n",
+			registered: []string{"My1DsnPw9"},
+			visible:    []string{"@tcp(h:3306)/"},
+		},
+		{
+			name:       "dsn password parameters",
+			src:        "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://h/d?sslmode=disable&password=Pp1QryPw9&x=${nope}\"\n}\n",
+			registered: []string{"Pp1QryPw9"},
+			visible:    []string{"disable", "postgres://h/d?sslmode=disable&password="},
+		},
+		{
+			name:       "dsn keyword form",
+			src:        "connection {\n  engine = \"postgres\"\n  dsn    = \"host=${nope} user=app password='Kw1DsnPw9'\"\n}\n",
+			registered: []string{"Kw1DsnPw9"},
+			visible:    []string{"host=", " user=app password='"},
 		},
 		{
 			name:    "function arguments name secrets",

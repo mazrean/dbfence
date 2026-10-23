@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/url"
 	"regexp"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -25,15 +26,16 @@ var secretAttrs = map[string]bool{"password": true, "dsn": true}
 var secretAssign = regexp.MustCompile(`(?:^|[^\w-])"?(?:password|dsn)"?[ \t]*=`)
 
 // heredocStart is a heredoc introducer that ends the line.
-var heredocStart = regexp.MustCompile(`<<-?([A-Za-z_][\w-]*)[ \t]*\r?$`)
+var heredocStart = regexp.MustCompile(`^<<-?([A-Za-z_][\w-]*)[ \t]*\r?$`)
 
 // maskSecrets returns a copy of src in which the value of every
 // assignment to password or dsn is replaced by '*' byte for byte, so
 // that diagnostic ranges keep pointing at the same columns. The value
-// is masked up to the end of its line and, while it has open brackets
-// or heredocs, on the lines that follow: a multi-line expression such as
-// format(\n"...") or trimspace(<<EOT\n...) is masked as a whole. A
-// value with an unclosed bracket is masked to the end of the file.
+// is masked up to the end of its line and, while it has open brackets,
+// heredocs or template interpolations, on the lines that follow: a
+// multi-line expression such as format(\n"..."),
+// trimspace(<<EOT\n...) or "a${\n x\n}b" is masked as a whole. A value
+// that is never closed is masked to the end of the file.
 func maskSecrets(src []byte) []byte {
 	out := bytes.Clone(src)
 	mask := func(b []byte) {
@@ -43,8 +45,7 @@ func maskSecrets(src []byte) []byte {
 			}
 		}
 	}
-	heredoc := ""
-	depth := 0
+	var sc valueScanner
 	for start := 0; start < len(out); {
 		end := bytes.IndexByte(out[start:], '\n')
 		if end < 0 {
@@ -53,59 +54,107 @@ func maskSecrets(src []byte) []byte {
 			end += start
 		}
 		line := out[start:end]
-		switch {
-		case heredoc != "":
-			if string(bytes.TrimSpace(line)) == heredoc {
-				heredoc = ""
-			} else {
+		if sc.open() {
+			if !sc.scan(line) {
 				mask(line)
 			}
-		case depth > 0:
-			depth, heredoc = scanValue(line, depth)
-			mask(line)
-		default:
-			if v := secretValue(line); v >= 0 {
-				depth, heredoc = scanValue(line[v:], 0)
-				mask(line[v:])
-			}
+		} else if v := secretValue(line); v >= 0 {
+			sc.scan(line[v:])
+			mask(line[v:])
 		}
 		start = end + 1
 	}
 	return out
 }
 
-// scanValue returns the bracket depth after the expression text of one
-// line, starting at depth, and the delimiter of a heredoc that the line
-// introduces. Brackets inside quoted strings are not counted.
-func scanValue(line []byte, depth int) (int, string) {
-	inString := false
-	code := make([]byte, 0, len(line))
+// Kinds of valueScanner frames, besides the brackets '(', '[' and '{'.
+const (
+	frameString  = '"' // a quoted template
+	frameInterp  = '$' // a ${ or %{ sequence of a template
+	frameHeredoc = '<' // the body of a heredoc
+)
+
+type scanFrame struct {
+	delim string // of a heredoc
+	kind  byte
+}
+
+// valueScanner follows the nesting of an HCL expression across lines:
+// brackets, quoted templates with their ${ and %{ sequences, and
+// heredocs. Brackets in comments and in the literal text of templates
+// are not counted.
+type valueScanner struct{ stack []scanFrame }
+
+// open reports whether the expression goes on past the scanned lines.
+func (s *valueScanner) open() bool { return len(s.stack) > 0 }
+
+func (s *valueScanner) top() byte {
+	if len(s.stack) == 0 {
+		return 0
+	}
+	return s.stack[len(s.stack)-1].kind
+}
+
+func (s *valueScanner) push(kind byte, delim string) {
+	s.stack = append(s.stack, scanFrame{kind: kind, delim: delim})
+}
+
+// scan follows one line of the expression. It reports whether the line
+// is the delimiter that ends a heredoc, which is not part of the value.
+func (s *valueScanner) scan(line []byte) bool {
+	if s.top() == frameHeredoc && string(bytes.TrimSpace(line)) == s.stack[len(s.stack)-1].delim {
+		s.stack = s.stack[:len(s.stack)-1]
+		return true
+	}
+	at := func(i int) byte {
+		if i < len(line) {
+			return line[i]
+		}
+		return 0
+	}
 	for i := 0; i < len(line); i++ {
 		c := line[i]
-		switch {
-		case inString && c == '\\':
-			i++
-			continue
-		case c == '"':
-			inString = !inString
-		case inString:
-		case c == '(' || c == '[' || c == '{':
-			depth++
-		case c == ')' || c == ']' || c == '}':
-			depth = max(depth-1, 0)
-		case c == '#' || c == '/' && i+1 < len(line) && line[i+1] == '/':
-			// A comment ends the line.
-			i = len(line)
-			continue
-		}
-		if !inString {
-			code = append(code, c)
+		switch top := s.top(); top {
+		case frameString, frameHeredoc:
+			switch {
+			case top == frameString && c == '\\':
+				i++
+			case (c == '$' || c == '%') && bytes.HasPrefix(line[i+1:], []byte{c, '{'}):
+				// $${ and %%{ are literal text.
+				i += len("${")
+			case (c == '$' || c == '%') && at(i+1) == '{':
+				s.push(frameInterp, "")
+				i++
+			case top == frameString && c == '"':
+				s.stack = s.stack[:len(s.stack)-1]
+			}
+		default:
+			switch {
+			case c == '"':
+				s.push(frameString, "")
+			case c == '(' || c == '[' || c == '{':
+				s.push(c, "")
+			case c == ')' || c == ']' || c == '}':
+				if s.open() {
+					s.stack = s.stack[:len(s.stack)-1]
+				}
+			case c == '#' || c == '/' && at(i+1) == '/':
+				// A comment ends the line.
+				return false
+			case c == '<':
+				if m := heredocStart.FindSubmatch(line[i:]); m != nil {
+					s.push(frameHeredoc, string(m[1]))
+					return false
+				}
+			}
 		}
 	}
-	if m := heredocStart.FindSubmatch(code); m != nil && !inString {
-		return depth, string(m[1])
+	// A quoted template cannot span lines: it ends, as an error, with
+	// its line. Its interpolations can.
+	if s.top() == frameString {
+		s.stack = s.stack[:len(s.stack)-1]
 	}
-	return depth, ""
+	return false
 }
 
 // secretValue returns the offset in line of the value of the first
@@ -156,11 +205,12 @@ func registerLiteralSecrets(body hcl.Body) {
 		}
 		parts := literalParts(a.Expr)
 		if name == "dsn" {
-			for _, p := range parts {
-				registerURLPassword(p)
+			for _, t := range templateTexts(a.Expr) {
+				registerPieces(dsnPasswords(t)...)
 			}
-			// Only a whole literal: the literal text around a lookup
-			// is not secret, and redacting it would garble messages.
+			// Only a whole literal: the rest of the literal text
+			// around a lookup is not secret, and redacting it would
+			// garble messages.
 			if len(parts) != 1 || !isWholeLiteral(a.Expr) {
 				continue
 			}
@@ -174,7 +224,7 @@ func registerLiteralSecrets(body hcl.Body) {
 	}
 }
 
-// registerStateURLPasswords registers the password of every literal
+// registerStateURLPasswords registers the credentials of every literal
 // state URL passed to tfstate anywhere in body, such as
 // https://user:token@host/x.tfstate, since a diagnostic on the line of
 // the call quotes it whichever attribute it is on.
@@ -185,22 +235,93 @@ func registerStateURLPasswords(body hcl.Body) {
 	}
 	_ = hclsyntax.VisitAll(b, func(n hclsyntax.Node) hcl.Diagnostics {
 		if call, ok := n.(*hclsyntax.FunctionCallExpr); ok && call.Name == "tfstate" && len(call.Args) > 0 {
-			for _, p := range literalParts(call.Args[0]) {
-				registerURLPassword(p)
+			for _, t := range templateTexts(call.Args[0]) {
+				registerPieces(stateURLSecrets(t)...)
 			}
 		}
 		return nil
 	})
 }
 
-// registerURLPassword registers the password of s if s is a URL with
-// one.
-func registerURLPassword(s string) {
-	if u, err := url.Parse(s); err == nil && u.User != nil {
-		if pw, ok := u.User.Password(); ok {
-			secret.Register(pw)
+// hole stands for an interpolation in the texts of templateTexts.
+const hole = "\x00"
+
+// registerPieces registers the pieces of each of ss between holes, as
+// written and percent-decoded.
+func registerPieces(ss ...string) {
+	for _, s := range ss {
+		for p := range strings.SplitSeq(s, hole) {
+			secret.Register(p)
+			if d, err := url.PathUnescape(p); err == nil {
+				secret.Register(d)
+			}
 		}
 	}
+}
+
+// dsnPasswords returns the passwords that the DSN text s holds: that of
+// its userinfo, as in postgres://user:pw@host/db and in MySQL's
+// user:pw@tcp(host)/db, and the values of password parameters, as in
+// ?password=pw and in the keyword form password=pw.
+func dsnPasswords(s string) []string {
+	var out []string
+	if info, ok := userinfo(s); ok {
+		if _, pw, ok := strings.Cut(info, ":"); ok {
+			out = append(out, pw)
+		}
+	}
+	sep := func(r rune) bool { return r == '?' || r == '&' || r == ' ' || r == '\t' || r == '\n' }
+	for f := range strings.FieldsFuncSeq(s, sep) {
+		if k, v, ok := strings.Cut(f, "="); ok && strings.Contains(strings.ToLower(k), "pass") {
+			out = append(out, strings.Trim(v, "'"))
+		}
+	}
+	return out
+}
+
+// stateURLSecrets returns the parts of the state URL text s that the
+// tfstate function does not print (see redactURL in internal/funcs):
+// the whole userinfo, since a token may be passed as the username, the
+// query string and each of its values, and the fragment. A local path
+// has none.
+func stateURLSecrets(s string) []string {
+	if !strings.Contains(s, "://") {
+		return nil
+	}
+	var out []string
+	if info, ok := userinfo(s); ok {
+		name, pw, _ := strings.Cut(info, ":")
+		out = append(out, info, name, pw)
+	}
+	rest, frag, _ := strings.Cut(s, "#")
+	out = append(out, frag)
+	if _, query, ok := strings.Cut(rest, "?"); ok {
+		out = append(out, query)
+		for f := range strings.SplitSeq(query, "&") {
+			_, v, _ := strings.Cut(f, "=")
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// userinfo returns the text before the '@' that ends the userinfo of a
+// URL or of a MySQL DSN: the last '@' of the authority of a URL, or the
+// last '@' before the last '/' of a DSN without a scheme.
+func userinfo(s string) (string, bool) {
+	if _, rest, ok := strings.Cut(s, "://"); ok {
+		if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+			rest = rest[:i]
+		}
+		s = rest
+	} else if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[:i]
+	}
+	i := strings.LastIndex(s, "@")
+	if i < 0 {
+		return "", false
+	}
+	return s[:i], true
 }
 
 // lookupFuncs are the functions whose arguments name a value (an
@@ -215,41 +336,64 @@ var lookupFuncs = map[string]bool{
 // literals and templates, also inside lists, indexes, conditionals and
 // the arguments of functions such as format and trimspace. The
 // arguments of lookupFuncs are not included.
-func literalParts(e hclsyntax.Expression) []string {
+func literalParts(e hclsyntax.Expression) []string { return literals(e, false) }
+
+// templateTexts returns the texts of the string literals and templates
+// that literalParts finds in e, one for each template with its
+// interpolations replaced by hole.
+func templateTexts(e hclsyntax.Expression) []string { return literals(e, true) }
+
+func literals(e hclsyntax.Expression, joined bool) []string {
 	switch e := e.(type) {
 	case *hclsyntax.ParenthesesExpr:
-		return literalParts(e.Expression)
+		return literals(e.Expression, joined)
 	case *hclsyntax.LiteralValueExpr:
 		if s, ok := stringValue(e.Val); ok {
 			return []string{s}
 		}
 	case *hclsyntax.TemplateExpr:
 		var out []string
+		if joined {
+			var sb strings.Builder
+			for _, p := range e.Parts {
+				if l, ok := p.(*hclsyntax.LiteralValueExpr); ok {
+					if s, ok := stringValue(l.Val); ok {
+						sb.WriteString(s)
+						continue
+					}
+				}
+				sb.WriteString(hole)
+			}
+			out = append(out, sb.String())
+		}
+		// The literals inside interpolations, such as format(...).
 		for _, p := range e.Parts {
-			out = append(out, literalParts(p)...)
+			if _, ok := p.(*hclsyntax.LiteralValueExpr); !ok || !joined {
+				out = append(out, literals(p, joined)...)
+			}
 		}
 		return out
 	case *hclsyntax.TemplateWrapExpr:
-		return literalParts(e.Wrapped)
+		return literals(e.Wrapped, joined)
 	case *hclsyntax.TupleConsExpr:
 		var out []string
 		for _, x := range e.Exprs {
-			out = append(out, literalParts(x)...)
+			out = append(out, literals(x, joined)...)
 		}
 		return out
 	case *hclsyntax.IndexExpr:
-		return literalParts(e.Collection)
+		return literals(e.Collection, joined)
 	case *hclsyntax.RelativeTraversalExpr:
-		return literalParts(e.Source)
+		return literals(e.Source, joined)
 	case *hclsyntax.ConditionalExpr:
-		return append(literalParts(e.TrueResult), literalParts(e.FalseResult)...)
+		return append(literals(e.TrueResult, joined), literals(e.FalseResult, joined)...)
 	case *hclsyntax.FunctionCallExpr:
 		if lookupFuncs[e.Name] {
 			return nil
 		}
 		var out []string
 		for _, x := range e.Args {
-			out = append(out, literalParts(x)...)
+			out = append(out, literals(x, joined)...)
 		}
 		return out
 	}
