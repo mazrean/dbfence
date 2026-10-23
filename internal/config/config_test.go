@@ -214,6 +214,31 @@ func TestExpandPrivileges(t *testing.T) {
 	}
 }
 
+func TestExpandPrivilegesErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		engine  model.Engine
+		typ     model.ObjectType
+		wantErr string
+		in      []string
+	}{
+		{engine: model.EngineMySQL, typ: model.ObjectDatabase, in: []string{"SELECT", "GRANT OPTION"}, wantErr: "set with_grant_option = true instead"},
+		{engine: model.EngineMySQL, typ: model.ObjectDatabase, in: []string{"grant  option"}, wantErr: "set with_grant_option = true instead"},
+		{engine: model.EnginePostgres, typ: model.ObjectDatabase, in: []string{"grant"}, wantErr: "set with_grant_option = true instead"},
+		{engine: model.EnginePostgres, typ: model.ObjectSchema, in: []string{"GRANT OPTION"}, wantErr: "set with_grant_option = true instead"},
+		{engine: model.EnginePostgres, typ: model.ObjectSchema, in: []string{"SELECT"}, wantErr: "(valid: CREATE, USAGE)"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.engine)+"/"+strings.Join(tt.in, ","), func(t *testing.T) {
+			t.Parallel()
+			_, err := ExpandPrivileges(tt.engine, tt.typ, tt.in)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("ExpandPrivileges(%v) error = %v, want it to contain %q", tt.in, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoadDirectoryEntries(t *testing.T) {
 	t.Parallel()
 	conn := "connection {\n engine = \"postgres\"\n dsn = \"x\"\n}"

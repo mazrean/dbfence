@@ -732,6 +732,8 @@ func ExpandPrivileges(engine model.Engine, typ model.ObjectType, in []string) ([
 			continue
 		case n == "TEMP" && engine == model.EnginePostgres:
 			n = "TEMPORARY"
+		case n == "GRANT OPTION" || n == "GRANT":
+			return nil, fmt.Errorf("privilege %q cannot be listed in privileges; set with_grant_option = true instead", p)
 		}
 		if !slices.Contains(valid, n) {
 			return nil, fmt.Errorf("privilege %q is not valid on a %s %s (valid: %s)", p, engine, typ, strings.Join(valid, ", "))
