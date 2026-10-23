@@ -601,6 +601,11 @@ func objectLabel(obj model.Object) string {
 	if obj.Type == model.ObjectSchema {
 		return fmt.Sprintf("schema %q in database %q", obj.Schema, obj.Database)
 	}
+	if obj.Pattern != "" {
+		// An inspected MySQL wildcard grant, e.g. "my_app" written
+		// without escaping the '_'.
+		return fmt.Sprintf("%s pattern %q", obj.Type, obj.Pattern)
+	}
 	return fmt.Sprintf("%s %q", obj.Type, obj.Database)
 }
 

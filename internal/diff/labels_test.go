@@ -78,6 +78,31 @@ func TestComputeLabels(t *testing.T) {
 				`[update] default roles of user "m@x"@"localhost"`,
 			},
 		},
+		{
+			// The unescaped wildcard row is revoked and the literal grant
+			// added; the headers must tell them apart.
+			name: "mysql wildcard grant replaced by a literal one",
+			desired: &model.Desired{
+				Engine:     model.EngineMySQL,
+				Roles:      []model.Role{{ID: team, Login: new(false)}},
+				Databases:  []model.Database{{Name: "my_app"}},
+				Privileges: []model.Privilege{{Grantee: team, Object: dbObj("my_app"), Name: "SELECT"}},
+			},
+			current: &model.Current{
+				CurrentUser: model.RoleID{Name: "root", Host: "localhost"},
+				Roles:       []model.RoleState{{ID: model.RoleID{Name: "root", Host: "localhost"}, Login: true}, {ID: team}},
+				Databases:   []model.Database{{Name: "my_app"}},
+				Privileges: []model.Privilege{{
+					Grantee: team, Name: "SELECT",
+					Object: model.Object{Type: model.ObjectDatabase, Database: "my_app", Pattern: "my_app"},
+				}},
+			},
+			dialect: mysql.Dialect{},
+			want: []string{
+				`[grant] SELECT on database "my_app" to "team@ops"@"%"`,
+				`[revoke] SELECT on database pattern "my_app" from "team@ops"@"%"`,
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
