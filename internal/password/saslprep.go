@@ -3,8 +3,6 @@ package password
 import (
 	"slices"
 	"unicode/utf8"
-
-	"golang.org/x/text/unicode/norm"
 )
 
 // runeRange is an inclusive range of code points.
@@ -50,7 +48,7 @@ func saslPrep(password string) string {
 	}
 
 	// 2) Normalize with NFKC.
-	out := []rune(norm.NFKC.String(string(mapped)))
+	out := []rune(nfkc(string(mapped)))
 
 	// 3) Prohibit, including code points unassigned in Unicode 3.2.
 	randAL := false
