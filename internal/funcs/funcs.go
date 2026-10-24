@@ -384,11 +384,16 @@ func (r *Registry) tfstateFunc() function.Function {
 				if err != nil {
 					return cty.NilVal, err
 				}
+				// Not wrapped: decoding errors may quote the value.
 				ty, err := ctyjson.ImpliedType(b)
 				if err != nil {
-					return cty.NilVal, fmt.Errorf("tfstate value of %q: %w", addr, err)
+					return cty.NilVal, fmt.Errorf("tfstate: the value of %q cannot be decoded", addr)
 				}
-				return ctyjson.Unmarshal(b, ty)
+				v, err := ctyjson.Unmarshal(b, ty)
+				if err != nil {
+					return cty.NilVal, fmt.Errorf("tfstate: the value of %q cannot be decoded", addr)
+				}
+				return v, nil
 			})
 		},
 	})

@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/password"
 )
 
 func TestCreateRolePlugin(t *testing.T) {
@@ -136,6 +137,70 @@ func TestAlterRolePlugin(t *testing.T) {
 			}
 			if len(warns) != tt.wantWarns {
 				t.Errorf("warnings = %q, want %d", warns, tt.wantWarns)
+			}
+		})
+	}
+}
+
+// TestAlterRoleRetainedPassword checks that a secondary password kept by
+// RETAIN CURRENT PASSWORD is discarded when a password is declared.
+func TestAlterRoleRetainedPassword(t *testing.T) {
+	t.Parallel()
+	native := func(retained bool) model.RoleState {
+		return model.RoleState{
+			ID: app, AuthPlugin: password.PluginNative, Login: true, PasswordReadable: true,
+			PasswordHash: []byte(password.MySQLNative("new")), RetainedPassword: retained,
+		}
+	}
+	tests := []struct {
+		name  string
+		want  []string
+		role  model.Role
+		cur   model.RoleState
+		force bool
+	}{
+		{
+			name: "matching password with a retained one",
+			role: model.Role{ID: app, Password: new("new")},
+			cur:  native(true),
+			want: []string{"ALTER USER 'app'@'%' DISCARD OLD PASSWORD"},
+		},
+		{
+			name: "changed password with a retained one",
+			role: model.Role{ID: app, Password: new("newer")},
+			cur:  native(true),
+			want: []string{
+				"ALTER USER 'app'@'%' IDENTIFIED WITH mysql_native_password BY '<redacted>'",
+				"ALTER USER 'app'@'%' DISCARD OLD PASSWORD",
+			},
+		},
+		{
+			name: "matching password without a retained one",
+			role: model.Role{ID: app, Password: new("new")},
+			cur:  native(false),
+		},
+		{
+			name: "no declared password leaves a retained one",
+			role: model.Role{ID: app},
+			cur:  native(true),
+		},
+		{
+			name:  "unknown attributes",
+			role:  model.Role{ID: app, Password: new("new")},
+			cur:   model.RoleState{ID: app, AttributesUnknown: true},
+			force: true,
+			want:  []string{"ALTER USER 'app'@'%' IDENTIFIED BY '<redacted>'"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stmts, warns := Dialect{}.AlterRole(tt.role, tt.cur, tt.force)
+			if d := cmp.Diff(tt.want, sqls(stmts)); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			if len(warns) != 0 {
+				t.Errorf("warnings = %q, want none", warns)
 			}
 		})
 	}

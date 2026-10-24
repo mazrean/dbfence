@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -32,12 +33,32 @@ type state struct {
 	connectable map[string]bool
 	// owners maps databases (Schema "") and inspected schemas to owners.
 	owners map[model.Object]string
+	// otherOwners maps the schemas of other databases (see
+	// inspectSchemaOwners) to owners.
+	otherOwners map[model.Object]string
+	// otherACL holds the schema privileges of those databases. Unlike
+	// acl, it is only used to keep roles from --prune.
+	otherACL []aclEntry
+	// shared holds the dependencies of roles on shared objects
+	// (pg_shdepend with dbid 0), which REASSIGN OWNED and DROP OWNED
+	// change from any database.
+	shared []sharedDep
 	// objects counts the objects in inspected schemas.
 	objects map[model.Object]int
 	roles   map[string]roleAccess
+	// unmanagedDeps maps databases in which a role dbfence does not
+	// manage (model.CheckName) owns objects or holds privileges
+	// (pg_shdepend) to the first such role.
+	unmanagedDeps map[string]string
+	// roleDeps maps the roles with names dbfence manages to the
+	// databases in which they own objects or hold or granted privileges
+	// (pg_shdepend).
+	roleDeps map[string][]string
 	// createroleSelfGrant is the createrole_self_grant setting (PG16+).
 	createroleSelfGrant string
 	user                string
+	// database is the database the connection is to.
+	database string
 	acl                 []aclEntry
 	members             []memberEntry
 	version             int
@@ -66,6 +87,13 @@ type aclEntry struct {
 	grantable bool
 }
 
+// sharedDep is a dependency of role on a shared object: class is its
+// catalog (pg_database, pg_tablespace, ...), name the database or
+// tablespace name ("" for other catalogs).
+type sharedDep struct {
+	role, class, name string
+}
+
 // memberEntry is one pg_auth_members row.
 type memberEntry struct {
 	role, member, grantor string
@@ -80,6 +108,9 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		owners:      map[model.Object]string{},
 		objects:     map[model.Object]int{},
 		roles:       map[string]roleAccess{},
+		// Filled by unreachableDependencyWarnings.
+		unmanagedDeps: map[string]string{},
+		roleDeps:      map[string][]string{},
 	}
 	cur := &model.Current{}
 	var authidReadable bool
@@ -88,10 +119,11 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 			coalesce(current_setting('createrole_self_grant', true), ''),
 			r.rolsuper, r.rolcreaterole, has_table_privilege('pg_catalog.pg_authid', 'SELECT')
 		FROM pg_roles r WHERE r.rolname = current_user`).
-		Scan(&st.user, &cur.CurrentDatabase, &st.version, &st.createroleSelfGrant, &st.superuser, &st.createRole, &authidReadable); err != nil {
+		Scan(&st.user, &st.database, &st.version, &st.createroleSelfGrant, &st.superuser, &st.createRole, &authidReadable); err != nil {
 		return nil, fmt.Errorf("current user: %w", err)
 	}
 	cur.CurrentUser = model.RoleID{Name: st.user}
+	cur.CurrentDatabase = st.database
 	warns, err := checkMembershipOptions(desired, st.version)
 	if err != nil {
 		return nil, err
@@ -99,7 +131,7 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	cur.Warnings = append(cur.Warnings, warns...)
 
 	steps := []func(context.Context, *model.Current, *state) error{
-		d.inspectDatabases, d.inspectRoles, d.inspectMembership, d.inspectDatabaseACL,
+		d.inspectDatabases, d.inspectRoles, d.inspectMembership, d.inspectDatabaseACL, d.inspectSharedDependencies,
 	}
 	for _, step := range steps {
 		if err := step(ctx, cur, st); err != nil {
@@ -132,6 +164,30 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		}
 		cur.InspectedDatabases = append(cur.InspectedDatabases, db.Name)
 	}
+	// Pruning a role runs REASSIGN OWNED and DROP OWNED in the other
+	// databases too, and pruning one of them drops its schemas, so their
+	// schemas are read.
+	for _, db := range otherSchemaDatabases(desired, cur, st.connectable) {
+		ok, err := d.inspectSchemaOwners(ctx, cur, st, db)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			cur.Warnings = append(cur.Warnings, fmt.Sprintf("cannot connect to database %q: owners of and privileges on its schemas are not known, so --prune does not run REASSIGN OWNED and DROP OWNED there", db))
+			delete(st.connectable, db)
+		}
+	}
+	st.entangleUnread(cur)
+	st.otherOwners = map[model.Object]string{}
+	for _, s := range cur.OtherSchemas {
+		st.otherOwners[model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}] = s.Owner
+	}
+	// Names read from the server are untrusted: objects dbfence would
+	// have to name but does not manage are left out from here on.
+	if _, err := cur.DropUntrusted(model.EnginePostgres); err != nil {
+		return nil, fmt.Errorf("inspect: %w", err)
+	}
+	cur.Warnings = append(cur.Warnings, st.unmanagedOwnerMembershipWarnings(cur)...)
 	if !st.superuser {
 		cur.Warnings = append(cur.Warnings, st.ownerWarnings(cur)...)
 		cur.Warnings = append(cur.Warnings, st.pruneWarnings(cur)...)
@@ -141,6 +197,7 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		return nil, depErr
 	}
 	cur.Warnings = append(cur.Warnings, depWarns...)
+	st.entangleSchemaObjects(cur)
 	d.st = st
 	return cur, nil
 }
@@ -271,7 +328,7 @@ func ownerActions(obj model.Object) string {
 // role (set) and use its privileges (use). Before PostgreSQL 16 plain
 // membership gives both.
 func (st *state) memberGrant(role string, set, use bool) string {
-	q := "GRANT " + Ident(role) + " TO " + Ident(st.user)
+	q := "GRANT " + Ident(role).String() + " TO " + Ident(st.user).String()
 	if st.version < pg16 {
 		return q
 	}
@@ -398,10 +455,23 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 			if err := rows.Scan(&role, &db); err != nil {
 				return err
 			}
+			if unmanagedRole(role) && !unmanagedName(model.NameDatabase, db) {
+				if _, ok := st.unmanagedDeps[db]; !ok {
+					st.unmanagedDeps[db] = role
+				}
+				cur.Entangle(model.Object{Type: model.ObjectDatabase, Database: db},
+					fmt.Sprintf("role %q, which dbfence does not manage, owns objects or holds privileges in it", role))
+				return nil
+			}
+			if !unmanagedRole(role) && !unmanagedName(model.NameDatabase, db) {
+				st.roleDeps[role] = append(st.roleDeps[role], db)
+			}
 			var why string
 			switch {
 			case !prunable(role):
 				return nil
+			case unmanagedName(model.NameDatabase, db):
+				why = "not managed by dbfence"
 			case matches(ignoreDBs, db) && !slices.ContainsFunc(st.desired.Databases, func(d model.Database) bool { return d.Name == db }):
 				why = "ignored"
 			case !st.connectable[db]:
@@ -418,12 +488,82 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 	if err != nil {
 		return nil, err
 	}
+	st.entangleOwned(cur)
 	warns := make([]string, 0, len(roles))
 	for _, role := range roles {
 		warns = append(warns, fmt.Sprintf("role %q owns objects or holds privileges in %s, where dbfence does not run REASSIGN OWNED and DROP OWNED, so dropping it with --prune will fail at DROP ROLE; reassign or drop them there first",
 			role, strings.Join(blocked[role], ", ")))
 	}
 	return warns, nil
+}
+
+// entangleOwned records in cur.EntangledOwned each role with a name
+// dbfence manages and database in which both it and a role dbfence does
+// not manage own objects or hold or granted privileges (pg_shdepend, which
+// records the owners, grantees and grantors of privileges): DROP OWNED of
+// the role revokes with CASCADE the privileges it granted, also to that
+// role, on tables, functions and types, which are not inspected.
+func (st *state) entangleOwned(cur *model.Current) {
+	for _, role := range slices.Sorted(maps.Keys(st.roleDeps)) {
+		for _, db := range st.roleDeps[role] {
+			if why := st.ownedEntangled(role, db); why != "" {
+				cur.EntangleOwned(model.RoleID{Name: role}, db, why)
+			}
+		}
+	}
+}
+
+// ownedEntangled explains why REASSIGN OWNED and DROP OWNED of role in
+// database may change what a role dbfence does not manage holds, or
+// returns "" (see entangleOwned).
+func (st *state) ownedEntangled(role, database string) string {
+	other, ok := st.unmanagedDeps[database]
+	if !ok || !slices.Contains(st.roleDeps[role], database) {
+		return ""
+	}
+	return fmt.Sprintf("it owns objects or holds or granted privileges in database %q, where role %q, which dbfence does not manage, owns objects or holds privileges too, so DROP OWNED could revoke privileges it granted to that role on tables, functions or types there, which are not inspected",
+		database, other)
+}
+
+// unmanagedName reports whether dbfence does not manage an object named
+// name because of the name itself (model.CheckName). Inspect removes such
+// objects from model.Current; the state keeps them, so that grants and
+// memberships depending on them are still known, and the statements that
+// would name one of them are skipped with a warning instead.
+func unmanagedName(kind model.NameKind, name string) bool {
+	return model.CheckName(model.EnginePostgres, kind, name) != ""
+}
+
+// unmanagedRole reports whether role is a role (or grantor) that
+// unmanagedName excludes. "" is no role.
+func unmanagedRole(role string) bool { return unmanagedName(model.NameRole, role) }
+
+// unmanagedObject reports whether unmanagedName excludes obj: its
+// database, or its schema.
+func unmanagedObject(obj model.Object) bool {
+	return unmanagedName(model.NameDatabase, obj.Database) ||
+		(obj.Type == model.ObjectSchema && unmanagedName(model.NameSchema, obj.Schema))
+}
+
+// unmanagedOwnerMembershipWarnings names the memberships that
+// revokeOwnerMemberships would revoke before pruning a role, but cannot
+// because they name a role dbfence does not manage, so DROP ROLE may fail.
+func (st *state) unmanagedOwnerMembershipWarnings(cur *model.Current) []string {
+	ignore := compileIgnore(st.desired.Ignore.Roles)
+	var warns []string
+	for _, r := range cur.Roles {
+		if !st.prunable(r.ID.Name, ignore) {
+			continue
+		}
+		for _, e := range st.ownerMemberships(r.ID.Name) {
+			if unmanagedRole(e.role) || unmanagedRole(e.grantor) {
+				warns = append(warns, fmt.Sprintf("role %q has the privileges of the owner of objects it granted privileges on through a membership that names a role dbfence does not manage, which is not revoked, so dropping it with --prune may fail at DROP ROLE; revoke that membership manually first",
+					r.ID.Name))
+				break
+			}
+		}
+	}
+	return warns
 }
 
 func compileIgnore(patterns []string) []*regexp.Regexp {
@@ -577,6 +717,32 @@ func (d *Driver) inspectMembership(ctx context.Context, cur *model.Current, st *
 		})
 }
 
+// inspectSharedDependencies reads the dependencies of roles on shared
+// objects: the owners of and privileges on databases (also those that
+// inspectDatabases leaves out), tablespaces and, from PostgreSQL 15 on,
+// parameters. REASSIGN OWNED and DROP OWNED change them wherever they
+// run. Memberships (pg_auth_members, PostgreSQL 16+) are left out:
+// inspectMembership reads them. The catalog is named by classid so that
+// older servers, which lack some catalogs, accept the query.
+func (d *Driver) inspectSharedDependencies(ctx context.Context, _ *model.Current, st *state) error {
+	return query(ctx, d.db, `SELECT DISTINCT r.rolname, s.classid::regclass::text, coalesce(db.datname, ts.spcname, '')
+		FROM pg_shdepend s
+		JOIN pg_roles r ON r.oid = s.refobjid
+		LEFT JOIN pg_database db ON s.classid = 'pg_database'::regclass AND db.oid = s.objid
+		LEFT JOIN pg_tablespace ts ON s.classid = 'pg_tablespace'::regclass AND ts.oid = s.objid
+		WHERE s.refclassid = 'pg_authid'::regclass AND s.dbid = 0 AND s.deptype <> 'p'
+			AND s.classid <> 'pg_auth_members'::regclass
+		ORDER BY 1, 2, 3`,
+		func(rows *sql.Rows) error {
+			var e sharedDep
+			if err := rows.Scan(&e.role, &e.class, &e.name); err != nil {
+				return err
+			}
+			st.shared = append(st.shared, e)
+			return nil
+		})
+}
+
 func (d *Driver) inspectDatabaseACL(ctx context.Context, cur *model.Current, st *state) error {
 	listed := func(name string) bool {
 		return slices.ContainsFunc(cur.Databases, func(db model.Database) bool { return db.Name == name })
@@ -618,6 +784,142 @@ func (st *state) addACL(cur *model.Current, e aclEntry) {
 	cur.Privileges = append(cur.Privileges, p)
 }
 
+// entangleSchemaObjects records in cur.Entangled the inspected schemas
+// that contain objects in a database where a role dbfence does not manage
+// owns objects or holds privileges, or that contains a schema with a name
+// dbfence does not manage or owned by such a role: which schemas those
+// objects are in, and which objects depend on which, is not read, and
+// DROP SCHEMA ... CASCADE could drop them. A schema without objects is
+// dropped without CASCADE, which fails if anything depends on it.
+func (st *state) entangleSchemaObjects(cur *model.Current) {
+	unmanagedSchemas := st.unmanagedSchemas()
+	for _, s := range cur.Schemas {
+		obj := model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}
+		n := st.objects[obj]
+		if n == 0 {
+			continue
+		}
+		if role, ok := st.unmanagedDeps[s.Database]; ok {
+			cur.Entangle(obj, fmt.Sprintf("it contains %d objects, which may include objects of or privileges held by role %q, which dbfence does not manage (it owns objects or holds privileges in database %q)",
+				n, role, s.Database))
+		}
+		if what, ok := unmanagedSchemas[s.Database]; ok {
+			cur.Entangle(obj, fmt.Sprintf("it contains %d objects, on which objects in %s, which dbfence does not manage, may depend (DROP SCHEMA ... CASCADE would drop them too)",
+				n, what))
+		}
+	}
+}
+
+// unmanagedSchemas maps the inspected databases that contain a schema
+// dbfence does not manage (by its name or its owner's) to a description
+// of the first such schema.
+func (st *state) unmanagedSchemas() map[string]string {
+	keys := slices.SortedFunc(maps.Keys(st.owners), func(a, b model.Object) int {
+		return cmp.Or(strings.Compare(a.Database, b.Database), strings.Compare(a.Schema, b.Schema))
+	})
+	out := map[string]string{}
+	for _, obj := range keys {
+		owner := st.owners[obj]
+		if _, ok := out[obj.Database]; ok || obj.Type != model.ObjectSchema {
+			continue
+		}
+		switch {
+		case unmanagedName(model.NameSchema, obj.Schema):
+			out[obj.Database] = fmt.Sprintf("schema %q", obj.Schema)
+		case unmanagedRole(owner):
+			out[obj.Database] = fmt.Sprintf("schema %q, owned by role %q", obj.Schema, owner)
+		}
+	}
+	return out
+}
+
+// entangleUnread records in cur.Entangled the undeclared databases with
+// names dbfence manages that it cannot connect to (no CONNECT, or the
+// connection failed): what they contain is not known, so --prune keeps
+// them. Provider databases are never dropped.
+func (st *state) entangleUnread(cur *model.Current) {
+	for _, db := range cur.Databases {
+		if st.connectable[db.Name] || providerDatabase(db.Name) || unmanagedName(model.NameDatabase, db.Name) ||
+			slices.ContainsFunc(st.desired.Databases, func(d model.Database) bool { return d.Name == db.Name }) {
+			continue
+		}
+		cur.Entangle(model.Object{Type: model.ObjectDatabase, Database: db.Name},
+			"dbfence cannot connect to it and does not know what it contains")
+	}
+}
+
+// otherSchemaDatabases returns the connectable databases that are neither
+// declared nor ignored: pruning a role runs REASSIGN OWNED and DROP OWNED
+// there, so the owners of their schemas (ignored ones, see
+// model.Current.OtherSchemas, and unmanaged ones) and the privileges on
+// them must be known.
+func otherSchemaDatabases(desired *model.Desired, cur *model.Current, connectable map[string]bool) []string {
+	ignoreDBs := compileIgnore(desired.Ignore.Databases)
+	var out []string
+	for _, db := range cur.Databases {
+		if !connectable[db.Name] || unmanagedName(model.NameDatabase, db.Name) ||
+			slices.ContainsFunc(desired.Databases, func(d model.Database) bool { return d.Name == db.Name }) ||
+			slices.ContainsFunc(ignoreDBs, func(re *regexp.Regexp) bool { return re.MatchString(db.Name) }) {
+			continue
+		}
+		out = append(out, db.Name)
+	}
+	return out
+}
+
+// inspectSchemaOwners reads the schemas and their owners of an undeclared
+// database into cur.OtherSchemas, and the privileges on them into
+// st.otherACL. It reports false when the database cannot be connected to.
+// The connection is closed afterwards: the plan may drop the database.
+func (d *Driver) inspectSchemaOwners(ctx context.Context, cur *model.Current, st *state, database string) (bool, error) {
+	c, err := d.conn(ctx, database)
+	defer d.closeConn(database)
+	if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) &&
+		slices.Contains([]string{sqlstateInsufficientPrivilege, sqlstateInvalidAuthorization, sqlstateInvalidCatalogName}, pgErr.Code) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	err = query(ctx, c, `SELECT nspname, pg_get_userbyid(nspowner) FROM pg_namespace
+		WHERE nspname NOT LIKE 'pg\_%' AND nspname <> 'information_schema' ORDER BY nspname`,
+		func(rows *sql.Rows) error {
+			s := model.Schema{Database: database}
+			if scanErr := rows.Scan(&s.Name, &s.Owner); scanErr != nil {
+				return scanErr
+			}
+			cur.OtherSchemas = append(cur.OtherSchemas, s)
+			return nil
+		})
+	if err != nil {
+		return false, fmt.Errorf("schemas of database %q: %w", database, err)
+	}
+	err = query(ctx, c, schemaACLQuery, func(rows *sql.Rows) error {
+		e := aclEntry{obj: model.Object{Type: model.ObjectSchema, Database: database}}
+		if scanErr := rows.Scan(&e.obj.Schema, &e.grantee, &e.grantor, &e.priv, &e.grantable); scanErr != nil {
+			return scanErr
+		}
+		st.otherACL = append(st.otherACL, e)
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("schema privileges of database %q: %w", database, err)
+	}
+	return true, nil
+}
+
+// schemaACLQuery reads the privileges on the schemas of the connected
+// database.
+const schemaACLQuery = `SELECT n.nspname, CASE WHEN a.grantee = 0 THEN 'public' ELSE r.rolname END,
+		g.rolname, a.privilege_type, a.is_grantable
+	FROM pg_namespace n
+	CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
+	LEFT JOIN pg_roles r ON r.oid = a.grantee
+	JOIN pg_roles g ON g.oid = a.grantor
+	WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
+		AND (a.grantee = 0 OR r.oid IS NOT NULL)
+	ORDER BY 1, 2, 4, 3`
+
 // inspectSchemas reads the schemas of database. It reports false when the
 // database cannot be connected to.
 func (d *Driver) inspectSchemas(ctx context.Context, cur *model.Current, st *state, database string) (bool, error) {
@@ -649,15 +951,7 @@ func (d *Driver) inspectSchemas(ctx context.Context, cur *model.Current, st *sta
 		}); err != nil {
 		return false, err
 	}
-	return true, query(ctx, c, `SELECT n.nspname, CASE WHEN a.grantee = 0 THEN 'public' ELSE r.rolname END,
-			g.rolname, a.privilege_type, a.is_grantable
-		FROM pg_namespace n
-		CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
-		LEFT JOIN pg_roles r ON r.oid = a.grantee
-		JOIN pg_roles g ON g.oid = a.grantor
-		WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
-			AND (a.grantee = 0 OR r.oid IS NOT NULL)
-		ORDER BY 1, 2, 4, 3`,
+	return true, query(ctx, c, schemaACLQuery,
 		func(rows *sql.Rows) error {
 			e := aclEntry{obj: model.Object{Type: model.ObjectSchema, Database: database}}
 			if err := rows.Scan(&e.obj.Schema, &e.grantee, &e.grantor, &e.priv, &e.grantable); err != nil {

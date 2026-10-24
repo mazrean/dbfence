@@ -16,12 +16,13 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/fujiwara/tfstate-lookup/tfstate"
+	"google.golang.org/api/option"
 )
 
 type awsSecretsManager struct{ c *secretsmanager.Client }
 
 func newAWSSecretsManager(ctx context.Context) (AWSSecretsManager, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(awsLogger()))
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +43,17 @@ func (a *awsSecretsManager) GetSecretString(ctx context.Context, id string) (str
 type gcpSecretManager struct{ c *secretmanager.Client }
 
 func newGCPSecretManager(ctx context.Context) (GCPSecretManager, error) {
-	c, err := secretmanager.NewClient(ctx)
+	c, err := dialGCPSecretManager(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// dialGCPSecretManager returns a client that logs to sdkLogger, with
+// extra options such as a test endpoint.
+func dialGCPSecretManager(ctx context.Context, extra ...option.ClientOption) (*gcpSecretManager, error) {
+	c, err := secretmanager.NewClient(ctx, append([]option.ClientOption{option.WithLogger(sdkLogger())}, extra...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -72,26 +83,17 @@ func (t *tfstateReader) Lookup(ctx context.Context, loc, address string) ([]byte
 		// The parse error quotes the URL, which may hold a password.
 		return nil, errors.New("tfstate: the state URL cannot be parsed; check it for unescaped % or control characters")
 	}
-	t.mu.Lock()
-	st, ok := t.states[loc]
-	if !ok {
-		var err error
-		st, err = tfstate.ReadURL(ctx, loc)
-		if err != nil {
-			t.mu.Unlock()
-			// Not wrapped: the cause repeats the URL, which may carry
-			// credentials or a signed query string.
-			_, r := redactURL(loc)
-			return nil, errors.New(r.Replace(err.Error()))
-		}
-		t.states[loc] = st
+	st, err := t.state(ctx, loc)
+	if err != nil {
+		return nil, err
 	}
-	t.mu.Unlock()
 
 	shown, _ := redactURL(loc)
 	obj, err := st.Lookup(address)
 	if err != nil {
-		return nil, fmt.Errorf("lookup %q in %s: %w", address, shown, err)
+		// Not wrapped: gojq's type errors quote the value they were
+		// applied to, which may be a secret attribute.
+		return nil, fmt.Errorf("tfstate: cannot look up %q in %s; check that the address matches the structure of the state", address, shown)
 	}
 	if obj == nil || obj.Value == nil {
 		return nil, errors.New("tfstate: " + address + " not found in " + shown)
@@ -99,21 +101,51 @@ func (t *tfstateReader) Lookup(ctx context.Context, loc, address string) ([]byte
 	return json.Marshal(obj.Value)
 }
 
-// redactURL returns loc without its userinfo password, query string and
-// fragment, and a replacer that masks those parts in a message. Local
-// paths are returned as is.
+// state returns the state at loc, reading it on first use.
+func (t *tfstateReader) state(ctx context.Context, loc string) (st *tfstate.TFState, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if cached, ok := t.states[loc]; ok {
+		return cached, nil
+	}
+	defer func() {
+		// tfstate-lookup panics on some malformed URLs (remote:// with
+		// too few path segments). Report a fixed error instead of the
+		// panic and its stack trace.
+		if recover() != nil {
+			shown, _ := redactURL(loc)
+			st, err = nil, errors.New("tfstate: failed to read the state from "+shown+"; check the URL")
+		}
+	}()
+	st, err = tfstate.ReadURL(ctx, loc)
+	if err != nil {
+		// Not wrapped: the cause repeats the URL, which may carry
+		// credentials or a signed query string.
+		_, r := redactURL(loc)
+		return nil, errors.New(r.Replace(err.Error()))
+	}
+	t.states[loc] = st
+	return st, nil
+}
+
+// redactURL returns loc without its userinfo, query string and fragment,
+// and a replacer that masks those parts in a message. The whole userinfo
+// is dropped because a token may be passed as the username. Local paths
+// are returned as is.
 func redactURL(loc string) (string, *strings.Replacer) {
 	u, err := url.Parse(loc)
 	if err != nil || u.Scheme == "" {
 		return loc, strings.NewReplacer()
 	}
 	clean := *u
+	clean.User = nil
 	clean.RawQuery, clean.ForceQuery, clean.Fragment, clean.RawFragment = "", false, "", ""
-	safe := clean.Redacted()
+	safe := clean.String()
 
 	// Every form in which the URL may be printed: as given, re-encoded
 	// by url.String, as masked by net/http (user:***@) and by
-	// url.Redacted. The bare query, fragment and password are a backstop.
+	// url.Redacted. The bare query, fragment, userinfo and password are a
+	// backstop.
 	olds := []string{loc, u.String()}
 	olds = append(olds, strings.Replace(u.Redacted(), ":xxxxx@", ":***@", 1), u.Redacted())
 	// Each part is also replaced in its Go-quoted form, because errors
@@ -133,6 +165,14 @@ func redactURL(loc string) (string, *strings.Replacer) {
 	}
 	if u.Fragment != "" {
 		add(u.EscapedFragment(), "REDACTED")
+	}
+	if u.User != nil {
+		// Matched with the trailing "@" so that a short username does
+		// not mask unrelated words of the message.
+		add(u.User.String()+"@", "")
+		if name := u.User.Username(); name != "" {
+			add(name+"@", "")
+		}
 	}
 	if pw, ok := u.User.Password(); ok && pw != "" {
 		add(pw, "xxxxx")

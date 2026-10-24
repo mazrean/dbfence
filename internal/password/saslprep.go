@@ -25,8 +25,10 @@ func inTable(table []runeRange, r rune) bool {
 // saslPrep normalizes password with RFC 4013 SASLprep exactly as
 // PostgreSQL's pg_saslprep (src/common/saslprep.c) does before deriving a
 // SCRAM verifier. Whenever pg_saslprep rejects the input (invalid UTF-8,
-// empty after mapping, prohibited or unassigned output, bidi violation),
-// PostgreSQL hashes the raw password, so the raw password is returned.
+// empty after mapping, prohibited or unassigned code point, bidi
+// violation), PostgreSQL hashes the raw password, so the raw password is
+// returned. Like pg_saslprep, the prohibit and bidi checks run on the
+// mapped input before NFKC, not on the normalized output.
 func saslPrep(password string) string {
 	if isASCII(password) || !utf8.ValidString(password) {
 		return password
@@ -47,12 +49,13 @@ func saslPrep(password string) string {
 		return password
 	}
 
-	// 2) Normalize with NFKC.
-	out := []rune(nfkc(string(mapped)))
+	// 2) Normalize with NFKC. pg_saslprep checks the mapped input, not
+	// this output, so the result is only returned once the checks pass.
+	out := nfkc(string(mapped))
 
 	// 3) Prohibit, including code points unassigned in Unicode 3.2.
 	randAL := false
-	for _, r := range out {
+	for _, r := range mapped {
 		if inTable(prohibitedRanges, r) || inTable(unassignedRanges, r) {
 			return password
 		}
@@ -63,16 +66,16 @@ func saslPrep(password string) string {
 	// must not contain LCat characters and must start and end with
 	// RandALCat characters.
 	if randAL {
-		if !inTable(randALCatRanges, out[0]) || !inTable(randALCatRanges, out[len(out)-1]) {
+		if !inTable(randALCatRanges, mapped[0]) || !inTable(randALCatRanges, mapped[len(mapped)-1]) {
 			return password
 		}
-		for _, r := range out {
+		for _, r := range mapped {
 			if inTable(lCatRanges, r) {
 				return password
 			}
 		}
 	}
-	return string(out)
+	return out
 }
 
 func isASCII(s string) bool {

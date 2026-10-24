@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"net/url"
 	"os"
@@ -12,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mazrean/dbfence/internal/apply"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/plan"
 	"github.com/ory/dockertest/v4"
 )
 
@@ -133,7 +136,7 @@ func planFor(t *testing.T, d *Driver, desired *model.Desired, opts diff.Options)
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	p, err := diff.Compute(desired, cur, d, opts)
+	p, err := compute(t, desired, cur, d, opts)
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}
@@ -160,7 +163,7 @@ func converge(t *testing.T, d *Driver, desired *model.Desired, opts diff.Options
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	p, err := diff.Compute(desired, cur, d, opts)
+	p, err := compute(t, desired, cur, d, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +191,7 @@ func TestIntegration(t *testing.T) {
 		if v != "on" {
 			t.Errorf("standard_conforming_strings = %q", v)
 		}
-		if err := d.Exec(t.Context(), "", "COMMENT ON ROLE scs IS "+Literal(`a\'b`)); err != nil {
+		if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("COMMENT ON ROLE scs IS "), Literal(`a\'b`))); err != nil {
 			t.Fatal(err)
 		}
 		if got := s.queryStrings(t, "SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = 'scs'"); len(got) != 1 || got[0] != `a\'b` {
@@ -250,7 +253,7 @@ func TestIntegration(t *testing.T) {
 			if cur.CurrentDatabase != "postgres" {
 				t.Errorf("CurrentDatabase = %q", cur.CurrentDatabase)
 			}
-			p, err := diff.Compute(desired, cur, d, diff.Options{})
+			p, err := compute(t, desired, cur, d, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -266,7 +269,7 @@ func TestIntegration(t *testing.T) {
 			// Pruning a role does not run statements on databases that
 			// cannot be connected to.
 			if user == "postgres" {
-				p, err := diff.Compute(desired, cur, d, diff.Options{Prune: true})
+				p, err := compute(t, desired, cur, d, diff.Options{Prune: true})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -666,10 +669,10 @@ func TestIntegration(t *testing.T) {
 		s.exec(t, "CREATE ROLE w_grp", "CREATE ROLE w_u", "GRANT w_grp TO w_u")
 		d := s.open(t, "postgres")
 		// A repeated GRANT only raises a NOTICE.
-		if err := d.Exec(t.Context(), "", `GRANT "w_grp" TO "w_u"`); err != nil {
+		if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword(`GRANT "w_grp" TO "w_u"`))); err != nil {
 			t.Errorf("repeated grant: %v", err)
 		}
-		err := d.Exec(t.Context(), "", `REVOKE "w_grp" FROM "w_u" GRANTED BY "w_grp"`)
+		err := d.Exec(t.Context(), plan.SQL("", plan.Keyword(`REVOKE "w_grp" FROM "w_u" GRANTED BY "w_grp"`)))
 		if err == nil || !strings.Contains(err.Error(), "has not been granted membership") {
 			t.Errorf("no-op revoke: %v", err)
 		}
@@ -755,9 +758,106 @@ func TestIntegration(t *testing.T) {
 	t.Run("exec errors carry detail", func(t *testing.T) {
 		s.exec(t, "CREATE ROLE detail_owner", "CREATE DATABASE detail_db OWNER detail_owner")
 		d := s.open(t, "postgres")
-		err := d.Exec(t.Context(), "", "DROP ROLE detail_owner")
+		err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("DROP ROLE detail_owner")))
 		if err == nil || !strings.Contains(err.Error(), "DETAIL: owner of database detail_db") {
 			t.Errorf("error = %v", err)
+		}
+		// Run as another role too.
+		err = d.Exec(t.Context(), plan.SQL("", plan.Keyword("DROP ROLE detail_owner")).WithRole("postgres"))
+		if err == nil || !strings.Contains(err.Error(), "DETAIL: owner of database detail_db") {
+			t.Errorf("error as role = %v", err)
+		}
+	})
+
+	t.Run("one statement per Exec", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE ms_r")
+		d := s.open(t, "postgres")
+		for _, st := range []plan.Statement{
+			plan.SQL("", plan.Keyword("SELECT 1; SELECT 2")),
+			plan.SQL("", plan.Keyword("SELECT 1; SELECT 2")).WithRole("ms_r"),
+			plan.SQL("", plan.Keyword(`COMMENT ON ROLE ms_r IS 'x'; ALTER ROLE ms_r SUPERUSER`)),
+			plan.SQL("postgres", plan.Keyword("SELECT 1;SELECT 2")),
+		} {
+			err := d.Exec(t.Context(), st)
+			if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "42601" {
+				t.Errorf("Exec(%q as %q) = %v, want SQLSTATE 42601", st.SQL(), st.AsRole, err)
+			}
+		}
+		if got := s.queryStrings(t, "SELECT rolsuper::text || coalesce(shobj_description(oid, 'pg_authid'), '') FROM pg_roles WHERE rolname = 'ms_r'"); !slices.Equal(got, []string{"false"}) {
+			t.Errorf("ms_r after rejected statements = %q", got)
+		}
+		// A single statement with a trailing ';' is still one statement.
+		if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("SELECT 1;"))); err != nil {
+			t.Errorf("single statement: %v", err)
+		}
+	})
+
+	t.Run("statements run as another role", func(t *testing.T) {
+		s.exec(t, "CREATE ROLE ar_g", "CREATE ROLE ar_x", "GRANT CREATE ON DATABASE postgres TO ar_g")
+		d := s.open(t, "postgres")
+		// Every statement then shares one connection, so a role or
+		// transaction left behind would show in the next one.
+		d.db.SetMaxOpenConns(1)
+		currentUser := func(t *testing.T) string {
+			t.Helper()
+			var u, tx string
+			if err := d.db.QueryRowContext(t.Context(), "SELECT current_user, coalesce(pg_current_xact_id_if_assigned()::text, '')").Scan(&u, &tx); err != nil {
+				t.Fatal(err)
+			}
+			if tx != "" {
+				t.Errorf("connection is left in transaction %s", tx)
+			}
+			return u
+		}
+		if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("CREATE SCHEMA ar_s")).WithRole("ar_g")); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.queryStrings(t, "SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'ar_s'"); !slices.Equal(got, []string{"ar_g"}) {
+			t.Errorf("owner of ar_s = %q, want ar_g", got)
+		}
+		if got := currentUser(t); got != "postgres" {
+			t.Errorf("current_user after success = %q", got)
+		}
+		failing := []struct {
+			code string
+			stmt plan.Statement
+		}{
+			// ar_g may not create roles.
+			{"42501", plan.SQL("", plan.Keyword("CREATE ROLE ar_y")).WithRole("ar_g")},
+			// The role does not exist: SET LOCAL ROLE fails.
+			{"22023", plan.SQL("", plan.Keyword("CREATE ROLE ar_y")).WithRole("ar_missing")},
+			// A quote in the role name stays inside the identifier.
+			{"22023", plan.SQL("", plan.Keyword("CREATE ROLE ar_y")).WithRole(`ar_g"; RESET ROLE; --`)},
+			// Statement errors on another database.
+			{"3F000", plan.SQL("postgres", plan.Keyword("DROP SCHEMA ar_missing")).WithRole("ar_g")},
+		}
+		for _, f := range failing {
+			err := d.Exec(t.Context(), f.stmt)
+			if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != f.code {
+				t.Errorf("Exec(%q as %q) = %v, want SQLSTATE %s", f.stmt.SQL(), f.stmt.AsRole, err, f.code)
+			}
+			if got := currentUser(t); got != "postgres" {
+				t.Errorf("current_user after failing %q as %q = %q", f.stmt.SQL(), f.stmt.AsRole, got)
+			}
+		}
+		if got := s.queryStrings(t, "SELECT rolname FROM pg_roles WHERE rolname = 'ar_y'"); len(got) != 0 {
+			t.Errorf("ar_y was created: %q", got)
+		}
+		// Warnings that the statement had no effect are reported from
+		// inside the transaction as well.
+		err := d.Exec(t.Context(), plan.SQL("", plan.Keyword(`REVOKE CONNECT ON DATABASE "postgres" FROM "ar_x"`)).WithRole("ar_g"))
+		if err == nil || !strings.Contains(err.Error(), "did not take full effect") {
+			t.Errorf("no-op revoke as ar_g: %v", err)
+		}
+		if got := currentUser(t); got != "postgres" {
+			t.Errorf("current_user after warning = %q", got)
+		}
+		// Statements without a role run outside a transaction.
+		if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("CREATE DATABASE ar_db"))); err != nil {
+			t.Errorf("create database: %v", err)
+		}
+		if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("DROP DATABASE ar_db"))); err != nil {
+			t.Errorf("drop database: %v", err)
 		}
 	})
 }

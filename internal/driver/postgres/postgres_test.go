@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
+	"github.com/mazrean/dbfence/internal/plan"
 )
 
 func TestOpenParseErrorHidesPassword(t *testing.T) {
@@ -83,6 +84,8 @@ func TestParseConfigDefaults(t *testing.T) {
 		{"default timeout", "postgres://u@h/db?options=-c%20standard_conforming_strings%3Doff", defaultConnectTimeout},
 		{"explicit timeout", "postgres://u@h/db?connect_timeout=3", 3 * time.Second},
 		{"keyword form", "host=h user=u", defaultConnectTimeout},
+		{"client encoding overridden", "postgres://u@h/db?client_encoding=SQL_ASCII", defaultConnectTimeout},
+		{"client encoding in keyword form", "host=h user=u client_encoding=LATIN1", defaultConnectTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -97,6 +100,9 @@ func TestParseConfigDefaults(t *testing.T) {
 			if got := cfg.Copy().RuntimeParams["standard_conforming_strings"]; got != "on" {
 				t.Errorf("standard_conforming_strings = %q, want on (also on per-database copies)", got)
 			}
+			if got := cfg.Copy().RuntimeParams["client_encoding"]; got != "UTF8" {
+				t.Errorf("client_encoding = %q, want UTF8 (also on per-database copies)", got)
+			}
 		})
 	}
 }
@@ -110,7 +116,7 @@ func TestLiteral(t *testing.T) {
 		{`\'; DROP DATABASE prod; --`, `E'\\''; DROP DATABASE prod; --'`},
 	}
 	for _, tt := range tests {
-		if got := Literal(tt.in); got != tt.want {
+		if got := plan.SQL("", Literal(tt.in)).SQL(); got != tt.want {
 			t.Errorf("Literal(%q) = %s, want %s", tt.in, got, tt.want)
 		}
 	}

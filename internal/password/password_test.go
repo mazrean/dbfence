@@ -63,6 +63,8 @@ func TestMatchMySQL(t *testing.T) {
 		{"sha256 wrong prefix", PluginSHA256, "$6$" + sha256Short[3:], "pw", false, true},
 		{"sha256 missing separator", PluginSHA256, sha256Short[:23] + "#" + sha256Short[24:], "pw", false, true},
 		{"unknown plugin", "auth_socket", "", "x", false, true},
+		{"native too long", PluginNative, "*" + strings.Repeat("A", 1024), "x", false, true},
+		{"caching too long", PluginCachingSHA2, "$A$005$" + strings.Repeat("a", 2000), "x", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,6 +100,10 @@ func TestMatchPostgres(t *testing.T) {
 		{"scram zero iterations", "SCRAM-SHA-256$0:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
 		{"scram negative iterations", "SCRAM-SHA-256$-5:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
 		{"scram too many iterations", "SCRAM-SHA-256$10000001:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram iterations above the cap", "SCRAM-SHA-256$1000001:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram iterations overflow", "SCRAM-SHA-256$99999999999999999999999:" + b64(salt) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"scram verifier too long", "SCRAM-SHA-256$4096:" + b64(make([]byte, 1024)) + "$" + b64(key) + ":" + key32, "app", "secret", false, true},
+		{"md5 too long", "md5" + strings.Repeat("0", 2000), "app", "secret", false, true},
 		{"scram empty salt", "SCRAM-SHA-256$4096:$" + b64(key) + ":" + key32, "app", "secret", false, true},
 		{"scram empty keys", "SCRAM-SHA-256$4096:" + b64(salt) + "$:", "app", "secret", false, true},
 		{"scram short stored key", "SCRAM-SHA-256$4096:" + b64(salt) + "$AAAA:" + key32, "app", "secret", false, true},

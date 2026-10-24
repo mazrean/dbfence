@@ -76,6 +76,11 @@ func TestCompileIgnorePattern(t *testing.T) {
 		{pattern: "a|b", name: "b", match: true},
 		{pattern: "(", err: true},
 		{pattern: `\Qrds_`, err: true},
+		{pattern: `app)|(x`, err: true},
+		{pattern: `a)(b`, err: true},
+		{pattern: `tmp_.*`, name: "tmp_a\nb", match: true},
+		{pattern: `tmp_.`, name: "tmp_\n", match: true},
+		{pattern: "tmp", name: "tmp\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.pattern+"/"+tt.name, func(t *testing.T) {

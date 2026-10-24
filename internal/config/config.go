@@ -20,6 +20,7 @@ import (
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
+	"github.com/mazrean/dbfence/internal/secret"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 	"github.com/zclconf/go-cty/cty/function"
@@ -108,6 +109,9 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 		base = filepath.Dir(path)
 	}
 	fns = funcs.ResolvePathsFrom(fns, base)
+	// Engine names are printed by design, even when a password equals one.
+	secret.RegisterPublic(string(model.EnginePostgres))
+	secret.RegisterPublic(string(model.EngineMySQL))
 	parser := hclparse.NewParser()
 	var bodies []*hcl.File
 	var diags hcl.Diagnostics
@@ -115,6 +119,9 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 		file, d := parser.ParseHCLFile(f)
 		diags = append(diags, d...)
 		if file != nil {
+			// Even when parsing failed: the body holds what parsed.
+			registerLiteralSecrets(file.Body)
+			registerStateURLPasswords(file.Body)
 			bodies = append(bodies, file)
 		}
 	}
@@ -166,8 +173,10 @@ func hclFiles(path string) ([]string, error) {
 
 // diagError renders the error diagnostics. The leading "Error: " of the
 // first one is dropped because the CLI prefixes errors with it already.
+// Source snippets show the values of password and dsn masked (see
+// maskSecrets).
 func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
-	diags = dropCascades(errorsOnly(diags))
+	diags = hideSecretKeys(dropCascades(errorsOnly(diags)))
 	// gohcl decodes attributes in map order; report in source order.
 	slices.SortStableFunc(diags, func(a, b *hcl.Diagnostic) int {
 		switch {
@@ -180,7 +189,7 @@ func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
 		}
 	})
 	var sb strings.Builder
-	w := hcl.NewDiagnosticTextWriter(&sb, p.Files(), 0, false)
+	w := hcl.NewDiagnosticTextWriter(&sb, maskedFiles(p.Files()), 0, false)
 	if err := w.WriteDiagnostics(diags); err != nil {
 		return diags
 	}
@@ -209,6 +218,28 @@ func errorsOnly(diags hcl.Diagnostics) hcl.Diagnostics {
 	return out
 }
 
+// hideSecretKeys rewrites the duplicate key errors of for expressions
+// whose key is secret-derived: HCL quotes the key in Detail even when it
+// is marked. The key expression is evaluated again in the context of the
+// failing iteration to find its marks; secret lookups are cached, so this
+// does not fetch them again.
+func hideSecretKeys(diags hcl.Diagnostics) hcl.Diagnostics {
+	out := make(hcl.Diagnostics, len(diags))
+	for i, d := range diags {
+		out[i] = d
+		if d.Summary != "Duplicate object key" || d.Expression == nil || d.EvalContext == nil {
+			continue
+		}
+		if v, vd := d.Expression.Value(d.EvalContext); !vd.HasErrors() && !v.ContainsMarked() {
+			continue
+		}
+		nd := *d
+		nd.Detail = "Two different items produced the same key in this 'for' expression; the key is not shown because it is derived from a secret value. If duplicates are expected, use the ellipsis (...) after the value expression to enable grouping by key."
+		out[i] = &nd
+	}
+	return out
+}
+
 // dropCascades removes the "value must be known" diagnostics gohcl emits
 // when converting the placeholder of an expression that already failed.
 func dropCascades(diags hcl.Diagnostics) hcl.Diagnostics {
@@ -233,6 +264,10 @@ type resource struct {
 	attrs hcl.Attributes
 	name  string
 	host  string
+	// nameMarks and hostMarks are the cty marks (funcs.Sensitive) of
+	// name and host, put back on the reference values.
+	nameMarks cty.ValueMarks
+	hostMarks cty.ValueMarks
 	// nameRange is the name attribute, or the label when name is absent.
 	nameRange hcl.Range
 }
@@ -448,7 +483,8 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 	r.attrs = attrs
 	if a, ok := attrs["name"]; ok {
 		r.nameRange = a.Range
-		diags = append(diags, decodeLiteral(a, ctx, &r.name)...)
+		r.nameMarks = make(cty.ValueMarks)
+		diags = append(diags, decodeLiteral(a, ctx, &r.name, r.nameMarks)...)
 	}
 	if a, ok := attrs["host"]; ok {
 		if b.Type != "role" && b.Type != "user" {
@@ -457,9 +493,16 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 		if engine != model.EngineMySQL {
 			return r, append(diags, errAt(a.Range, "Unsupported attribute", `"host" is only supported for mysql.`))
 		}
-		diags = append(diags, decodeLiteral(a, ctx, &r.host)...)
-		if r.host == "" && !diags.HasErrors() {
+		r.hostMarks = make(cty.ValueMarks)
+		diags = append(diags, decodeLiteral(a, ctx, &r.host, r.hostMarks)...)
+		switch {
+		case diags.HasErrors():
+		case r.host == "":
 			diags = append(diags, errAt(a.Range, "Empty host", `host must not be empty; use "%" for any host.`))
+		case strings.Contains(r.host, "@"):
+			// Ids are name@host split at the last "@" (names may contain
+			// one), so role.<label>.id would name another account.
+			diags = append(diags, errAt(a.Range, "Invalid host", `host must not contain "@"; role ids are written name@host.`))
 		}
 		// MySQL stores host names in lower case.
 		r.host = strings.ToLower(r.host)
@@ -476,37 +519,62 @@ func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resou
 }
 
 // decodeLiteral decodes name and host, which are resolved before any
-// block can be referenced.
-func decodeLiteral(a *hcl.Attribute, ctx *hcl.EvalContext, dst *string) hcl.Diagnostics {
+// block can be referenced. The marks of the value are added to marks.
+func decodeLiteral(a *hcl.Attribute, ctx *hcl.EvalContext, dst *string, marks cty.ValueMarks) hcl.Diagnostics {
 	if len(a.Expr.Variables()) > 0 {
 		return hcl.Diagnostics{errAt(a.Expr.Range(), "References not allowed",
 			fmt.Sprintf("%s cannot reference other blocks; only literals and functions are allowed.", a.Name))}
 	}
-	return gohcl.DecodeExpression(a.Expr, ctx, dst)
+	return gohcl.DecodeExpression(markRecorder{Expression: markedExpr(a.Expr), marks: marks}, ctx, dst)
 }
 
-// refValue is the value exposed to expressions as <type>.<label>.
+// markRecorder evaluates to the value of its expression without marks,
+// and adds the marks to marks.
+type markRecorder struct {
+	hcl.Expression
+	marks cty.ValueMarks
+}
+
+func (e markRecorder) Value(ctx *hcl.EvalContext) (cty.Value, hcl.Diagnostics) {
+	v, diags := e.Expression.Value(ctx)
+	v, m := v.UnmarkDeep()
+	maps.Copy(e.marks, m)
+	return v, diags
+}
+
+// markedExpr undoes unmarkedExpr, for the values that keep their marks.
+func markedExpr(expr hcl.Expression) hcl.Expression {
+	if u, ok := expr.(unmarkedExpr); ok {
+		return u.Expression
+	}
+	return expr
+}
+
+// refValue is the value exposed to expressions as <type>.<label>. Names
+// and hosts derived from a secret keep its mark, so that errors about the
+// references do not show them.
 func refValue(typ string, r resource, engine model.Engine, ctx *hcl.EvalContext) cty.Value {
+	name := cty.StringVal(r.name).WithMarks(r.nameMarks)
 	switch typ {
 	case "role", "user":
-		id := r.name
+		id := name
 		if engine == model.EngineMySQL {
-			id = model.RoleID{Name: r.name, Host: r.host}.String()
+			id = cty.StringVal(model.RoleID{Name: r.name, Host: r.host}.String()).WithMarks(r.nameMarks, r.hostMarks)
 		}
-		return cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal(r.name), "host": cty.StringVal(r.host), "id": cty.StringVal(id)})
+		return cty.ObjectVal(map[string]cty.Value{"name": name, "host": cty.StringVal(r.host).WithMarks(r.hostMarks), "id": id})
 	case "schema":
 		// Schemas may only reference databases, which are resolved first.
 		db := cty.UnknownVal(cty.String)
 		if a, ok := r.attrs["database"]; ok {
-			if v, d := a.Expr.Value(ctx); !d.HasErrors() {
+			if v, d := markedExpr(a.Expr).Value(ctx); !d.HasErrors() {
 				if sv, err := convert.Convert(v, cty.String); err == nil && !sv.IsNull() {
 					db = sv
 				}
 			}
 		}
-		return cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal(r.name), "database": db})
+		return cty.ObjectVal(map[string]cty.Value{"name": name, "database": db})
 	default:
-		return cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal(r.name)})
+		return cty.ObjectVal(map[string]cty.Value{"name": name})
 	}
 }
 
@@ -595,6 +663,10 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 	} else if l := blk.ConnectionLimit; l != nil && (*l < -1 || *l > math.MaxInt32) {
 		diags = append(diags, errAt(attrRange(r.attrs, "connection_limit", r.block.DefRange), "Invalid connection_limit",
 			fmt.Sprintf("connection_limit must be -1 (unlimited) or between 0 and %d, got %d.", math.MaxInt32, *l)))
+	}
+	if blk.Password != nil {
+		// Output redacts it wherever it appears (see secret.Writer).
+		secret.Register(*blk.Password)
 	}
 	diags = append(diags, checkPassword(r, typ, blk.Password, engine)...)
 	login := blk.Login
@@ -730,7 +802,7 @@ func decodeGrantObject(b *hcl.Block, attrs hcl.Attributes, blk grantBlock, engin
 }
 
 // maxMySQLDatabasePattern is the length of mysql.db.Db.
-const maxMySQLDatabasePattern = 64
+const maxMySQLDatabasePattern = model.MySQLMaxDatabaseChars
 
 func decodeDatabasePattern(b *hcl.Block, attrs hcl.Attributes, blk grantBlock, engine model.Engine) (model.Object, hcl.Diagnostics) {
 	rng := attrRange(attrs, "database_pattern", b.DefRange)
@@ -851,12 +923,13 @@ func checkEngineOnly(r resource, engine model.Engine, pgOnly, mysqlOnly map[stri
 	return diags
 }
 
-// Identifier length limits.
+// Identifier length limits, shared with the check of names read from
+// the server (model.CheckName).
 const (
-	pgMaxIdentBytes   = 63 // NAMEDATALEN - 1
-	mysqlMaxUserChars = 32
-	mysqlMaxDBChars   = 64
-	mysqlMaxHostChars = 255
+	pgMaxIdentBytes   = model.PostgresMaxIdentBytes
+	mysqlMaxUserChars = model.MySQLMaxUserChars
+	mysqlMaxDBChars   = model.MySQLMaxDatabaseChars
+	mysqlMaxHostChars = model.MySQLMaxHostChars
 )
 
 // checkName checks the engine's identifier limits.

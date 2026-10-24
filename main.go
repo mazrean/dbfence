@@ -19,7 +19,8 @@ func main() {
 		<-ctx.Done()
 		stop()
 	}()
-	code := run(ctx, os.Args[1:], di.InitializeApp(ctx), os.Stdout, os.Stderr)
+	p := di.InitializeProgram(ctx)
+	code := run(ctx, os.Args[1:], p.App, p.Output.Out, p.Output.Err)
 	stop()
 	os.Exit(code)
 }

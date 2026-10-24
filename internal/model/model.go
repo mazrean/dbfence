@@ -151,6 +151,9 @@ type RoleState struct {
 	Superuser        bool
 	Login            bool
 	PasswordReadable bool
+	// RetainedPassword is set when a secondary password kept by MySQL's
+	// RETAIN CURRENT PASSWORD still authenticates the account.
+	RetainedPassword bool
 	// AttributesUnknown is set when the account exists but its login,
 	// authentication plugin and password could not be read.
 	AttributesUnknown bool
@@ -234,9 +237,14 @@ type Ignore struct {
 
 // CompileIgnorePattern compiles an ignore pattern anchored to match the
 // whole name. Config validation and diff both use it, so a pattern that
-// validates is matched exactly as written.
+// validates is matched exactly as written. The pattern must be valid on
+// its own, so that unbalanced parentheses such as "a)|(b" cannot break
+// out of the anchors, and '.' also matches a newline.
 func CompileIgnorePattern(p string) (*regexp.Regexp, error) {
-	re, err := regexp.Compile("^(?:" + p + ")$")
+	if _, err := regexp.Compile(p); err != nil {
+		return nil, fmt.Errorf("compile ignore pattern: %w", err)
+	}
+	re, err := regexp.Compile("(?s)^(?:" + p + ")$")
 	if err != nil {
 		return nil, fmt.Errorf("compile ignore pattern: %w", err)
 	}
@@ -281,13 +289,65 @@ type Current struct {
 	Privileges []Privilege
 	// InspectedDatabases lists databases whose schemas were inspected.
 	InspectedDatabases []string
+	// OtherSchemas lists the schemas, with their owners only, of the
+	// undeclared databases where pruning a role runs REASSIGN OWNED
+	// (PostgreSQL only, read when ignore lists schema patterns or a role
+	// may be pruned), so that --prune keeps the owners of ignored schemas
+	// there.
+	OtherSchemas []Schema
 	// CurrentDatabase is the database dbfence is connected to
 	// (PostgreSQL only). It is never pruned.
 	CurrentDatabase string
+	// Entangled maps databases and schemas (an Object of type database,
+	// or schema) whose drop would also drop or change what dbfence does
+	// not manage (model.CheckName), such as objects owned by or
+	// privileges granted to such roles, or schemas with such names, to
+	// why. DropUntrusted and the driver fill it; --prune keeps them and
+	// policy.Verify refuses their drop.
+	Entangled map[Object]string
+	// EntangledOwned maps a role and a database (PostgreSQL) in which
+	// REASSIGN OWNED and DROP OWNED of the role could change what dbfence
+	// does not manage, such as privileges the role granted on tables,
+	// functions or types to a role with a name dbfence does not manage,
+	// to why. The driver fills it; --prune keeps such roles and
+	// policy.Verify refuses those statements.
+	EntangledOwned map[RoleInDatabase]string
 	// Warnings are inspection notes that diff adds to the plan.
 	Warnings []string
 	// Unreadable lists what could not be inspected.
 	Unreadable Unreadable
+}
+
+// Entangle records in c.Entangled that dropping obj (a database or a
+// schema) would also drop or change what dbfence does not manage. The
+// first reason recorded for obj is kept.
+func (c *Current) Entangle(obj Object, why string) {
+	if c.Entangled == nil {
+		c.Entangled = map[Object]string{}
+	}
+	if _, ok := c.Entangled[obj]; !ok {
+		c.Entangled[obj] = why
+	}
+}
+
+// RoleInDatabase is a role in one database, where REASSIGN OWNED and DROP
+// OWNED of the role run.
+type RoleInDatabase struct {
+	Role     RoleID
+	Database string
+}
+
+// EntangleOwned records in c.EntangledOwned that REASSIGN OWNED and DROP
+// OWNED of role in database would change what dbfence does not manage.
+// The first reason recorded is kept.
+func (c *Current) EntangleOwned(role RoleID, database, why string) {
+	if c.EntangledOwned == nil {
+		c.EntangledOwned = map[RoleInDatabase]string{}
+	}
+	key := RoleInDatabase{Role: role, Database: database}
+	if _, ok := c.EntangledOwned[key]; !ok {
+		c.EntangledOwned[key] = why
+	}
 }
 
 // NormalizePrivilege upper-cases and collapses whitespace.

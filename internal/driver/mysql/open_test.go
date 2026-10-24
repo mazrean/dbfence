@@ -18,6 +18,22 @@ func TestParseDSN(t *testing.T) {
 		{dsn: "root:pw@tcp(127.0.0.1:3306)/?timeout=3s", wantTimeout: 3 * time.Second},
 		{dsn: "mysql://root:pw@127.0.0.1:3306/db", wantErr: "user:password@tcp(host:3306)/"},
 		{dsn: "root:pw@127.0.0.1:3306/db", wantErr: "user:password@tcp(host:3306)/"},
+		{dsn: "root:p/w@tcp(127.0.0.1:3306)/", wantTimeout: defaultTimeout},
+		// The driver quotes parts of the DSN in its errors.
+		{dsn: "admin:pwS3cret/", wantErr: "invalid DSN"},
+		{dsn: "admin:pwS3/cret@tcp(db:3306)", wantErr: "invalid DSN"},
+		{dsn: "admin:S3/cr%zzpw@tcp(db:3306)", wantErr: "invalid DSN"},
+		{dsn: "admin:pwS3/cr?tls=pw@tcp(db:3306)", wantErr: "invalid DSN"},
+		// These parse, with part of the password as the network.
+		{dsn: "admin:pwS3(et)/x@tcp(db:3306)", wantErr: "the network must be"},
+		{dsn: "admin:pwS3(et)/x@tcp(db:3306)?timeout=1s", wantErr: "the network must be"},
+		{dsn: "root:pw@udp(127.0.0.1:3306)/", wantErr: "the network must be"},
+		{dsn: "root:pw@tcp6([::1]:3306)/", wantTimeout: defaultTimeout},
+		{dsn: "root:pw@unix(/tmp/mysql.sock)/", wantTimeout: defaultTimeout},
+		{dsn: "/", wantTimeout: defaultTimeout},
+		// One statement per query, and no client files for the server.
+		{dsn: "root:pw@tcp(127.0.0.1:3306)/?multiStatements=true", wantTimeout: defaultTimeout},
+		{dsn: "root:pw@tcp(127.0.0.1:3306)/?allowAllFiles=true&multiStatements=true&timeout=2s", wantTimeout: 2 * time.Second},
 	}
 	for _, tt := range tests {
 		cfg, err := parseDSN(tt.dsn)
@@ -33,6 +49,8 @@ func TestParseDSN(t *testing.T) {
 			t.Errorf("parseDSN(%q): %v", tt.dsn, err)
 		case cfg.Timeout != tt.wantTimeout:
 			t.Errorf("parseDSN(%q) timeout = %v, want %v", tt.dsn, cfg.Timeout, tt.wantTimeout)
+		case cfg.MultiStatements || cfg.AllowAllFiles:
+			t.Errorf("parseDSN(%q) multiStatements = %v, allowAllFiles = %v, want both off", tt.dsn, cfg.MultiStatements, cfg.AllowAllFiles)
 		}
 	}
 }
@@ -71,5 +89,21 @@ func TestOpenTimesOutWithoutHandshake(t *testing.T) {
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("Open() took %v", d)
+	}
+}
+
+// TestOpenKeepsPasswordOutOfErrors checks that a DSN misparsed at a '/'
+// in the password does not reach the dial, whose error names the network.
+func TestOpenKeepsPasswordOutOfErrors(t *testing.T) {
+	t.Parallel()
+	tests := []string{
+		"admin:S3cr(et)/pw@tcp(127.0.0.1:1)?timeout=1s",
+		"admin:S3cr(et)/pw@tcp(127.0.0.1:1)",
+	}
+	for _, dsn := range tests {
+		_, err := Open(t.Context(), dsn)
+		if err == nil || strings.Contains(err.Error(), "S3cr") {
+			t.Errorf("Open(%q) error = %v, want an error without the password", dsn, err)
+		}
 	}
 }

@@ -12,11 +12,13 @@ import (
 	"github.com/mazrean/dbfence/internal/plan"
 )
 
-// Executor runs a single statement on a database. Errors with which the
+// Executor runs a single statement on s.Database, as s.AsRole when set.
+// It sends s.SQL() as exactly one command, so that the server rejects
+// any second statement in it. Errors with which the
 // server refused the statement, or that occurred before it was sent, are
 // marked with Rejected; any other error leaves its outcome unknown.
 type Executor interface {
-	Exec(ctx context.Context, database, query string) error
+	Exec(ctx context.Context, s plan.Statement) error
 }
 
 // Rejected marks err as known not to have applied its statement: the
@@ -40,20 +42,25 @@ func isRejected(err error) bool {
 
 // Run executes every statement in order, stopping at the first error.
 // Statements are not wrapped in a transaction because CREATE DATABASE
-// and similar commands cannot run inside one.
+// and similar commands cannot run inside one; only a statement run as
+// another role gets a transaction of its own from the Executor.
 func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecrets bool) error {
 	total := len(p.Statements())
 	n := 0
 	for _, c := range p.Changes {
 		for _, s := range c.Statements {
 			n++
-			// Comments explaining the statement, such as a CASCADE, go on
+			// Notes explaining the statement, such as a CASCADE, go on
 			// their own lines before the progress line.
-			comments, stmt := splitComments(s.Display(showSecrets))
-			if _, err := fmt.Fprintf(w, "%s[%d/%d] %s%s\n", comments, n, total, onDatabase(s.Database, "", " "), stmt); err != nil {
+			var sb strings.Builder
+			for _, note := range s.Notes() {
+				fmt.Fprintf(&sb, "-- %s\n", plan.Escape(note))
+			}
+			fmt.Fprintf(&sb, "[%d/%d] %s%s\n", n, total, where(s, "", " "), s.Display(showSecrets))
+			if _, err := io.WriteString(w, sb.String()); err != nil {
 				return err
 			}
-			if err := ex.Exec(ctx, s.Database, s.SQL()); err != nil {
+			if err := ex.Exec(ctx, s); err != nil {
 				return failure(ctx, c, s, n, total, err, showSecrets)
 			}
 		}
@@ -65,7 +72,7 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 // quote the statement, so the error text is not wrapped, and for a
 // statement with a secret it is withheld from the first quote on.
 func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int, err error, showSecrets bool) error {
-	at := fmt.Sprintf("statement %d/%d%s", n, total, onDatabase(s.Database, " ", ""))
+	at := fmt.Sprintf("statement %d/%d%s", n, total, where(s, " ", ""))
 	msg := err.Error()
 	if s.HasSecret() && !showSecrets {
 		msg = withholdQuoted(msg)
@@ -97,42 +104,20 @@ func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int,
 // withheldNote ends a message whose quoted parts were withheld.
 const withheldNote = " [the rest of the message is withheld because the statement contains a password; rerun with --show-secrets to see it]"
 
-// withholdQuoted cuts each line of a server message at its first single or
-// double quote. Servers quote parts of the failed statement in their
-// messages (MySQL: near '...'; PostgreSQL: at or near "..."), escaped,
-// unescaped or truncated in ways that matching the secret against the
-// text cannot follow. Cutting at the first quote does not depend on the
-// secret or its quoting, so nothing quoted can get through, while
+// withholdQuoted cuts a server message at its first single or double
+// quote and drops the rest, later lines included. Servers quote parts of
+// the failed statement in their messages (MySQL: near '...'; PostgreSQL:
+// at or near "..."), escaped, unescaped or truncated in ways that
+// matching the secret against the text cannot follow, and a quoted
+// secret may span lines. Cutting at the first quote does not depend on
+// the secret or its quoting, so nothing quoted can get through, while
 // messages without quotes, such as password policy rejections, are kept.
 func withholdQuoted(msg string) string {
-	lines := strings.Split(msg, "\n")
-	withheld := false
-	for i, l := range lines {
-		if j := strings.IndexAny(l, `'"`); j >= 0 {
-			lines[i] = l[:j] + "<withheld>"
-			withheld = true
-		}
+	j := strings.IndexAny(msg, `'"`)
+	if j < 0 {
+		return msg
 	}
-	out := strings.Join(lines, "\n")
-	if withheld {
-		out += withheldNote
-	}
-	return out
-}
-
-// splitComments splits the leading "--" comment lines off text. comments
-// keeps their line breaks.
-func splitComments(text string) (comments, rest string) {
-	rest = text
-	for strings.HasPrefix(rest, "--") {
-		line, after, ok := strings.Cut(rest, "\n")
-		if !ok {
-			break
-		}
-		comments += line + "\n"
-		rest = after
-	}
-	return comments, rest
+	return msg[:j] + "<withheld>" + withheldNote
 }
 
 // isCancellation reports whether err only says that ctx was cancelled or
@@ -144,11 +129,12 @@ func isCancellation(ctx context.Context, err error) bool {
 	return errors.Is(err, driver.ErrBadConn)
 }
 
-// onDatabase returns `(on database "x")` between before and after, or ""
-// for the configured connection.
-func onDatabase(database, before, after string) string {
-	if database == "" {
+// where returns `(on database "x", as role "y")` between before and
+// after, or "" for the configured connection and user.
+func where(s plan.Statement, before, after string) string {
+	w := s.Where()
+	if w == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s(on database %q)%s", before, database, after)
+	return before + "(" + w + ")" + after
 }

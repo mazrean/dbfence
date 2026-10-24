@@ -1,6 +1,7 @@
 package password
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -36,6 +37,11 @@ func TestSASLPrep(t *testing.T) {
 		{"canonical reordering across a long run", "a" + strings.Repeat("\u0301\u0316", 20), "\u00E1" + strings.Repeat("\u0316", 20) + strings.Repeat("\u0301", 19)},
 		{"reorder then compose", "e\u0301\u0327", "\u0229\u0301"},
 		{"hangul jamo compose", "\u1100\u1161\u11A8", "\uAC01"},
+		// pg_saslprep checks the mapped input, not the NFKC output.
+		{"unassigned before NFKC keeps raw", "a\u1D2C", "a\u1D2C"},
+		{"unassigned before NFKC alone keeps raw", "\u03F9", "\u03F9"},
+		{"C.8 before NFKC keeps raw", "a\u0340", "a\u0340"},
+		{"C.8 tone mark before NFKC keeps raw", "e\u0341", "e\u0341"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,6 +93,39 @@ func TestMatchPostgresServerVerifiers(t *testing.T) {
 			}
 			if !ok {
 				t.Errorf("MatchPostgres(%+q) = false, want true", tt.password)
+			}
+		})
+	}
+}
+
+// TestMatchPostgresChecksMappedInput builds a verifier from the NFKC form
+// of a password that pg_saslprep rejects before normalizing. PostgreSQL
+// hashes the raw password, so the NFKC form must not match it.
+func TestMatchPostgresChecksMappedInput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, stored, declared string
+	}{
+		{"unassigned modifier letter", "aA", "a\u1D2C"},
+		{"unassigned lunate sigma", "\u03A3", "\u03F9"},
+		{"C.8 grave tone mark", "a\u0300", "a\u0340"},
+	}
+	salt := []byte("0123456789abcdef")
+	enc := base64.StdEncoding.EncodeToString
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			key, err := SCRAMStoredKey(tt.stored, salt, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			verifier := "SCRAM-SHA-256$4096:" + enc(salt) + "$" + enc(key) + ":" + enc(make([]byte, 32))
+			ok, err := MatchPostgres(verifier, "u", tt.declared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok {
+				t.Errorf("MatchPostgres(verifier of %+q, %+q) = true, want false", tt.stored, tt.declared)
 			}
 		})
 	}
