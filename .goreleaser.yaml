@@ -107,3 +107,38 @@ nfpms:
         dst: /usr/share/doc/dbfence/README.md
         file_info:
           mode: 0644
+
+# Container image ghcr.io/mazrean/dbfence, built with ko (no Dockerfile or
+# Docker daemon). It reuses the env, flags and ldflags of the dbfence build.
+# Pushing needs a prior `docker login ghcr.io` (see release.yml).
+kos:
+  - id: dbfence
+    build: dbfence
+    main: .
+    repositories:
+      - ghcr.io/mazrean/dbfence
+    bare: true
+    # Distroless, nonroot, ships CA certificates for TLS to the servers.
+    base_image: cgr.dev/chainguard/static
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Tag }}"
+      - "{{ if not .Prerelease }}{{ .Major }}.{{ .Minor }}{{ end }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+    sbom: spdx
+    # Override the labels inherited from the base image.
+    labels:
+      org.opencontainers.image.title: dbfence
+      org.opencontainers.image.url: https://github.com/mazrean/dbfence
+      org.opencontainers.image.source: https://github.com/mazrean/dbfence
+      org.opencontainers.image.vendor: mazrean
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+      org.opencontainers.image.description: Declarative management of databases, roles, schemas and privileges for MySQL and PostgreSQL.
+      org.opencontainers.image.licenses: MIT
+    disable: "{{ .IsSnapshot }}"
