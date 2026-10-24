@@ -94,6 +94,13 @@ To try it on local servers, see [`examples/`](examples).
 
 See [Safety](docs/safety.md) for the details.
 
+## Agent Skill
+
+[`skills/managing-dbfence`](skills/managing-dbfence) is an [Agent Skill](https://agentskills.io/specification)
+that teaches coding agents (Claude Code, Codex, ...) to write dbfence HCL and run `validate` / `plan` / `apply` safely.
+Add it to the `dependencies.apm` list of your `apm.yml` as `mazrean/dbfence/skills/managing-dbfence`,
+or copy the directory into your agent's skills directory (for Claude Code, `.claude/skills/`).
+
 ## Documentation
 
 - [CLI](docs/cli.md): commands, flags, `--target`, output and exit codes
