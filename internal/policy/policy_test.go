@@ -229,6 +229,22 @@ func TestVerify(t *testing.T) {
 			stmts: []plan.Statement{dropSchema("app", "old")},
 			want:  []string{`drops schema "old" in database "app", although it grants USAGE to role "bad\x01"`},
 		},
+		{
+			name: "reassign and drop owned of a role entangled with an unmanaged role in a database",
+			current: func() *model.Current {
+				c := pgCurrent()
+				c.EntangleOwned(pg("stray"), "app", `role "bad\x01", which dbfence does not manage, has dependencies there too`)
+				return c
+			}(),
+			stmts: []plan.Statement{
+				reassign(pg("stray"), "postgres"), dropOwned(pg("stray"), "postgres"),
+				reassign(pg("stray"), "app"), dropOwned(pg("stray"), "app"), dropRole(pg("stray")),
+			},
+			want: []string{
+				`changes what role "stray" owns, holds or granted in database "app", although role "bad\x01"`,
+				`changes what role "stray" owns, holds or granted in database "app", although role "bad\x01"`,
+			},
+		},
 		{name: "built-in schema", stmts: []plan.Statement{dropSchema("app", "public")}, want: []string{`built-in schema "public"`}},
 		{name: "ignored schema", stmts: []plan.Statement{dropSchema("app", "legacy_s")}, want: []string{`ignored schema "legacy_s"`}},
 		{name: "declared schema", stmts: []plan.Statement{dropSchema("app", "core")}, want: []string{`declared schema "core"`}},

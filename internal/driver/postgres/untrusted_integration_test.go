@@ -203,6 +203,48 @@ func TestIntegrationPruneKeepsSchemasDependedOnByUnmanagedSchemas(t *testing.T) 
 	}
 }
 
+// TestIntegrationPruneKeepsRolesGrantingToUnmanaged checks against a real
+// server that --prune keeps a role that granted a privilege on a table to
+// a role with an unmanaged name: DROP OWNED would revoke it with CASCADE,
+// and grants on tables are not inspected, so the role is kept because
+// both have dependencies in the database (pg_shdepend). A role without
+// dependencies there is still dropped.
+func TestIntegrationPruneKeepsRolesGrantingToUnmanaged(t *testing.T) {
+	t.Parallel()
+	s := startServer(t)
+	bad := `"bad` + "\x01" + `"`
+	s.exec(t, "CREATE ROLE "+bad, "CREATE ROLE old", "CREATE ROLE plain", "CREATE DATABASE app")
+	s.exec(t, `\c app`,
+		"CREATE TABLE public.t (id int)",
+		"GRANT SELECT ON public.t TO old WITH GRANT OPTION",
+		"BEGIN; SET LOCAL ROLE old; GRANT SELECT ON public.t TO "+bad+"; COMMIT",
+	)
+	d := s.open(t, "postgres")
+	desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app"}}}
+	cur, err := d.Inspect(t.Context(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.EntangledOwned[model.RoleInDatabase{Role: pg("old"), Database: "app"}] == "" {
+		t.Errorf("EntangledOwned does not record old in app: %v", cur.EntangledOwned)
+	}
+	p, err := compute(t, desired, cur, d, diff.Options{Prune: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sqlOf(p.Statements())
+	warns := strings.Join(p.Warnings, "\n")
+	if strings.Contains(got, `OWNED BY "old"`) || strings.Contains(got, `DROP ROLE "old"`) {
+		t.Errorf("plan drops old, whose DROP OWNED revokes its grant to an unmanaged role:\n%s\nwarnings:\n%s", got, warns)
+	}
+	if !strings.Contains(got, `DROP ROLE "plain"`) {
+		t.Errorf("plan does not drop plain:\n%s\nwarnings:\n%s", got, warns)
+	}
+	if w := `role "old" owns objects or holds or granted privileges in database "app", where role "bad\x01", which dbfence does not manage, owns objects or holds privileges too`; !strings.Contains(warns, w) {
+		t.Errorf("warnings do not contain %q:\n%s", w, warns)
+	}
+}
+
 // TestIntegrationPruneKeepsUnreadDatabases checks against a real server
 // that --prune keeps an undeclared database the connected user owns but
 // may not connect to: what it contains is not known.

@@ -107,6 +107,9 @@ func (c *checker) check(s plan.Statement) []string {
 		reasons = append(reasons, c.dropRole(t.Role)...)
 		if s.Kind() != plan.KindDropRole {
 			reasons = append(reasons, c.ownedIn(t.Database)...)
+			if why := c.cur.EntangledOwned[model.RoleInDatabase{Role: t.Role, Database: t.Database}]; why != "" {
+				reasons = append(reasons, fmt.Sprintf("changes what role %q owns, holds or granted in database %q, although %s", t.Role, t.Database, why))
+			}
 		}
 		if s.Kind() == plan.KindDropOwned {
 			reasons = append(reasons, c.dropOwnedRelied(t.Role, s.Dependents())...)

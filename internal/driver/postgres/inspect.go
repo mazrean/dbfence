@@ -50,6 +50,10 @@ type state struct {
 	// manage (model.CheckName) owns objects or holds privileges
 	// (pg_shdepend) to the first such role.
 	unmanagedDeps map[string]string
+	// roleDeps maps the roles with names dbfence manages to the
+	// databases in which they own objects or hold or granted privileges
+	// (pg_shdepend).
+	roleDeps map[string][]string
 	// createroleSelfGrant is the createrole_self_grant setting (PG16+).
 	createroleSelfGrant string
 	user                string
@@ -106,6 +110,7 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		roles:       map[string]roleAccess{},
 		// Filled by unreachableDependencyWarnings.
 		unmanagedDeps: map[string]string{},
+		roleDeps:      map[string][]string{},
 	}
 	cur := &model.Current{}
 	var authidReadable bool
@@ -458,6 +463,9 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 					fmt.Sprintf("role %q, which dbfence does not manage, owns objects or holds privileges in it", role))
 				return nil
 			}
+			if !unmanagedRole(role) && !unmanagedName(model.NameDatabase, db) {
+				st.roleDeps[role] = append(st.roleDeps[role], db)
+			}
 			var why string
 			switch {
 			case !prunable(role):
@@ -480,12 +488,41 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 	if err != nil {
 		return nil, err
 	}
+	st.entangleOwned(cur)
 	warns := make([]string, 0, len(roles))
 	for _, role := range roles {
 		warns = append(warns, fmt.Sprintf("role %q owns objects or holds privileges in %s, where dbfence does not run REASSIGN OWNED and DROP OWNED, so dropping it with --prune will fail at DROP ROLE; reassign or drop them there first",
 			role, strings.Join(blocked[role], ", ")))
 	}
 	return warns, nil
+}
+
+// entangleOwned records in cur.EntangledOwned each role with a name
+// dbfence manages and database in which both it and a role dbfence does
+// not manage own objects or hold or granted privileges (pg_shdepend, which
+// records the owners, grantees and grantors of privileges): DROP OWNED of
+// the role revokes with CASCADE the privileges it granted, also to that
+// role, on tables, functions and types, which are not inspected.
+func (st *state) entangleOwned(cur *model.Current) {
+	for _, role := range slices.Sorted(maps.Keys(st.roleDeps)) {
+		for _, db := range st.roleDeps[role] {
+			if why := st.ownedEntangled(role, db); why != "" {
+				cur.EntangleOwned(model.RoleID{Name: role}, db, why)
+			}
+		}
+	}
+}
+
+// ownedEntangled explains why REASSIGN OWNED and DROP OWNED of role in
+// database may change what a role dbfence does not manage holds, or
+// returns "" (see entangleOwned).
+func (st *state) ownedEntangled(role, database string) string {
+	other, ok := st.unmanagedDeps[database]
+	if !ok || !slices.Contains(st.roleDeps[role], database) {
+		return ""
+	}
+	return fmt.Sprintf("it owns objects or holds or granted privileges in database %q, where role %q, which dbfence does not manage, owns objects or holds privileges too, so DROP OWNED could revoke privileges it granted to that role on tables, functions or types there, which are not inspected",
+		database, other)
 }
 
 // unmanagedName reports whether dbfence does not manage an object named

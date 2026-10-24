@@ -254,3 +254,110 @@ func TestPruneKeepsUnreadDatabases(t *testing.T) {
 		})
 	}
 }
+
+// TestPruneKeepsRolesWithDependenciesNextToUnmanaged checks that --prune
+// keeps a role that owns objects or holds or granted privileges
+// (pg_shdepend) in a database where DROP OWNED runs and a role dbfence
+// does not manage has dependencies too: DROP OWNED could revoke a privilege
+// it granted to that role on a table, function or type, which is not
+// inspected. Inspect records the pair in model.Current.EntangledOwned.
+func TestPruneKeepsRolesWithDependenciesNextToUnmanaged(t *testing.T) {
+	t.Parallel()
+	bad := "bad\x01"
+	tests := []struct {
+		roleDeps map[string][]string
+		deps     map[string]string
+		name     string
+		keep     string
+		owned    []model.RoleInDatabase
+	}{
+		{
+			name:     "both have dependencies in a declared database",
+			roleDeps: map[string][]string{"old": {"app"}, "plain": {"postgres"}},
+			deps:     map[string]string{"app": bad},
+			keep:     `role "old" owns objects or holds or granted privileges in database "app", where role "bad\x01", which dbfence does not manage, owns objects or holds privileges too, so DROP OWNED could revoke privileges it granted to that role`,
+			owned:    []model.RoleInDatabase{{Role: pg("old"), Database: "app"}},
+		},
+		{
+			name:     "both have dependencies in an undeclared database",
+			roleDeps: map[string][]string{"old": {"app", "olddb"}},
+			deps:     map[string]string{"olddb": bad},
+			keep:     `role "old" owns objects or holds or granted privileges in database "olddb"`,
+			owned:    []model.RoleInDatabase{{Role: pg("old"), Database: "olddb"}},
+		},
+		{
+			name:     "dependencies in different databases",
+			roleDeps: map[string][]string{"old": {"postgres"}},
+			deps:     map[string]string{"app": bad},
+		},
+		{
+			name:     "where DROP OWNED does not run",
+			roleDeps: map[string][]string{"old": {"nc"}},
+			deps:     map[string]string{"nc": bad},
+			owned:    []model.RoleInDatabase{{Role: pg("old"), Database: "nc"}},
+		},
+		{
+			name:     "no unmanaged dependencies",
+			roleDeps: map[string][]string{"old": {"app"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app", Owner: "postgres"}}}
+			dbObj := func(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
+			cur := &model.Current{
+				CurrentUser:     pg("postgres"),
+				CurrentDatabase: "postgres",
+				Roles:           []model.RoleState{{ID: pg("postgres"), Superuser: true}, {ID: pg("old")}, {ID: pg("plain")}},
+				Databases: []model.Database{
+					{Name: "postgres", Owner: "postgres"}, {Name: "app", Owner: "postgres"},
+					{Name: "olddb", Owner: "postgres"}, {Name: "nc", Owner: "postgres"},
+				},
+				Schemas:            []model.Schema{{Database: "app", Name: "public", Owner: "pg_database_owner"}},
+				InspectedDatabases: []string{"app"},
+			}
+			st := &state{
+				desired: desired, user: "postgres", superuser: true, version: 170000,
+				connectable: map[string]bool{"postgres": true, "app": true, "olddb": true},
+				owners: map[model.Object]string{
+					dbObj("postgres"): "postgres", dbObj("app"): "postgres", dbObj("olddb"): "postgres", dbObj("nc"): "postgres",
+				},
+				otherOwners:   map[model.Object]string{},
+				objects:       map[model.Object]int{},
+				roles:         map[string]roleAccess{},
+				unmanagedDeps: tt.deps,
+				roleDeps:      tt.roleDeps,
+			}
+			// Inspect keeps the databases where an unmanaged role has
+			// dependencies.
+			for db := range tt.deps {
+				cur.Entangle(dbObj(db), "an unmanaged role has dependencies in it")
+			}
+			st.entangleOwned(cur)
+			if len(cur.EntangledOwned) != len(tt.owned) {
+				t.Errorf("EntangledOwned = %v, want %v", cur.EntangledOwned, tt.owned)
+			}
+			for _, k := range tt.owned {
+				if cur.EntangledOwned[k] == "" {
+					t.Errorf("EntangledOwned has no %v: %v", k, cur.EntangledOwned)
+				}
+			}
+			p, err := compute(t, desired, cur, &Driver{st: st}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := sqlOf(p.Statements())
+			warns := strings.Join(p.Warnings, "\n")
+			if dropped := strings.Contains(got, `DROP ROLE "old"`); dropped != (tt.keep == "") {
+				t.Errorf("DROP ROLE old planned = %v, want %v:\n%s\nwarnings:\n%s", dropped, tt.keep == "", got, warns)
+			}
+			if tt.keep != "" && !strings.Contains(warns, tt.keep) {
+				t.Errorf("warnings do not contain %q:\n%s", tt.keep, warns)
+			}
+			if !strings.Contains(got, `DROP ROLE "plain"`) {
+				t.Errorf("plan does not drop plain:\n%s\nwarnings:\n%s", got, warns)
+			}
+		})
+	}
+}

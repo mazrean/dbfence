@@ -80,9 +80,13 @@ func (st *state) ownedDependents(role string) []string {
 // owns or has privileges on, from whichever database they run in, so a
 // role is also kept when those include a tablespace or parameter, or a
 // database that Inspect did not read (templates and databases that refuse
-// connections, unless declared). It is kept as well when DROP OWNED would
-// revoke from the connected user, or a role it is a member of, a CONNECT
-// or membership it relies on (ownedDependents).
+// connections, unless declared). It is also kept when it owns objects or
+// holds or granted privileges in a database where DROP OWNED runs and a
+// role dbfence does not manage has dependencies too (ownedEntangled):
+// privileges on tables, functions and types are not inspected, so DROP
+// OWNED could revoke one it granted to that role. It is kept as well when
+// DROP OWNED would revoke from the connected user, or a role it is a
+// member of, a CONNECT or membership it relies on (ownedDependents).
 func (d *Driver) KeepRole(id model.RoleID, databases []string) string {
 	if d.st == nil {
 		return ""
@@ -92,6 +96,12 @@ func (d *Driver) KeepRole(id model.RoleID, databases []string) string {
 	}
 	if d.st.dropReachesUnmanaged(id.Name, slices.ContainsFunc(databases, func(db string) bool { return d.st.connectable[db] })) {
 		return "owns, holds or granted something that names a role, database or schema dbfence does not manage (see its warning), or granted privileges or memberships (directly or through other roles) to such a role, which dropping it would change; handle it manually"
+	}
+	for _, db := range databases {
+		if other := d.st.unmanagedDeps[db]; d.st.connectable[db] && d.st.ownedEntangled(id.Name, db) != "" {
+			return fmt.Sprintf("owns objects or holds or granted privileges in database %q, where role %q, which dbfence does not manage, owns objects or holds privileges too, so DROP OWNED could revoke privileges it granted to that role on tables, functions or types there, which are not inspected; handle it manually",
+				db, other)
+		}
 	}
 	if slices.ContainsFunc(databases, func(db string) bool { return d.st.connectable[db] }) &&
 		slices.ContainsFunc(d.st.ownedDependents(id.Name), func(r string) bool { return (model.RoleID{Name: r}).IsPublic() || d.st.reachedByUser(r) }) {

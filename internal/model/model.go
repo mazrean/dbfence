@@ -305,6 +305,13 @@ type Current struct {
 	// why. DropUntrusted and the driver fill it; --prune keeps them and
 	// policy.Verify refuses their drop.
 	Entangled map[Object]string
+	// EntangledOwned maps a role and a database (PostgreSQL) in which
+	// REASSIGN OWNED and DROP OWNED of the role could change what dbfence
+	// does not manage, such as privileges the role granted on tables,
+	// functions or types to a role with a name dbfence does not manage,
+	// to why. The driver fills it; --prune keeps such roles and
+	// policy.Verify refuses those statements.
+	EntangledOwned map[RoleInDatabase]string
 	// Warnings are inspection notes that diff adds to the plan.
 	Warnings []string
 	// Unreadable lists what could not be inspected.
@@ -320,6 +327,26 @@ func (c *Current) Entangle(obj Object, why string) {
 	}
 	if _, ok := c.Entangled[obj]; !ok {
 		c.Entangled[obj] = why
+	}
+}
+
+// RoleInDatabase is a role in one database, where REASSIGN OWNED and DROP
+// OWNED of the role run.
+type RoleInDatabase struct {
+	Role     RoleID
+	Database string
+}
+
+// EntangleOwned records in c.EntangledOwned that REASSIGN OWNED and DROP
+// OWNED of role in database would change what dbfence does not manage.
+// The first reason recorded is kept.
+func (c *Current) EntangleOwned(role RoleID, database, why string) {
+	if c.EntangledOwned == nil {
+		c.EntangledOwned = map[RoleInDatabase]string{}
+	}
+	key := RoleInDatabase{Role: role, Database: database}
+	if _, ok := c.EntangledOwned[key]; !ok {
+		c.EntangledOwned[key] = why
 	}
 }
 
