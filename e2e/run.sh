@@ -48,13 +48,6 @@ export DBFENCE_E2E_APP_PASSWORD=${DBFENCE_E2E_APP_PASSWORD:-$(password)}
 export DBFENCE_E2E_APP_PASSWORD_NEXT=${DBFENCE_E2E_APP_PASSWORD_NEXT:-$(password)}
 export DBFENCE_E2E_MIGRATOR_PASSWORD=${DBFENCE_E2E_MIGRATOR_PASSWORD:-$(password)}
 
-if [[ $engine == postgres ]]; then
-  # The admin of RDS and Cloud SQL is not a superuser. With this setting
-  # (PostgreSQL 16+) it gets SET and INHERIT on the roles it creates, so it
-  # may give them databases and schemas, and REASSIGN OWNED them on --prune.
-  export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c createrole_self_grant=set,inherit"
-fi
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 

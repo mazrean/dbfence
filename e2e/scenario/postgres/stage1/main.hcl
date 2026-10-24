@@ -22,14 +22,15 @@ user "e2e_migrator" {
   ]
 }
 
+# No owner: on RDS and Cloud SQL the admin is not a member of the roles it
+# creates, so it may not make them owners (dbfence asks for a manual GRANT).
+# The admin owns the database and the schema.
 database "e2e_app" {
-  owner    = role.e2e_owner.name
   encoding = "UTF8"
 }
 
 schema "e2e_api" {
   database = database.e2e_app.name
-  owner    = role.e2e_owner.name
 }
 
 schema "public" {

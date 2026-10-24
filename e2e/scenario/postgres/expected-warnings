@@ -6,8 +6,13 @@
 ^warning: cannot read the password verifiers of existing roles?
 ^warning: --target is in effect
 
-# Known limitation: on PostgreSQL 16+ the server grants every role that a
-# non-superuser creates to its creator, and --prune keeps roles granted to
-# the connected user. So on RDS and Cloud SQL, --prune does not drop the
-# roles dbfence created; they stay between runs.
+# Known limitation, plain PostgreSQL 16+ (the local target): the server
+# grants every role a non-superuser creates to its creator, and --prune
+# keeps roles granted to the connected user, so they stay between runs.
 ^warning: (role|user) "e2e_[a-z_]+" is granted to the connected user "[^"]+"; not pruned$
+
+# Known limitation, RDS and Cloud SQL: the admin is not a member of the
+# roles it creates, so dbfence predicts that REASSIGN OWNED fails on
+# --prune. The roles own nothing, and the services let the admin drop
+# them, so the prune succeeds anyway.
+^warning: role "e2e_[a-z_]+": "[^"]+" does not have its privileges, so dropping it with --prune will fail at REASSIGN OWNED; run GRANT "e2e_[a-z_]+" TO "[^"]+" first$
