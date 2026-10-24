@@ -3,7 +3,7 @@ module github.com/mazrean/dbfence
 go 1.27.3
 
 require (
-	cloud.google.com/go/auth v0.20.0
+	cloud.google.com/go/auth v0.24.1
 	cloud.google.com/go/secretmanager v1.23.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3
 	github.com/alecthomas/kong v1.16.1
