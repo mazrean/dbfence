@@ -105,6 +105,42 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			leaked: "Jj2SecretTail9",
 			shown:  "****",
 		},
+		{
+			name:   "password on the line after =",
+			src:    pgConn + "user \"app\" {\n  password =\n    \"Qq1NextLinePw9\"\n}\n",
+			leaked: "Qq1NextLinePw9",
+			shown:  "****",
+		},
+		{
+			name:   "quoted string continued on the next line",
+			src:    pgConn + "user \"app\" {\n  password = \"Qq2a\nQq2SecondLinePw9\"\n}\n",
+			leaked: "Qq2SecondLinePw9",
+			shown:  "****",
+		},
+		{
+			name:   "block comment closes no bracket, parse error",
+			src:    pgConn + "user \"app\" {\n  password = format( /* ) */\n    \"Qq3CommentPw9\" 1)\n}\n",
+			leaked: "Qq3CommentPw9",
+			shown:  "****",
+		},
+		{
+			name:   "block comment closes no bracket, unknown variable",
+			src:    pgConn + "user \"app\" {\n  password = format( /* ) */\n    \"Qq4CommentPw9${nope}\")\n}\n",
+			leaked: "Qq4CommentPw9",
+			shown:  "****",
+		},
+		{
+			name:   "dsn on the line after =",
+			src:    "connection {\n  engine = \"postgres\"\n  dsn    =\n    \"postgres://u:Qq5NextDsnPw9@h/d\"\n}\n",
+			leaked: "Qq5NextDsnPw9",
+			shown:  "****",
+		},
+		{
+			name:   "multi-line block comment between = and the value",
+			src:    pgConn + "user \"app\" {\n  password = /*\n */ \"Qq6BlkCmtPw9\" 1\n}\n",
+			leaked: "Qq6BlkCmtPw9",
+			shown:  "****",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -147,6 +183,15 @@ func TestMaskSecrets(t *testing.T) {
 		{name: "escaped interpolation", in: "password = \"a$${\"\nx = 1\n", want: "password =*******\nx = 1\n"},
 		{name: "interpolation in a heredoc", in: "password = <<EOT\na${\nEOT\n}\nEOT\nx = 1\n", want: "password =******\n***\n***\n*\nEOT\nx = 1\n"},
 		{name: "unterminated string inside an interpolation", in: "dsn = \"a${\"b\n}\"\nx = 1\n", want: "dsn =*******\n**\nx = 1\n"},
+		{name: "value on the next line", in: "password =\n  \"abc\"\nx = 1\n", want: "password =\n*******\nx = 1\n"},
+		{name: "blank and comment lines before the value", in: "dsn =\n\n# c\n  \"abc\"\n}\n", want: "dsn =\n\n***\n*******\n}\n"},
+		{name: "string broken across lines", in: "password = \"a\nbc\"\nx = 1\n", want: "password =***\n***\nx = 1\n"},
+		{name: "continuation ends at a block header", in: "password = \"a\"\nuser \"b\" {\n", want: "password =****\nuser \"b\" {\n"},
+		{name: "continuation ends at a quoted key", in: "password = \"a\"\n\"login\" = true\n", want: "password =****\n\"login\" = true\n"},
+		{name: "comparison does not end the continuation", in: "password =\n  x == \"abc\"\n}\n", want: "password =\n************\n}\n"},
+		{name: "brackets in a block comment", in: "password = f( /* ) */\n  \"a\")\nx = 1\n", want: "password =***********\n******\nx = 1\n"},
+		{name: "block comment across lines", in: "password = /*\n*/ \"a\"\nx = 1\n", want: "password =***\n******\nx = 1\n"},
+		{name: "next assignment is masked after a continuation", in: "password =\n  \"a\"\ndsn = \"b\"\nx = 1\n", want: "password =\n*****\ndsn =****\nx = 1\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

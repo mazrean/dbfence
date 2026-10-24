@@ -25,6 +25,10 @@ var secretAttrs = map[string]bool{"password": true, "dsn": true}
 // works on raw bytes, so it also finds them in files that do not parse.
 var secretAssign = regexp.MustCompile(`(?:^|[^\w-])"?(?:password|dsn)"?[ \t]*=`)
 
+// statementStart matches a line that visibly starts a new statement: an
+// attribute assignment, a block header, or the '}' that closes a block.
+var statementStart = regexp.MustCompile(`^[ \t]*(?:\}|"[^"]*"[ \t]*=(?:[^=]|$)|[A-Za-z_][\w-]*[ \t]*=(?:[^=]|$)|[A-Za-z_][\w-]*(?:[ \t]+(?:[A-Za-z_][\w-]*|"[^"]*"))*[ \t]*\{)`)
+
 // heredocStart is a heredoc introducer that ends the line.
 var heredocStart = regexp.MustCompile(`^<<-?([A-Za-z_][\w-]*)[ \t]*\r?$`)
 
@@ -36,6 +40,11 @@ var heredocStart = regexp.MustCompile(`^<<-?([A-Za-z_][\w-]*)[ \t]*\r?$`)
 // multi-line expression such as format(\n"..."),
 // trimspace(<<EOT\n...) or "a${\n x\n}b" is masked as a whole. A value
 // that is never closed is masked to the end of the file.
+//
+// It fails closed: the lines after a value are masked as well until one
+// visibly starts a new statement (see statementStart), so that a value
+// written on the line after '=', or a quoted string broken across lines
+// in error, is masked too.
 func maskSecrets(src []byte) []byte {
 	out := bytes.Clone(src)
 	mask := func(b []byte) {
@@ -46,6 +55,7 @@ func maskSecrets(src []byte) []byte {
 		}
 	}
 	var sc valueScanner
+	pending := false // the last value may go on onto the next lines
 	for start := 0; start < len(out); {
 		end := bytes.IndexByte(out[start:], '\n')
 		if end < 0 {
@@ -54,13 +64,21 @@ func maskSecrets(src []byte) []byte {
 			end += start
 		}
 		line := out[start:end]
-		if sc.open() {
+		switch {
+		case sc.open():
 			if !sc.scan(line) {
 				mask(line)
 			}
-		} else if v := secretValue(line); v >= 0 {
-			sc.scan(line[v:])
-			mask(line[v:])
+		case pending && !statementStart.Match(line):
+			sc.scan(line)
+			mask(line)
+		default:
+			pending = false
+			if v := secretValue(line); v >= 0 {
+				pending = true
+				sc.scan(line[v:])
+				mask(line[v:])
+			}
 		}
 		start = end + 1
 	}
@@ -72,6 +90,7 @@ const (
 	frameString  = '"' // a quoted template
 	frameInterp  = '$' // a ${ or %{ sequence of a template
 	frameHeredoc = '<' // the body of a heredoc
+	frameComment = '*' // a /* */ comment
 )
 
 type scanFrame struct {
@@ -81,8 +100,8 @@ type scanFrame struct {
 
 // valueScanner follows the nesting of an HCL expression across lines:
 // brackets, quoted templates with their ${ and %{ sequences, and
-// heredocs. Brackets in comments and in the literal text of templates
-// are not counted.
+// heredocs, and /* */ comments, which can span lines. Brackets in
+// comments and in the literal text of templates are not counted.
 type valueScanner struct{ stack []scanFrame }
 
 // open reports whether the expression goes on past the scanned lines.
@@ -115,6 +134,11 @@ func (s *valueScanner) scan(line []byte) bool {
 	for i := 0; i < len(line); i++ {
 		c := line[i]
 		switch top := s.top(); top {
+		case frameComment:
+			if c == '*' && at(i+1) == '/' {
+				s.stack = s.stack[:len(s.stack)-1]
+				i++
+			}
 		case frameString, frameHeredoc:
 			switch {
 			case top == frameString && c == '\\':
@@ -138,6 +162,9 @@ func (s *valueScanner) scan(line []byte) bool {
 				if s.open() {
 					s.stack = s.stack[:len(s.stack)-1]
 				}
+			case c == '/' && at(i+1) == '*':
+				s.push(frameComment, "")
+				i++
 			case c == '#' || c == '/' && at(i+1) == '/':
 				// A comment ends the line.
 				return false
