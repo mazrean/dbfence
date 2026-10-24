@@ -114,6 +114,37 @@ func TestVerify(t *testing.T) {
 				revokeMembership(pg("app"), pg("ops"), false),
 			},
 		},
+		{
+			name: "drop owned whose CASCADE reaches the connected user",
+			stmts: []plan.Statement{
+				reassign(pg("stray"), "postgres"),
+				dropOwned(pg("stray"), "postgres").WithDependents([]model.RoleID{pg("admin")}),
+			},
+			want: []string{`grants "stray" made to the connected user "admin"`},
+		},
+		{
+			name: "drop owned whose CASCADE reaches a role granted to the connected user",
+			stmts: []plan.Statement{
+				reassign(pg("stray"), "postgres"),
+				dropOwned(pg("stray"), "postgres").WithDependents([]model.RoleID{pg("app"), pg("base")}),
+			},
+			want: []string{`grants "stray" made to "base"`},
+		},
+		{
+			name: "drop owned whose CASCADE reaches PUBLIC",
+			stmts: []plan.Statement{
+				reassign(pg("stray"), "postgres"),
+				dropOwned(pg("stray"), "postgres").WithDependents([]model.RoleID{model.PublicRole}),
+			},
+			want: []string{`grants "stray" made to PUBLIC`},
+		},
+		{
+			name: "drop owned whose CASCADE reaches other roles",
+			stmts: []plan.Statement{
+				reassign(pg("stray"), "postgres"),
+				dropOwned(pg("stray"), "postgres").WithDependents([]model.RoleID{pg("app")}),
+			},
+		},
 		{name: "drop without prune", noPrune: true, stmts: []plan.Statement{dropRole(pg("stray"))}, want: []string{"without --prune"}},
 		{name: "schema drop without prune", noPrune: true, stmts: []plan.Statement{dropSchema("app", "old")}, want: []string{"without --prune"}},
 		{name: "connected user", stmts: []plan.Statement{dropRole(pg("admin"))}, want: []string{`drops the connected user "admin"`}},

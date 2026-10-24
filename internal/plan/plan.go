@@ -93,7 +93,10 @@ func (s Statement) WithPrivileges(privs []string) Statement {
 // KindRevoke or KindRevokeMembership revokes, through CASCADE: those that
 // received the privileges or memberships, directly or transitively, from
 // its grantee's grant option or ADMIN OPTION. They lose those grants even
-// when the statement revokes only the option.
+// when the statement revokes only the option. For KindDropOwned they are
+// the roles that lose, through its CASCADE, a grant of CONNECT on the
+// connected database or a membership made, directly or transitively, by
+// its role.
 func (s Statement) Dependents() []model.RoleID { return slices.Clone(s.dependents) }
 
 // WithDependents returns s with the roles its CASCADE also revokes from

@@ -108,6 +108,9 @@ func (c *checker) check(s plan.Statement) []string {
 		if s.Kind() != plan.KindDropRole {
 			reasons = append(reasons, c.ownedIn(t.Database)...)
 		}
+		if s.Kind() == plan.KindDropOwned {
+			reasons = append(reasons, c.dropOwnedRelied(t.Role, s.Dependents())...)
+		}
 		return append(reasons, c.reassignedFirst(s)...)
 	case plan.KindDropDatabase:
 		return append(c.prunes(), c.dropDatabase(t.Database)...)
@@ -519,6 +522,24 @@ func (c *checker) cascadeRelied(t plan.Target, dependents []model.RoleID) []stri
 			out = append(out, fmt.Sprintf("revokes with CASCADE the membership of the connected user %q in %q that %q granted", id, t.Role, t.Grantee))
 		case c.relied[id]:
 			out = append(out, fmt.Sprintf("revokes with CASCADE the membership of %q in %q that %q granted, through which the connected user %q has its roles", id, t.Role, t.Grantee, c.cur.CurrentUser))
+		}
+	}
+	return out
+}
+
+// dropOwnedRelied checks the dependents of a DROP OWNED BY role: each
+// loses, through CASCADE, the grants of CONNECT on the connected database
+// or of memberships role made, directly or transitively. The connected
+// user may connect, or have its roles, only through such a grant, so no
+// dependent may be PUBLIC, the connected user or a role granted to it.
+func (c *checker) dropOwnedRelied(role model.RoleID, dependents []model.RoleID) []string {
+	var out []string
+	for _, id := range dependents {
+		switch {
+		case id == c.cur.CurrentUser:
+			out = append(out, fmt.Sprintf("drops with DROP OWNED the grants %q made to the connected user %q, revoking them with CASCADE", role, id))
+		case id.IsPublic() || c.relied[id]:
+			out = append(out, fmt.Sprintf("drops with DROP OWNED the grants %q made to %q, revoking them with CASCADE, through which the connected user %q may connect or have its roles", role, id, c.cur.CurrentUser))
 		}
 	}
 	return out
