@@ -21,6 +21,11 @@ import (
 // ErrUnsupported is returned when the verifier format is unknown.
 var ErrUnsupported = errors.New("unsupported password verifier")
 
+// maxVerifierLen bounds the stored verifiers the parsers accept. Real
+// ones are far shorter (SCRAM-SHA-256 with a 16 byte salt: about 133
+// bytes; MySQL authentication strings: at most 70).
+const maxVerifierLen = 1024
+
 // MySQLPlugin names.
 const (
 	PluginNative       = "mysql_native_password"
@@ -38,6 +43,9 @@ const (
 // MatchMySQL reports whether password matches authentication_string
 // stored for the given plugin.
 func MatchMySQL(plugin string, authString []byte, password string) (bool, error) {
+	if len(authString) > maxVerifierLen {
+		return false, fmt.Errorf("%w: authentication string longer than %d bytes", ErrUnsupported, maxVerifierLen)
+	}
 	switch plugin {
 	case PluginNative:
 		if len(authString) == 0 {
@@ -225,6 +233,9 @@ func PostgresVerifierKind(verifier string) VerifierKind {
 // MatchPostgres reports whether password matches the rolpassword
 // verifier of role user.
 func MatchPostgres(verifier, user, password string) (bool, error) {
+	if len(verifier) > maxVerifierLen {
+		return false, fmt.Errorf("%w: postgres verifier longer than %d bytes", ErrUnsupported, maxVerifierLen)
+	}
 	switch PostgresVerifierKind(verifier) {
 	case VerifierNone:
 		// No stored password (NULL rolpassword). PostgreSQL stores an
@@ -246,9 +257,10 @@ func PostgresMD5(user, password string) string {
 	return "md5" + hex.EncodeToString(sum[:])
 }
 
-// maxSCRAMIterations bounds the PBKDF2 work a stored verifier can demand
-// from plan; PostgreSQL's default is 4096.
-const maxSCRAMIterations = 10_000_000
+// maxSCRAMIterations bounds the PBKDF2 work a stored verifier, read from
+// an untrusted server, can demand from plan; PostgreSQL's default
+// scram_iterations is 4096.
+const maxSCRAMIterations = 1_000_000
 
 // matchSCRAM checks "SCRAM-SHA-256$<iter>:<salt>$<StoredKey>:<ServerKey>".
 func matchSCRAM(verifier, password string) (bool, error) {

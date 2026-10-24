@@ -32,7 +32,7 @@ func sqls(stmts []plan.Statement) []string {
 
 func planSQL(t *testing.T, desired *model.Desired, cur *model.Current, d Dialect) ([]string, []string) {
 	t.Helper()
-	p, err := diff.Compute(desired, cur, d, diff.Options{})
+	p, err := compute(t, desired, cur, d, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

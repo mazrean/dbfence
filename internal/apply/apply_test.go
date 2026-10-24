@@ -18,8 +18,13 @@ type recorder struct {
 	failAt int
 }
 
-func (r *recorder) Exec(_ context.Context, database, query string) error {
-	r.ran = append(r.ran, database+"|"+query)
+func (r *recorder) Exec(_ context.Context, s plan.Statement) error {
+	query := s.SQL()
+	ran := s.Database + "|" + query
+	if s.AsRole != "" {
+		ran = s.Database + "|as " + s.AsRole + "|" + query
+	}
+	r.ran = append(r.ran, ran)
 	if len(r.ran) != r.failAt {
 		return nil
 	}
@@ -35,10 +40,10 @@ func (r *recorder) Exec(_ context.Context, database, query string) error {
 func testPlan() *plan.Plan {
 	return &plan.Plan{Changes: []plan.Change{
 		{Action: plan.ActionCreate, Resource: `role "a"`, Statements: []plan.Statement{
-			plan.SQL("", `CREATE ROLE "a" WITH PASSWORD `, plan.Secret("'hunter2'")),
+			plan.SQL("", plan.Keyword(`CREATE ROLE "a" WITH PASSWORD `), plan.NewSecret(plan.EscapedLiteral("'hunter2'"))),
 		}},
 		{Action: plan.ActionCreate, Resource: `schema "s"`, Statements: []plan.Statement{
-			plan.SQL("app", `CREATE SCHEMA "s"`),
+			plan.SQL("app", plan.Keyword(`CREATE SCHEMA "s"`)),
 		}},
 	}}
 }
@@ -145,10 +150,10 @@ func TestRunErrors(t *testing.T) {
 
 func TestRunPrintsNotesBeforeTheStatement(t *testing.T) {
 	t.Parallel()
-	revoke := `REVOKE CONNECT ON DATABASE "app" FROM "a" CASCADE`
+	const revoke = `REVOKE CONNECT ON DATABASE "app" FROM "a" CASCADE`
 	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionRevoke, Resource: `CONNECT on database "app" from "a"`, Statements: []plan.Statement{
-		plan.SQL("app", revoke).WithNote("two").WithNote("CASCADE: one"),
-		plan.SQL("", "GRANT X"),
+		plan.SQL("app", plan.Keyword(revoke)).WithNote("two").WithNote("CASCADE: one"),
+		plan.SQL("", plan.Keyword("GRANT X")),
 	}}}}
 	var out strings.Builder
 	r := &recorder{}
@@ -162,6 +167,53 @@ func TestRunPrintsNotesBeforeTheStatement(t *testing.T) {
 	// Notes are never sent to the server.
 	if got := strings.Join(r.ran, "\n"); got != "app|"+revoke+"\n|GRANT X" {
 		t.Errorf("ran =\n%s", got)
+	}
+}
+
+// A statement run as another role reaches the Executor as one statement
+// with AsRole set, and output and errors name the role.
+func TestRunAsRole(t *testing.T) {
+	t.Parallel()
+	const revoke = `REVOKE USAGE ON SCHEMA "api" FROM "app"`
+	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionRevoke, Resource: `USAGE on schema "api" from "app"`, Statements: []plan.Statement{
+		plan.SQL("app", plan.Keyword(revoke)).WithRole("ro"),
+		plan.SQL("", plan.Keyword("GRANT X")).WithRole("g"),
+	}}}}
+	tests := []struct {
+		name    string
+		wantErr string
+		wantRan []string
+		failAt  int
+	}{
+		{name: "success", wantRan: []string{"app|as ro|" + revoke, "|as g|GRANT X"}},
+		{
+			name: "failure names the role", failAt: 1, wantRan: []string{"app|as ro|" + revoke},
+			wantErr: `statement 1/2 (on database "app", as role "ro") failed: `,
+		},
+		{
+			name: "failure without a database", failAt: 2, wantRan: []string{"app|as ro|" + revoke, "|as g|GRANT X"},
+			wantErr: `statement 2/2 (as role "g") failed: `,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &recorder{failAt: tt.failAt}
+			var out strings.Builder
+			err := Run(t.Context(), r, p, &out, false)
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatal(err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Errorf("err = %v, want substring %q", err, tt.wantErr)
+			}
+			if got, want := strings.Join(r.ran, "\n"), strings.Join(tt.wantRan, "\n"); got != want {
+				t.Errorf("ran =\n%s\nwant\n%s", got, want)
+			}
+			if !strings.HasPrefix(out.String(), "[1/2] (on database \"app\", as role \"ro\") "+revoke+"\n") {
+				t.Errorf("output =\n%s", out.String())
+			}
+		})
 	}
 }
 
@@ -270,7 +322,7 @@ func TestRunWithholdsErrorsOfSecretStatements(t *testing.T) {
 func TestRunEscapesControlCharacters(t *testing.T) {
 	t.Parallel()
 	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionDrop, Resource: "r", Statements: []plan.Statement{
-		plan.SQL("", "DROP ROLE \"x\x1b[2K\r\n-- ok\"").WithNote("note \x1b[8m"),
+		plan.SQL("", plan.Keyword("DROP ROLE \"x\x1b[2K\r\n-- ok\"")).WithNote("note \x1b[8m"),
 	}}}}
 	var out strings.Builder
 	r := &recorder{}

@@ -3,6 +3,7 @@ package funcs
 import (
 	"errors"
 
+	"github.com/mazrean/dbfence/internal/secret"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
 )
@@ -18,7 +19,8 @@ type sensitiveMark struct{}
 func (sensitiveMark) GoString() string { return "funcs.Sensitive" }
 
 // markSensitive wraps fn so that its results, and every value nested in
-// them, carry Sensitive.
+// them, carry Sensitive. Every string in a result is registered with
+// secret.Register, so that output redacts it.
 func markSensitive(fn function.Function) function.Function {
 	return function.New(&function.Spec{
 		Description: fn.Description(),
@@ -30,6 +32,7 @@ func markSensitive(fn function.Function) function.Function {
 			if err != nil {
 				return cty.NilVal, err
 			}
+			registerStrings(v)
 			return markDeep(v, cty.NewValueMarks(Sensitive)), nil
 		},
 	})
@@ -66,6 +69,11 @@ func guard(fn function.Function) function.Function {
 			v, err := fn.Call(plain)
 			if err != nil {
 				return cty.NilVal, sanitize(err, marks)
+			}
+			if _, ok := marks[Sensitive]; ok {
+				// A value computed from a secret, such as a field that
+				// jsondecode takes out of it, is a secret of its own.
+				registerStrings(v)
 			}
 			return markDeep(v, marks), nil
 		},
@@ -128,4 +136,16 @@ func guardAll(fns map[string]function.Function) map[string]function.Function {
 		out[name] = guard(fn)
 	}
 	return out
+}
+
+// registerStrings registers every known string in v, including nested
+// ones, as a secret.
+func registerStrings(v cty.Value) {
+	_ = cty.Walk(v, func(_ cty.Path, e cty.Value) (bool, error) {
+		e, _ = e.UnmarkDeep()
+		if e.IsKnown() && !e.IsNull() && e.Type() == cty.String {
+			secret.Register(e.AsString())
+		}
+		return true, nil
+	})
 }

@@ -12,11 +12,13 @@ import (
 	"github.com/mazrean/dbfence/internal/plan"
 )
 
-// Executor runs a single statement on a database. Errors with which the
+// Executor runs a single statement on s.Database, as s.AsRole when set.
+// It sends s.SQL() as exactly one command, so that the server rejects
+// any second statement in it. Errors with which the
 // server refused the statement, or that occurred before it was sent, are
 // marked with Rejected; any other error leaves its outcome unknown.
 type Executor interface {
-	Exec(ctx context.Context, database, query string) error
+	Exec(ctx context.Context, s plan.Statement) error
 }
 
 // Rejected marks err as known not to have applied its statement: the
@@ -40,7 +42,8 @@ func isRejected(err error) bool {
 
 // Run executes every statement in order, stopping at the first error.
 // Statements are not wrapped in a transaction because CREATE DATABASE
-// and similar commands cannot run inside one.
+// and similar commands cannot run inside one; only a statement run as
+// another role gets a transaction of its own from the Executor.
 func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecrets bool) error {
 	total := len(p.Statements())
 	n := 0
@@ -53,11 +56,11 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 			for _, note := range s.Notes() {
 				fmt.Fprintf(&sb, "-- %s\n", plan.Escape(note))
 			}
-			fmt.Fprintf(&sb, "[%d/%d] %s%s\n", n, total, onDatabase(s.Database, "", " "), s.Display(showSecrets))
+			fmt.Fprintf(&sb, "[%d/%d] %s%s\n", n, total, where(s, "", " "), s.Display(showSecrets))
 			if _, err := io.WriteString(w, sb.String()); err != nil {
 				return err
 			}
-			if err := ex.Exec(ctx, s.Database, s.SQL()); err != nil {
+			if err := ex.Exec(ctx, s); err != nil {
 				return failure(ctx, c, s, n, total, err, showSecrets)
 			}
 		}
@@ -69,7 +72,7 @@ func Run(ctx context.Context, ex Executor, p *plan.Plan, w io.Writer, showSecret
 // quote the statement, so the error text is not wrapped, and for a
 // statement with a secret it is withheld from the first quote on.
 func failure(ctx context.Context, c plan.Change, s plan.Statement, n, total int, err error, showSecrets bool) error {
-	at := fmt.Sprintf("statement %d/%d%s", n, total, onDatabase(s.Database, " ", ""))
+	at := fmt.Sprintf("statement %d/%d%s", n, total, where(s, " ", ""))
 	msg := err.Error()
 	if s.HasSecret() && !showSecrets {
 		msg = withholdQuoted(msg)
@@ -126,11 +129,12 @@ func isCancellation(ctx context.Context, err error) bool {
 	return errors.Is(err, driver.ErrBadConn)
 }
 
-// onDatabase returns `(on database "x")` between before and after, or ""
-// for the configured connection.
-func onDatabase(database, before, after string) string {
-	if database == "" {
+// where returns `(on database "x", as role "y")` between before and
+// after, or "" for the configured connection and user.
+func where(s plan.Statement, before, after string) string {
+	w := s.Where()
+	if w == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s(on database %q)%s", before, database, after)
+	return before + "(" + w + ")" + after
 }

@@ -10,13 +10,15 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func InitializeApp(ctx context.Context) *app.App {
+func InitializeProgram(ctx context.Context) *Program {
 	var (
+		output     *Output
 		opener     app.Opener
 		io         *app.IO
 		registry   *funcs.Registry
 		registryCh = make(chan struct{})
 		app0       *app.App
+		program    *Program
 	)
 	eg := &errgroup.Group{}
 	eg.Go(func() error {
@@ -24,10 +26,12 @@ func InitializeApp(ctx context.Context) *app.App {
 		close(registryCh)
 		return nil
 	})
+	output = kessoku.Provide(NewOutput).Fn()()
 	opener = kessoku.Provide(app.NewOpener).Fn()()
-	io = kessoku.Provide(NewIO).Fn()()
+	io = kessoku.Provide(NewIO).Fn()(output)
 	<-registryCh
 	app0 = kessoku.Provide(app.New).Fn()(registry, opener, io)
+	program = kessoku.Provide(NewProgram).Fn()(app0, output)
 	_ = eg.Wait()
-	return app0
+	return program
 }

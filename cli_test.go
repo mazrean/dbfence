@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/mazrean/dbfence/internal/app"
-	"github.com/mazrean/dbfence/internal/funcs"
 )
 
 func TestRun(t *testing.T) {
@@ -50,8 +49,7 @@ func TestRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr bytes.Buffer
-			a := app.New(funcs.NewRegistry(t.Context()), app.NewOpener(), &app.IO{In: strings.NewReader(""), Out: &stdout, Err: &stderr})
-			code := run(t.Context(), tt.args, a, &stdout, &stderr)
+			code := runTest(t, tt.args, app.NewOpener(), &stdout, &stderr)
 			if code != tt.wantCode {
 				t.Errorf("exit code = %d, want %d\nstdout: %s\nstderr: %s", code, tt.wantCode, stdout.String(), stderr.String())
 			}
@@ -89,8 +87,7 @@ func TestRunEmptyFileFallsBackToDefault(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			a := app.New(funcs.NewRegistry(t.Context()), app.NewOpener(), &app.IO{In: strings.NewReader(""), Out: &stdout, Err: &stderr})
-			if code := run(t.Context(), tt.args, a, &stdout, &stderr); code != exitOK {
+			if code := runTest(t, tt.args, app.NewOpener(), &stdout, &stderr); code != exitOK {
 				t.Errorf("exit code = %d, want 0\nstderr: %s", code, stderr.String())
 			}
 			if !strings.Contains(stdout.String(), "The configuration is valid") {

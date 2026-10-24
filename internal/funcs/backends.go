@@ -16,12 +16,13 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/fujiwara/tfstate-lookup/tfstate"
+	"google.golang.org/api/option"
 )
 
 type awsSecretsManager struct{ c *secretsmanager.Client }
 
 func newAWSSecretsManager(ctx context.Context) (AWSSecretsManager, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(awsLogger()))
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +43,17 @@ func (a *awsSecretsManager) GetSecretString(ctx context.Context, id string) (str
 type gcpSecretManager struct{ c *secretmanager.Client }
 
 func newGCPSecretManager(ctx context.Context) (GCPSecretManager, error) {
-	c, err := secretmanager.NewClient(ctx)
+	c, err := dialGCPSecretManager(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// dialGCPSecretManager returns a client that logs to sdkLogger, with
+// extra options such as a test endpoint.
+func dialGCPSecretManager(ctx context.Context, extra ...option.ClientOption) (*gcpSecretManager, error) {
+	c, err := secretmanager.NewClient(ctx, append([]option.ClientOption{option.WithLogger(sdkLogger())}, extra...)...)
 	if err != nil {
 		return nil, err
 	}

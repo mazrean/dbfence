@@ -56,7 +56,7 @@ func TestComputeMySQLEmptyHost(t *testing.T) {
 				CurrentUser: root,
 				Roles:       []model.RoleState{{ID: root, Login: true}, {ID: anon, Login: true}},
 			}
-			p, err := diff.Compute(desired, current, mysql.Dialect{}, diff.Options{Prune: tt.prune})
+			p, err := compute(t, desired, current, mysql.Dialect{}, diff.Options{Prune: tt.prune})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -116,7 +116,7 @@ func TestComputeMySQLPublicAccount(t *testing.T) {
 					{Grantee: pub, Object: dbObj("shop"), Name: "SELECT"},
 				},
 			}
-			p, err := diff.Compute(desired, current, mysql.Dialect{}, diff.Options{Prune: tt.prune})
+			p, err := compute(t, desired, current, mysql.Dialect{}, diff.Options{Prune: tt.prune})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -35,6 +35,10 @@ func unquoted(sql string) string {
 func TestNotesAreNotExecuted(t *testing.T) {
 	t.Parallel()
 	const evil = "x\nALTER ROLE mallory SUPERUSER; --\r"
+	// A CASCADE never reaches a role with a line break in its name (such
+	// roles are not managed), so the dependents in its note only try to
+	// close a comment.
+	const sneaky = "x */ ALTER ROLE mallory SUPERUSER; --"
 	ps := model.Object{Type: model.ObjectSchema, Database: "pdb", Schema: "ps"}
 	db := model.Object{Type: model.ObjectDatabase, Database: "hdb"}
 	tests := []struct {
@@ -50,7 +54,7 @@ func TestNotesAreNotExecuted(t *testing.T) {
 					owners: map[model.Object]string{db: "own"},
 					acl: []aclEntry{
 						{obj: db, grantee: "hu", grantor: "own", priv: "CONNECT", grantable: true},
-						{obj: db, grantee: evil, grantor: "hu", priv: "CONNECT"},
+						{obj: db, grantee: sneaky, grantor: "hu", priv: "CONNECT"},
 					},
 				}
 				s, _ := st.revoke("hu", db, []string{"CONNECT"}, true)
@@ -66,7 +70,7 @@ func TestNotesAreNotExecuted(t *testing.T) {
 					roles: map[string]roleAccess{},
 					members: []memberEntry{
 						{role: "grp", member: "m", grantor: "adm", admin: true},
-						{role: "grp", member: evil, grantor: "m"},
+						{role: "grp", member: sneaky, grantor: "m"},
 					},
 				}
 				s, _ := st.revokeMembership("m", "grp")

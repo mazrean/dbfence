@@ -50,7 +50,7 @@ func TestComputeOrder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(tt.desired, tt.current, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, tt.desired, tt.current, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -144,7 +144,7 @@ func TestComputeCurrentUser(t *testing.T) {
 			}
 			d := &model.Desired{Engine: engine, Roles: []model.Role{tt.role}}
 			cur := &model.Current{CurrentUser: tt.state.ID, Roles: []model.RoleState{tt.state, {ID: pgID("x")}}}
-			p, err := diff.Compute(d, cur, tt.dialect, diff.Options{})
+			p, err := compute(t, d, cur, tt.dialect, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +211,7 @@ func TestComputeTemplateSchema(t *testing.T) {
 				Roles:       []model.RoleState{{ID: pgID("admin"), Login: true}},
 				Databases:   []model.Database{{Name: "postgres", Owner: "admin"}},
 			}
-			p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, d, cur, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -374,7 +374,7 @@ func TestComputePruneProtection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(tt.desired, tt.current, tt.dialect, diff.Options{Prune: !tt.noPrune})
+			p, err := compute(t, tt.desired, tt.current, tt.dialect, diff.Options{Prune: !tt.noPrune})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -474,7 +474,7 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 			if !tt.unreadable.Roles {
 				cur.Roles = []model.RoleState{tt.current, {ID: role("dbarole")}, {ID: role("extra")}}
 			}
-			p, err := diff.Compute(desired, cur, mysql.Dialect{}, diff.Options{})
+			p, err := compute(t, desired, cur, mysql.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -552,7 +552,7 @@ func TestComputePruneOtherSchemaOwners(t *testing.T) {
 				InspectedDatabases: []string{"app"},
 				OtherSchemas:       tt.other,
 			}
-			p, err := diff.Compute(desired, current, postgres.Dialect{}, diff.Options{Prune: true})
+			p, err := compute(t, desired, current, postgres.Dialect{}, diff.Options{Prune: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -562,6 +562,69 @@ func TestComputePruneOtherSchemaOwners(t *testing.T) {
 			var warns []string
 			for _, w := range p.Warnings {
 				if strings.Contains(w, `"monitor"`) {
+					warns = append(warns, w)
+				}
+			}
+			if d := cmp.Diff(tt.wantWarns, warns, cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
+			}
+		})
+	}
+}
+
+// TestComputePruneEntangled checks that --prune keeps the databases and
+// schemas model.Current.Entangled names, with a warning, and drops the
+// others.
+func TestComputePruneEntangled(t *testing.T) {
+	t.Parallel()
+	db := func(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
+	sch := func(d, name string) model.Object { return model.Object{Type: model.ObjectSchema, Database: d, Schema: name} }
+	tests := []struct {
+		entangled map[model.Object]string
+		name      string
+		want      []string
+		wantWarns []string
+	}{
+		{
+			name: "nothing entangled",
+			want: []string{`app: DROP SCHEMA "old"`, `DROP DATABASE "old"`},
+		},
+		{
+			name:      "database",
+			entangled: map[model.Object]string{db("old"): "it is owned by role X"},
+			want:      []string{`app: DROP SCHEMA "old"`},
+			wantWarns: []string{`database "old": it is owned by role X, so it is not pruned; handle it manually`},
+		},
+		{
+			name:      "schema",
+			entangled: map[model.Object]string{sch("app", "old"): "it grants USAGE to role X"},
+			want:      []string{`DROP DATABASE "old"`},
+			wantWarns: []string{`schema "old" in database "app": it grants USAGE to role X, so it is not pruned; handle it manually`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app", Owner: "admin"}}}
+			current := &model.Current{
+				CurrentUser:        pgID("admin"),
+				CurrentDatabase:    "postgres",
+				Roles:              []model.RoleState{{ID: pgID("admin"), Login: true, Superuser: true}},
+				Databases:          []model.Database{{Name: "app", Owner: "admin"}, {Name: "old", Owner: "admin"}, {Name: "postgres", Owner: "admin"}},
+				Schemas:            []model.Schema{{Database: "app", Name: "old", Owner: "admin"}},
+				InspectedDatabases: []string{"app"},
+				Entangled:          tt.entangled,
+			}
+			p, err := compute(t, desired, current, postgres.Dialect{}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			var warns []string
+			for _, w := range p.Warnings {
+				if strings.Contains(w, "it is not pruned") {
 					warns = append(warns, w)
 				}
 			}

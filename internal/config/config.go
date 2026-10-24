@@ -20,6 +20,7 @@ import (
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
+	"github.com/mazrean/dbfence/internal/secret"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 	"github.com/zclconf/go-cty/cty/function"
@@ -108,6 +109,9 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 		base = filepath.Dir(path)
 	}
 	fns = funcs.ResolvePathsFrom(fns, base)
+	// Engine names are printed by design, even when a password equals one.
+	secret.RegisterPublic(string(model.EnginePostgres))
+	secret.RegisterPublic(string(model.EngineMySQL))
 	parser := hclparse.NewParser()
 	var bodies []*hcl.File
 	var diags hcl.Diagnostics
@@ -115,6 +119,9 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 		file, d := parser.ParseHCLFile(f)
 		diags = append(diags, d...)
 		if file != nil {
+			// Even when parsing failed: the body holds what parsed.
+			registerLiteralSecrets(file.Body)
+			registerStateURLPasswords(file.Body)
 			bodies = append(bodies, file)
 		}
 	}
@@ -166,6 +173,8 @@ func hclFiles(path string) ([]string, error) {
 
 // diagError renders the error diagnostics. The leading "Error: " of the
 // first one is dropped because the CLI prefixes errors with it already.
+// Source snippets show the values of password and dsn masked (see
+// maskSecrets).
 func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
 	diags = hideSecretKeys(dropCascades(errorsOnly(diags)))
 	// gohcl decodes attributes in map order; report in source order.
@@ -180,7 +189,7 @@ func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
 		}
 	})
 	var sb strings.Builder
-	w := hcl.NewDiagnosticTextWriter(&sb, p.Files(), 0, false)
+	w := hcl.NewDiagnosticTextWriter(&sb, maskedFiles(p.Files()), 0, false)
 	if err := w.WriteDiagnostics(diags); err != nil {
 		return diags
 	}
@@ -655,6 +664,10 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 		diags = append(diags, errAt(attrRange(r.attrs, "connection_limit", r.block.DefRange), "Invalid connection_limit",
 			fmt.Sprintf("connection_limit must be -1 (unlimited) or between 0 and %d, got %d.", math.MaxInt32, *l)))
 	}
+	if blk.Password != nil {
+		// Output redacts it wherever it appears (see secret.Writer).
+		secret.Register(*blk.Password)
+	}
 	diags = append(diags, checkPassword(r, typ, blk.Password, engine)...)
 	login := blk.Login
 	if login == nil {
@@ -789,7 +802,7 @@ func decodeGrantObject(b *hcl.Block, attrs hcl.Attributes, blk grantBlock, engin
 }
 
 // maxMySQLDatabasePattern is the length of mysql.db.Db.
-const maxMySQLDatabasePattern = 64
+const maxMySQLDatabasePattern = model.MySQLMaxDatabaseChars
 
 func decodeDatabasePattern(b *hcl.Block, attrs hcl.Attributes, blk grantBlock, engine model.Engine) (model.Object, hcl.Diagnostics) {
 	rng := attrRange(attrs, "database_pattern", b.DefRange)
@@ -910,12 +923,13 @@ func checkEngineOnly(r resource, engine model.Engine, pgOnly, mysqlOnly map[stri
 	return diags
 }
 
-// Identifier length limits.
+// Identifier length limits, shared with the check of names read from
+// the server (model.CheckName).
 const (
-	pgMaxIdentBytes   = 63 // NAMEDATALEN - 1
-	mysqlMaxUserChars = 32
-	mysqlMaxDBChars   = 64
-	mysqlMaxHostChars = 255
+	pgMaxIdentBytes   = model.PostgresMaxIdentBytes
+	mysqlMaxUserChars = model.MySQLMaxUserChars
+	mysqlMaxDBChars   = model.MySQLMaxDatabaseChars
+	mysqlMaxHostChars = model.MySQLMaxHostChars
 )
 
 // checkName checks the engine's identifier limits.

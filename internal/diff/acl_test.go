@@ -91,7 +91,7 @@ func TestComputeOwnerACL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(tt.desired, tt.current, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, tt.desired, tt.current, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +126,7 @@ func TestComputeGrantorRows(t *testing.T) {
 			Databases:   []model.Database{{Name: "app", Owner: "admin"}},
 			Privileges:  order,
 		}
-		p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{})
+		p, err := compute(t, d, cur, postgres.Dialect{}, diff.Options{})
 		if err != nil {
 			t.Fatal(err)
 		}

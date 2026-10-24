@@ -107,7 +107,7 @@ func TestComputeLabels(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(tt.desired, tt.current, tt.dialect, diff.Options{Prune: true})
+			p, err := compute(t, tt.desired, tt.current, tt.dialect, diff.Options{Prune: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -144,7 +144,7 @@ func TestComputeDeterministicOrder(t *testing.T) {
 		`c.a: GRANT USAGE ON SCHEMA "b" TO "alice"`,
 	}
 	for range 50 {
-		p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{})
+		p, err := compute(t, d, cur, postgres.Dialect{}, diff.Options{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -175,14 +175,14 @@ func TestComputeUnmanagedLabels(t *testing.T) {
 				Roles:       []model.RoleState{{ID: pgID("admin"), Login: true}, {ID: pgID("u1"), Login: tt.login}},
 			}
 			desired := &model.Desired{Engine: model.EnginePostgres}
-			p, err := diff.Compute(desired, cur, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, desired, cur, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if d := cmp.Diff([]string{tt.wantWarn}, p.Warnings); d != "" {
 				t.Errorf("warnings (-want +got):\n%s", d)
 			}
-			p, err = diff.Compute(desired, cur, postgres.Dialect{}, diff.Options{Prune: true})
+			p, err = compute(t, desired, cur, postgres.Dialect{}, diff.Options{Prune: true})
 			if err != nil {
 				t.Fatal(err)
 			}
