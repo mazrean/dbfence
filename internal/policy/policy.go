@@ -145,7 +145,7 @@ func (c *checker) check(s plan.Statement) []string {
 			return c.revokeConnect(t.Grantee)
 		}
 	case plan.KindAlterDatabase:
-		c.ownerChange(t)
+		return c.ownerChange(t)
 	case plan.KindOther, plan.KindCreateDatabase, plan.KindCreateSchema, plan.KindAlterSchema:
 		// Nothing they do can drop a protected object or lock the
 		// connected user out.
@@ -482,21 +482,33 @@ func (c *checker) revokeConnect(grantee model.RoleID) []string {
 }
 
 // ownerChange records an ALTER DATABASE ... OWNER TO of the connected
-// database: PostgreSQL moves the privileges of the old owner to the new
-// one.
-func (c *checker) ownerChange(t plan.Target) {
-	if c.desired.Engine != model.EnginePostgres || t.Database != c.cur.CurrentDatabase || t.Owner == "" {
-		return
+// database and checks that the connected user can still connect to it:
+// PostgreSQL moves the privileges of the old owner to the new one. When
+// privileges are unreadable, the connected user is taken to connect
+// through the old owner.
+func (c *checker) ownerChange(t plan.Target) []string {
+	if c.desired.Engine != model.EnginePostgres || c.cur.CurrentDatabase == "" || t.Database != c.cur.CurrentDatabase || t.Owner == "" {
+		return nil
 	}
 	i := slices.IndexFunc(c.cur.Databases, func(d model.Database) bool { return d.Name == t.Database })
 	if i < 0 {
-		return
+		return nil
 	}
 	from, to := model.RoleID{Name: c.cur.Databases[i].Owner}, model.RoleID{Name: t.Owner}
-	if from != to && c.connect[from] {
+	if from == to {
+		return nil
+	}
+	unknown := c.cur.Unreadable.Privileges
+	before := unknown || c.canConnect()
+	if c.connect[from] || unknown {
 		delete(c.connect, from)
 		c.connect[to] = true
 	}
+	if !before || c.canConnect() {
+		return nil
+	}
+	return []string{fmt.Sprintf("changes the owner of the database %q dbfence is connected to from %q to %q, which moves the CONNECT through which the connected user %q connects to it",
+		c.cur.CurrentDatabase, from, to, c.cur.CurrentUser)}
 }
 
 func (c *checker) superuser() bool {

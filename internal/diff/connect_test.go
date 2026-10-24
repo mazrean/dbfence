@@ -139,3 +139,121 @@ func TestComputeKeepsConnect(t *testing.T) {
 		})
 	}
 }
+
+// ALTER DATABASE ... OWNER TO moves the old owner's privileges to the new
+// owner: an owner change of the database dbfence connects to that takes
+// the connected user's CONNECT away is not planned either.
+func TestComputeKeepsConnectOnOwnerChange(t *testing.T) {
+	t.Parallel()
+	admin, appOwner := pgID("admin"), pgID("app_owner")
+	connect := func(grantee model.RoleID, db string) model.Privilege {
+		return model.Privilege{Grantee: grantee, Object: dbObj(db), Name: "CONNECT"}
+	}
+	warn := func(owner string) string {
+		return `not changing the owner of database "postgres" to "` + owner + `": dbfence is connected to it, and the connected user "admin" connects to it through the privileges of its owner "admin", which move to the new owner`
+	}
+	tests := []struct {
+		name       string
+		database   string
+		current    []model.Privilege
+		want       []string
+		warns      []string
+		superuser  bool
+		inherit    bool
+		unreadable bool
+		// undeclared makes the new owner the existing, undeclared role
+		// "stranger" and prunes: it stays referenced and is not dropped.
+		undeclared bool
+	}{
+		{
+			name:     "the only CONNECT of the connected user",
+			current:  []model.Privilege{connect(admin, "postgres")},
+			database: "postgres",
+			warns:    []string{warn("app_owner")},
+		},
+		{
+			name:       "the only CONNECT of the connected user, new owner undeclared, with --prune",
+			current:    []model.Privilege{connect(admin, "postgres")},
+			database:   "postgres",
+			warns:      []string{warn("stranger")},
+			undeclared: true,
+		},
+		{
+			name:       "privileges unreadable",
+			database:   "postgres",
+			warns:      []string{warn("app_owner")},
+			unreadable: true,
+		},
+		{
+			name:     "PUBLIC has CONNECT",
+			current:  []model.Privilege{connect(admin, "postgres"), connect(model.PublicRole, "postgres")},
+			database: "postgres",
+			want:     []string{`ALTER DATABASE "postgres" OWNER TO "app_owner"`},
+		},
+		{
+			name:     "the connected user inherits from the new owner",
+			current:  []model.Privilege{connect(admin, "postgres")},
+			database: "postgres",
+			inherit:  true,
+			want:     []string{`ALTER DATABASE "postgres" OWNER TO "app_owner"`},
+		},
+		{
+			name:      "superuser",
+			current:   []model.Privilege{connect(admin, "postgres")},
+			database:  "postgres",
+			superuser: true,
+			want:      []string{`ALTER DATABASE "postgres" OWNER TO "app_owner"`},
+		},
+		{
+			name:     "another database",
+			current:  []model.Privilege{connect(admin, "app"), connect(admin, "postgres")},
+			database: "app",
+			want:     []string{`ALTER DATABASE "app" OWNER TO "app_owner"`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cur := &model.Current{
+				CurrentUser: admin, CurrentDatabase: "postgres",
+				Roles: []model.RoleState{
+					{ID: admin, Login: true, Inherit: true, Superuser: tt.superuser, MemberOf: []model.RoleID{appOwner},
+						MemberOptions: map[model.RoleID]model.MembershipState{appOwner: {Inherit: tt.inherit, Set: true}}},
+					{ID: appOwner, Inherit: true},
+					{ID: pgID("stranger"), Inherit: true},
+				},
+				Databases:          []model.Database{{Name: "app", Owner: "admin"}, {Name: "postgres", Owner: "admin"}},
+				Privileges:         tt.current,
+				InspectedDatabases: []string{"app", "postgres"},
+			}
+			cur.Unreadable.Privileges = tt.unreadable
+			owner, roles := "app_owner", []model.Role{{ID: appOwner}, {ID: pgID("stranger")}}
+			if tt.undeclared {
+				owner, roles = "stranger", []model.Role{{ID: appOwner}}
+			}
+			databases := []model.Database{{Name: "app"}, {Name: "postgres"}}
+			for i := range databases {
+				if databases[i].Name == tt.database {
+					databases[i].Owner = owner
+				}
+			}
+			desired := &model.Desired{Engine: model.EnginePostgres, Roles: roles, Databases: databases}
+			p, err := compute(t, desired, cur, postgres.Dialect{}, diff.Options{Prune: tt.undeclared})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			warns := slices.DeleteFunc(slices.Clone(p.Warnings), func(w string) bool {
+				return !strings.HasPrefix(w, "not changing the owner")
+			})
+			if d := cmp.Diff(tt.warns, warns, cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
+			}
+			if i := slices.IndexFunc(desired.Databases, func(db model.Database) bool { return db.Name == tt.database }); desired.Databases[i].Owner != owner {
+				t.Errorf("Compute changed the desired state: %+v", desired.Databases)
+			}
+		})
+	}
+}

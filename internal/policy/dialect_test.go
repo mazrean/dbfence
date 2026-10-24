@@ -68,6 +68,16 @@ func TestVerifyDialectStatements(t *testing.T) {
 	inheritsConnect.Roles[0].Inherit, inheritsConnect.Roles[1].Inherit = true, true
 	inheritsConnect.Roles[0].MemberOptions = map[model.RoleID]model.MembershipState{pg("ops"): {Inherit: true}}
 	inheritsConnect.Roles[1].MemberOptions = map[model.RoleID]model.MembershipState{pg("base"): {Inherit: true}}
+	// admin owns the database it is connected to; ALTER DATABASE ... OWNER
+	// TO moves its CONNECT to the new owner.
+	ownedConnecting := func(holders ...model.RoleID) *model.Current {
+		c := connecting(holders...)
+		c.Databases[0].Owner = "admin"
+		return c
+	}
+	postgresTo := func(owner string) []plan.Statement {
+		return first(pgd.AlterDatabase(model.Database{Name: "postgres", Owner: owner}, model.Database{Name: "postgres", Owner: "admin"}))
+	}
 	unknownDefaults := myCurrent()
 	unknownDefaults.Roles[0].DefaultRoles, unknownDefaults.Roles[0].DefaultRolesUnknown = nil, true
 	tests := []struct {
@@ -273,6 +283,58 @@ func TestVerifyDialectStatements(t *testing.T) {
 				return c
 			}(),
 			stmts: first(pgd.Revoke(model.PublicRole, postgresDB, []string{"CONNECT"})),
+		},
+		{
+			name:    "owner change of the connected database that moves the only CONNECT of the connected user",
+			pg:      true,
+			current: ownedConnecting(pg("admin")),
+			stmts:   postgresTo("owner"),
+			want:    []string{`changes the owner of the database "postgres" dbfence is connected to from "admin" to "owner", which moves the CONNECT through which the connected user "admin" connects to it`},
+		},
+		{
+			name: "owner change of the connected database while privileges are unreadable",
+			pg:   true,
+			current: func() *model.Current {
+				c := ownedConnecting()
+				c.Unreadable.Privileges = true
+				return c
+			}(),
+			stmts: postgresTo("owner"),
+			want:  []string{`changes the owner of the database "postgres" dbfence is connected to from "admin" to "owner"`},
+		},
+		{
+			name:    "owner change of the connected database while PUBLIC has CONNECT",
+			pg:      true,
+			current: ownedConnecting(pg("admin"), model.PublicRole),
+			stmts:   postgresTo("owner"),
+		},
+		{
+			name: "owner change of the connected database to a role the connected user inherits from",
+			pg:   true,
+			current: func() *model.Current {
+				c := ownedConnecting(pg("admin"))
+				c.Roles[0].Inherit, c.Roles[1].Inherit = true, true
+				c.Roles[0].MemberOptions = map[model.RoleID]model.MembershipState{pg("ops"): {Inherit: true}}
+				c.Roles[1].MemberOptions = map[model.RoleID]model.MembershipState{pg("base"): {Inherit: true}}
+				return c
+			}(),
+			stmts: postgresTo("base"),
+		},
+		{
+			name: "owner change of the connected database with a superuser",
+			pg:   true,
+			current: func() *model.Current {
+				c := ownedConnecting(pg("admin"))
+				c.Roles[0].Superuser = true
+				return c
+			}(),
+			stmts: postgresTo("owner"),
+		},
+		{
+			name:    "owner change of the connected database whose owner does not give the connected user CONNECT",
+			pg:      true,
+			current: ownedConnecting(pg("ops")),
+			stmts:   postgresTo("owner"),
 		},
 		{name: "drop role", pg: true, stmts: pgd.DropRole(pg("stray"), []string{"app", "postgres"})},
 	}

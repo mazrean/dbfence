@@ -108,14 +108,17 @@ type change struct {
 }
 
 type differ struct {
-	d        Dialect
-	desired  *model.Desired
-	current  *model.Current
-	ignore   ignorer
-	chain    *chain
-	changes  []change
-	warnings []string
-	opts     Options
+	d       Dialect
+	desired *model.Desired
+	current *model.Current
+	// keptOwners holds the databases whose declared owner change is not
+	// planned: it would lock the connected user out.
+	keptOwners map[string]bool
+	ignore     ignorer
+	chain      *chain
+	changes    []change
+	warnings   []string
+	opts       Options
 }
 
 // Compute builds the plan converging current to desired.
@@ -124,7 +127,7 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 	if err != nil {
 		return nil, err
 	}
-	df := &differ{d: d, opts: opts, desired: desired, current: sortedCurrent(current), ignore: ig, warnings: slices.Clone(current.Warnings)}
+	df := &differ{d: d, opts: opts, desired: desired, current: sortedCurrent(current), ignore: ig, warnings: slices.Clone(current.Warnings), keptOwners: map[string]bool{}}
 	df.chain = newChain(df.current)
 	if !current.Unreadable.Roles {
 		if err := df.checkReferences(); err != nil {
@@ -483,6 +486,12 @@ func (df *differ) databases() []string {
 			df.add(phaseDatabase, plan.ActionCreate, res, df.d.CreateDatabase(db))
 			continue
 		}
+		if df.ownerChangeLocksOut(db, df.current.Databases[i]) {
+			df.warn("not changing the owner of database %q to %q: dbfence is connected to it, and the connected user %q connects to it through the privileges of its owner %q, which move to the new owner",
+				db.Name, db.Owner, df.show(df.current.CurrentUser), df.current.Databases[i].Owner)
+			df.keptOwners[db.Name] = true
+			db.Owner = ""
+		}
 		stmts, warns := df.d.AlterDatabase(db, df.current.Databases[i])
 		df.warnings = append(df.warnings, warns...)
 		df.add(phaseDatabase, plan.ActionUpdate, res, stmts)
@@ -560,7 +569,7 @@ func (df *differ) owner(obj model.Object) string {
 }
 
 // desiredOwner returns the declared owner of obj, or "" when the owner
-// is not managed.
+// is not managed or its change is not planned (keptOwners).
 func (df *differ) desiredOwner(obj model.Object) string {
 	if obj.Type == model.ObjectSchema {
 		for _, s := range df.desired.Schemas {
@@ -571,7 +580,7 @@ func (df *differ) desiredOwner(obj model.Object) string {
 		return ""
 	}
 	for _, d := range df.desired.Databases {
-		if d.Name == obj.Database {
+		if d.Name == obj.Database && !df.keptOwners[d.Name] {
 			return d.Owner
 		}
 	}
@@ -715,6 +724,46 @@ func (df *differ) privileges() {
 		df.addWarned(phaseRevoke, plan.ActionRevoke, res(g, privs, "from"), stmts, warns)
 		df.warnHeldByPublic(g, privs)
 	}
+}
+
+// ownerChangeLocksOut reports whether changing the owner of the database
+// dbfence is connected to (PostgreSQL) from cur to db takes the
+// connected user's CONNECT on it away: ALTER DATABASE ... OWNER TO moves
+// the old owner's privileges to the new owner. The connected user, not a
+// superuser, holds CONNECT through PUBLIC, itself or a role whose
+// privileges it has. When privileges are unreadable, it is taken to
+// connect through the old owner.
+func (df *differ) ownerChangeLocksOut(db, cur model.Database) bool {
+	self, _ := df.currentRole(df.current.CurrentUser)
+	if df.desired.Engine != model.EnginePostgres || db.Name == "" || db.Name != df.current.CurrentDatabase ||
+		db.Owner == "" || db.Owner == cur.Owner || self.Superuser {
+		return false
+	}
+	obj := model.Object{Type: model.ObjectDatabase, Database: db.Name}
+	holders := map[model.RoleID]bool{}
+	for _, p := range df.current.Privileges {
+		if p.Object == obj && p.Name == "CONNECT" {
+			holders[p.Grantee] = true
+		}
+	}
+	via := df.inheritedRoles()
+	connects := func() bool {
+		for g := range holders {
+			if via[g] {
+				return true
+			}
+		}
+		return false
+	}
+	unknown := df.current.Unreadable.Privileges
+	if !unknown && !connects() {
+		return false
+	}
+	if from := (model.RoleID{Name: cur.Owner}); holders[from] || unknown {
+		delete(holders, from)
+		holders[model.RoleID{Name: db.Owner}] = true
+	}
+	return !connects()
 }
 
 // keepConnect returns a filter for the privileges revoked from a group,
