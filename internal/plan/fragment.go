@@ -11,7 +11,10 @@ import (
 // text comes only from constants (Keyword), from Dialect quoting (Ident,
 // Literal), from validated words (Token), from numbers (Number) and from
 // escaped secrets (Secret), so a runtime string never becomes executable
-// SQL without going through the engine Dialect.
+// SQL without going through the engine Dialect by accident. The
+// sqlfragment lint rule guards against mistakes, not against deliberately
+// obfuscated code: a table of one-character Keywords picked by a runtime
+// index can still spell any string, so code review must reject that.
 type Fragment interface {
 	render(sb *strings.Builder, showSecrets bool)
 }

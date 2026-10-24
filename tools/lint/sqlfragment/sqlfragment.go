@@ -18,7 +18,10 @@
 // with them, pieces of a constant alphabet rebuild any runtime string.
 // Picking a whole constant Keyword from a slice or map stays allowed, like
 // choosing one in a switch; plan.Seq keeps each such Keyword a separate
-// fragment. Code the analyzer cannot read
+// fragment, so that is not checked: a table of one-character Keywords
+// picked by runtime index can still spell any string. The analyzer guards
+// against mistakes; deliberate obfuscation is left to code review. Code the
+// analyzer cannot read
 // is reported too: outside internal/plan, function declarations without a
 // Go body (implemented in assembly, which can return or store a Keyword)
 // and non-Go files compiled into the package (.s, .syso, C sources). Values
