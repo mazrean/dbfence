@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"io"
 	"net/url"
@@ -14,8 +15,7 @@ import (
 	"github.com/mazrean/dbfence/internal/apply"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/model"
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
+	"github.com/ory/dockertest/v4"
 )
 
 // The integration tests run against a disposable postgres:17 server. They
@@ -39,27 +39,21 @@ func startServerTag(t *testing.T, tag string) *server {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	pool, err := dockertest.NewPool("")
-	if err == nil {
-		err = pool.Client.Ping()
-	}
+	pool, err := dockertest.NewPool(t.Context(), "", dockertest.WithMaxWait(3*time.Minute))
 	if err != nil {
 		if os.Getenv("CI") != "" {
 			t.Fatalf("docker is required in CI: %v", err)
 		}
 		t.Skipf("docker is unavailable: %v", err)
 	}
-	pool.MaxWait = 3 * time.Minute
-	res, err := pool.RunWithOptions(&dockertest.RunOptions{Repository: "postgres", Tag: tag, Env: []string{"POSTGRES_PASSWORD=pw"}},
-		func(hc *docker.HostConfig) {
-			hc.AutoRemove = true
-			hc.RestartPolicy = docker.RestartPolicy{Name: "no"}
-		})
+	t.Cleanup(func() { _ = pool.Close(context.WithoutCancel(t.Context())) })
+	// Tests change server-wide state, so each one gets its own server
+	// instead of one reused per image.
+	res, err := pool.Run(t.Context(), "postgres",
+		dockertest.WithTag(tag), dockertest.WithEnv([]string{"POSTGRES_PASSWORD=pw"}), dockertest.WithoutReuse())
 	if err != nil {
 		t.Fatalf("start postgres: %v", err)
 	}
-	t.Cleanup(func() { _ = pool.Purge(res) })
-	_ = res.Expire(600)
 	hp := res.GetHostPort("5432/tcp")
 	s := &server{t: t, dsn: func(user string) string {
 		return "postgres://" + user + ":pw@" + hp + "/postgres?sslmode=disable"
@@ -69,7 +63,7 @@ func startServerTag(t *testing.T, tag string) *server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.admin.Close() })
-	if err := pool.Retry(func() error { return s.admin.PingContext(t.Context()) }); err != nil {
+	if err := pool.Retry(t.Context(), 0, func() error { return s.admin.PingContext(t.Context()) }); err != nil {
 		t.Fatalf("postgres did not become ready: %v", err)
 	}
 	return s

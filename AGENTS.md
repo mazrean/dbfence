@@ -21,7 +21,7 @@ MySQL / PostgreSQL servers — databases, users/roles, memberships, grants, Post
 - CLI: `alecthomas/kong`; config: `hashicorp/hcl/v2` + `zclconf/go-cty`
 - Drivers: `jackc/pgx/v5` (stdlib), `go-sql-driver/mysql`
 - Secrets: aws-sdk-go-v2 Secrets Manager, GCP Secret Manager, `fujiwara/tfstate-lookup`
-- DI: `mazrean/kessoku`; integration tests: `ory/dockertest/v3` (`mysql:8.4`, `postgres:17`);
+- DI: `mazrean/kessoku`; integration tests: `ory/dockertest/v4` (`mysql:8.4`, `postgres:17`);
   AWS tests: `sivchari/kumo` in-process emulator (Secrets Manager, S3 tfstate) via `AWS_ENDPOINT_URL`
 
 ## Project Structure
