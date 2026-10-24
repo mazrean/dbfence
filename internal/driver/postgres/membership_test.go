@@ -70,6 +70,7 @@ func TestStateAlterMembership(t *testing.T) {
 		{role: "g", member: "e", grantor: "d", inherit: true, set: true},
 		{role: "h", member: "u", grantor: "boss", admin: false, inherit: true, set: true},
 		{role: "h", member: "boss", grantor: "postgres", admin: true, inherit: true, set: true},
+		{role: "c", member: "u", grantor: "cloudsqladmin", inherit: true, set: true},
 	}
 	desired := &model.Desired{Roles: []model.Role{
 		{ID: pg("d"), MemberOf: []model.RoleID{pg("g")}, MemberOptions: map[model.RoleID]model.MembershipOptions{pg("g"): {Inherit: &no}}},
@@ -82,6 +83,7 @@ func TestStateAlterMembership(t *testing.T) {
 		name      string
 		role      string
 		want      string
+		cloudSQL  string
 		have      model.MembershipState
 		superuser bool
 		wantWarn  bool
@@ -114,11 +116,23 @@ func TestStateAlterMembership(t *testing.T) {
 			name: "grant removed by its grantor's cascade is skipped", role: "h", superuser: true,
 			opts: model.MembershipOptions{Inherit: &no}, have: model.MembershipState{Inherit: true, Set: true},
 		},
+		{
+			// Cloud SQL changes cloudsqladmin's grant on a plain GRANT
+			// by its admin users.
+			name: "Cloud SQL admin user changes a grant of cloudsqladmin", role: "c", cloudSQL: "cloudsqladmin",
+			opts: model.MembershipOptions{Inherit: &no}, have: model.MembershipState{Inherit: true, Set: true},
+			want: `GRANT "c" TO "u" WITH INHERIT FALSE`,
+		},
+		{
+			name: "non-superuser cannot change a grant of cloudsqladmin elsewhere", role: "c",
+			opts: model.MembershipOptions{Inherit: &no}, have: model.MembershipState{Inherit: true, Set: true},
+			wantWarn: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			st := &state{user: "postgres", version: 170000, superuser: tt.superuser, members: members, desired: desired}
+			st := &state{user: "postgres", version: 170000, superuser: tt.superuser, cloudSQLGrantor: tt.cloudSQL, members: members, desired: desired}
 			stmts, warns := st.alterMembership("u", tt.role, tt.opts, tt.have)
 			if got := sqlOf(stmts); got != tt.want {
 				t.Errorf("got\n%s\nwant\n%s", got, tt.want)
@@ -218,6 +232,7 @@ func TestMembershipPermissions(t *testing.T) {
 		role     string
 		want     string
 		wantWarn string
+		cloudSQL string
 		members  []memberEntry
 		version  int
 		revoke   bool
@@ -249,11 +264,28 @@ func TestMembershipPermissions(t *testing.T) {
 			want:    `REVOKE "mine" FROM "newr" GRANTED BY "adm"`,
 		},
 		{name: "revoke with CREATEROLE before 16", version: 150000, role: "ext2", revoke: true, want: `REVOKE "ext2" FROM "newr"`},
+		{
+			// Cloud SQL records the grants of its admin users as
+			// cloudsqladmin's, and a plain REVOKE by them removes those.
+			name: "revoke a grant of cloudsqladmin as a Cloud SQL admin user", version: 170000, role: "ext2", revoke: true, cloudSQL: "cloudsqladmin",
+			members: []memberEntry{{role: "ext2", member: "newr", grantor: "cloudsqladmin"}},
+			want:    `REVOKE "ext2" FROM "newr"`,
+		},
+		{
+			name: "revoke a grant of cloudsqladmin elsewhere", version: 170000, role: "mine", revoke: true,
+			members:  []memberEntry{{role: "mine", member: "newr", grantor: "cloudsqladmin"}},
+			wantWarn: `membership of "newr" in "mine" granted by "cloudsqladmin" differs from the configuration, but "adm" may not revoke it (it needs superuser, since another role granted it); not changed`,
+		},
+		{
+			name: "revoke another grantor's grant as a Cloud SQL admin user", version: 170000, role: "mine", revoke: true, cloudSQL: "cloudsqladmin",
+			members:  []memberEntry{{role: "mine", member: "newr", grantor: "postgres"}},
+			wantWarn: `membership of "newr" in "mine" granted by "postgres" differs from the configuration, but "adm" may not revoke it (it needs superuser, since another role granted it); not changed`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			d := &Driver{st: &state{user: "adm", version: tt.version, createRole: true, roles: roles, members: tt.members, desired: &model.Desired{}}}
+			d := &Driver{st: &state{user: "adm", version: tt.version, createRole: true, cloudSQLGrantor: tt.cloudSQL, roles: roles, members: tt.members, desired: &model.Desired{}}}
 			var stmts []plan.Statement
 			var warns []string
 			if tt.revoke {

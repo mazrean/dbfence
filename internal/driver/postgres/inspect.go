@@ -56,6 +56,12 @@ type state struct {
 	roleDeps map[string][]string
 	// createroleSelfGrant is the createrole_self_grant setting (PG16+).
 	createroleSelfGrant string
+	// cloudSQLGrantor is "cloudsqladmin" when the connected user is a
+	// Cloud SQL admin user, otherwise "". Cloud SQL runs the role
+	// commands of these users as its bootstrap superuser cloudsqladmin,
+	// so their grants are recorded as granted by it, and a plain REVOKE
+	// by them removes such a grant.
+	cloudSQLGrantor string
 	user                string
 	// database is the database the connection is to.
 	database string
@@ -113,14 +119,21 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		roleDeps:      map[string][]string{},
 	}
 	cur := &model.Current{}
-	var authidReadable bool
+	var authidReadable, cloudSQLAdmin bool
 	if err := d.db.QueryRowContext(ctx, `SELECT current_user, current_database(),
 			current_setting('server_version_num')::int,
 			coalesce(current_setting('createrole_self_grant', true), ''),
-			r.rolsuper, r.rolcreaterole, has_table_privilege('pg_catalog.pg_authid', 'SELECT')
+			r.rolsuper, r.rolcreaterole, has_table_privilege('pg_catalog.pg_authid', 'SELECT'),
+			NOT r.rolsuper
+				AND EXISTS (SELECT 1 FROM pg_roles b WHERE b.oid = 10 AND b.rolname = 'cloudsqladmin')
+				AND EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+					WHERE m.member = r.oid AND g.rolname = 'cloudsqlsuperuser')
 		FROM pg_roles r WHERE r.rolname = current_user`).
-		Scan(&st.user, &st.database, &st.version, &st.createroleSelfGrant, &st.superuser, &st.createRole, &authidReadable); err != nil {
+		Scan(&st.user, &st.database, &st.version, &st.createroleSelfGrant, &st.superuser, &st.createRole, &authidReadable, &cloudSQLAdmin); err != nil {
 		return nil, fmt.Errorf("current user: %w", err)
+	}
+	if cloudSQLAdmin {
+		st.cloudSQLGrantor = "cloudsqladmin"
 	}
 	cur.CurrentUser = model.RoleID{Name: st.user}
 	cur.CurrentDatabase = st.database

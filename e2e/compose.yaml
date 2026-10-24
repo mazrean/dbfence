@@ -1,0 +1,50 @@
+# Runs the end-to-end scenario against local servers (`mise run e2e:local`).
+# The PostgreSQL admin is not a superuser, like on RDS and Cloud SQL.
+name: dbfence-e2e
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: dbfence-postgres
+    volumes:
+      - ./initdb/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: dbfence-root
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  run-postgres:
+    build: .
+    profiles: [run]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DBFENCE_E2E_TARGET: local-postgres
+      DBFENCE_E2E_HOST: postgres
+      DBFENCE_E2E_ADMIN_USER: dbfence_admin
+      DBFENCE_E2E_ADMIN_PASSWORD: dbfence-admin
+
+  run-mysql:
+    build: .
+    profiles: [run]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DBFENCE_E2E_TARGET: local-mysql
+      DBFENCE_E2E_HOST: mysql
+      DBFENCE_E2E_ADMIN_USER: root
+      DBFENCE_E2E_ADMIN_PASSWORD: dbfence-root

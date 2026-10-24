@@ -1,0 +1,16 @@
+# One-shot ECS task of the end-to-end test (`ecspresso run`, see
+# .github/workflows/e2e.yml). There is no ECS service: `run` takes the launch
+# type and network configuration from the local service definition file.
+#
+# The definitions read the Terraform outputs of the e2e resources from their
+# state (docs/e2e.md). This file is rendered before plugins are set up, so it
+# can only use the environment of the e2e-aws GitHub environment.
+region: '{{ must_env `AWS_REGION` }}'
+cluster: '{{ must_env `DBFENCE_E2E_ECS_CLUSTER` }}'
+task_definition: ecs-task-def.jsonnet
+service_definition: ecs-service-def.jsonnet
+timeout: 20m
+plugins:
+  - name: tfstate
+    config:
+      url: '{{ must_env `DBFENCE_E2E_TFSTATE_URL` }}'

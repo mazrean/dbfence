@@ -1,6 +1,6 @@
 # Amazon RDS
 
-dbfence runs against RDS for PostgreSQL and RDS for MySQL like any other server. This page shows the typical setups. For every attribute, see [Configuration](configuration.md).
+dbfence runs against RDS for PostgreSQL and MySQL and Aurora PostgreSQL and MySQL. On PostgreSQL the master user is not a superuser, which limits what dbfence can do; see [What to expect on RDS](#what-to-expect-on-rds). This page shows the typical setups. For every attribute, see [Configuration](configuration.md).
 
 ## Connect with the master password
 
@@ -15,6 +15,8 @@ connection "postgres" {
   tls_ca_file = "global-bundle.pem"   # the RDS CA bundle, next to the *.hcl files
 }
 ```
+
+For Aurora, take the cluster's writer endpoint and secret instead (`aws_rds_cluster.main.endpoint`, `aws_rds_cluster.main.master_user_secret[0].secret_arn`).
 
 `aws_secretsmanager` and `tfstate` use the standard AWS credentials, and their results are [secrets](secrets.md): the endpoint taken from `tfstate` is redacted in output too. Use `env` or a literal for the host if it should stay visible.
 
@@ -35,14 +37,16 @@ connection "postgres" {
 }
 ```
 
-The AWS credentials need `rds-db:connect` on that database user. For the token and TLS rules, see [`connection`](configuration.md#connection-engine).
+The AWS credentials need `rds-db:connect` on that database user (`arn:aws:rds-db:<region>:<account>:dbuser:<resource id>/<user>`, with the instance's `resource_id` or the Aurora cluster's `cluster_resource_id`). For the token and TLS rules, see [`connection`](configuration.md#connection-engine).
 
-The database user itself must log in with IAM. On PostgreSQL dbfence can create it: apply this once while connected with the master password, then switch the connection to `aws_iam`.
+The database user itself must log in with IAM. dbfence can create it (see [Users that log in with IAM](#users-that-log-in-with-iam)): apply this once while connected with the master password, then switch the connection to `aws_iam`. On PostgreSQL:
 
 ```hcl
 user "dbfence" {
   aws_iam {}
-  member_of = ["rds_superuser"]   # so that it can manage the other roles
+  member_of  = ["rds_superuser"]
+  createrole = true   # role attributes are not inherited from rds_superuser
+  createdb   = true
 }
 ```
 
@@ -71,5 +75,8 @@ user "app" {
 ## What to expect on RDS
 
 - The master user is not a superuser, so dbfence cannot read password verifiers on PostgreSQL: plan prints one warning listing the roles whose passwords are not compared, and declared passwords are not set again. Run with `--force-password` to set (rotate) them. See [Passwords](passwords.md).
-- Changes the master user may not make are skipped with a warning; see [Required privileges](privileges.md).
+- On PostgreSQL the master user is not a member of the roles it creates: it may alter, grant and drop them, but not act as them. Plan warns about the changes that need that, and they fail at `apply` unless you first run the `GRANT` the warning names (`GRANT <role> TO <master user> WITH SET TRUE, INHERIT TRUE`):
+  - an `owner` other than the master user (`must be able to SET ROLE`); or leave `owner` out, so that the master user owns databases and schemas;
+  - `--prune` of a role that still owns objects or holds privileges (`permission denied to reassign objects`). A role that holds nothing is dropped despite the warning.
+- Other changes the master user may not make are skipped with a warning; see [Required privileges](privileges.md).
 - RDS's own roles and databases (`rdsadmin`, `rds_*`, ...) are never reported or pruned. See [Safety](safety.md#built-in-objects).

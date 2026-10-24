@@ -1,6 +1,6 @@
 # Google Cloud SQL
 
-dbfence runs against Cloud SQL for PostgreSQL and Cloud SQL for MySQL like any other server. This page shows the typical setups. For every attribute, see [Configuration](configuration.md).
+dbfence runs against Cloud SQL for PostgreSQL and Cloud SQL for MySQL. On PostgreSQL the admin user is not a superuser, which limits what dbfence can do; see [What to expect on Cloud SQL](#what-to-expect-on-cloud-sql). This page shows the typical setups. For every attribute, see [Configuration](configuration.md).
 
 ## Connect with a password
 
@@ -78,14 +78,19 @@ To let dbfence itself connect with IAM on PostgreSQL, declare its user while con
 
 ```hcl
 user "dbfence" {
-  name      = "dbfence@my-project.iam"
+  name       = "dbfence@my-project.iam"
   gcp_iam {}
-  member_of = ["cloudsqlsuperuser"]   # so that it can manage the other roles
+  member_of  = ["cloudsqlsuperuser"]
+  createrole = true   # role attributes are not inherited from cloudsqlsuperuser
+  createdb   = true
 }
 ```
 
 ## What to expect on Cloud SQL
 
 - The `postgres` user is not a superuser, so dbfence cannot read password verifiers on PostgreSQL: plan prints one warning listing the roles whose passwords are not compared, and declared passwords are not set again. Run with `--force-password` to set (rotate) them. See [Passwords](passwords.md).
-- Changes the connected user may not make are skipped with a warning; see [Required privileges](privileges.md).
+- On PostgreSQL the admin user is not a member of the roles it creates: it may alter, grant and drop them, but not act as them. Plan warns about the changes that need that, and they fail at `apply` unless you first run the `GRANT` the warning names (`GRANT <role> TO <admin user> WITH SET TRUE, INHERIT TRUE`):
+  - an `owner` other than the admin user (`must be able to SET ROLE`); or leave `owner` out, so that the admin user owns databases and schemas;
+  - `--prune` of a role that still owns objects or holds privileges (`permission denied to reassign objects`). A role that holds nothing is dropped despite the warning.
+- Other changes the connected user may not make are skipped with a warning; see [Required privileges](privileges.md).
 - Cloud SQL's own roles and databases (`cloudsql*`, `cloudsqladmin`) are never reported or pruned. See [Safety](safety.md#built-in-objects).

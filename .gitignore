@@ -9,3 +9,4 @@ apm_modules/
 # Build / test output
 dist/
 coverage.out
+/e2e/dbfence
