@@ -33,7 +33,7 @@ type Config struct {
 
 var rootSchema = &hcl.BodySchema{
 	Blocks: []hcl.BlockHeaderSchema{
-		{Type: "connection"},
+		{Type: "connection", LabelNames: []string{"engine"}},
 		{Type: "database", LabelNames: []string{"name"}},
 		{Type: "role", LabelNames: []string{"name"}},
 		{Type: "user", LabelNames: []string{"name"}},
@@ -120,6 +120,10 @@ func Load(dir string, fns map[string]function.Function) (*Config, error) {
 	cfg, diags := decode(unmarkedBody{hcl.MergeFiles(bodies)}, fns)
 	if diags.HasErrors() {
 		return nil, diagError(parser, diags)
+	}
+	// Like tfstate paths, a relative CA file is in the configuration directory.
+	if f := cfg.Connection.TLSCAFile; f != "" && !filepath.IsAbs(f) {
+		cfg.Connection.TLSCAFile = filepath.Join(dir, f)
 	}
 	return cfg, nil
 }
@@ -338,7 +342,7 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 		byType[b.Type] = append(byType[b.Type], b)
 	}
 	if connBlock == nil {
-		return nil, append(diags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Missing connection block", Detail: `A connection block with "engine", "host" and "user" is required.`})
+		return nil, append(diags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Missing connection block", Detail: `A connection "postgres" or connection "mysql" block is required.`})
 	}
 	if diags.HasErrors() {
 		return nil, diags

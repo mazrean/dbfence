@@ -13,8 +13,7 @@ import (
 func TestLoadSensitiveValues(t *testing.T) {
 	t.Parallel()
 	cfg, err := load(t, `
-connection {
-  engine   = "postgres"
+connection "postgres" {
   host     = "localhost"
   user     = secretenv("PW")
   password = secretenv("PW")

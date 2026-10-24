@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mazrean/dbfence/internal/apply"
+	"github.com/mazrean/dbfence/internal/auth"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/plan"
@@ -135,7 +136,7 @@ func (s *server) queryStrings(t *testing.T, q string) []string {
 
 func (s *server) open(t *testing.T, user string) *Driver {
 	t.Helper()
-	d, err := Open(t.Context(), s.conn(user))
+	d, err := Open(t.Context(), s.conn(user), auth.Static("pw"))
 	if err != nil {
 		t.Fatal(err)
 	}

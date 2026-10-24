@@ -53,7 +53,7 @@ func (o fakeOpener) Open(context.Context, model.Connection) (app.Driver, error) 
 func newApp(t *testing.T, stdin string) (*app.App, *fakeDriver, *strings.Builder, string) {
 	t.Helper()
 	dir := t.TempDir()
-	src := "connection {\n  engine = \"postgres\"\n  host = \"h\"\n  user = \"u\"\n}\nuser \"app\" {\n  password = \"hunter2\"\n}\n"
+	src := "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\nuser \"app\" {\n  password = \"hunter2\"\n}\n"
 	if err := os.WriteFile(filepath.Join(dir, "dbfence.hcl"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -35,19 +35,19 @@ func TestLoadMySQLEmptyHost(t *testing.T) {
 		{
 			name:  "empty host attribute",
 			src:   myConn + "user \"u\" {\n  host = \"\"\n}\n",
-			want:  []string{"Empty host", "dbfence.hcl line 7"},
+			want:  []string{"Empty host", "dbfence.hcl line 6"},
 			count: 1,
 		},
 		{
 			name:  "empty host in member_of",
 			src:   myConn + "role \"r\" {}\nuser \"u\" {\n  member_of = [\"r@\"]\n}\n",
-			want:  []string{`member_of entry "r@" has an empty host`, "dbfence.hcl line 8"},
+			want:  []string{`member_of entry "r@" has an empty host`, "dbfence.hcl line 7"},
 			count: 1,
 		},
 		{
 			name:  "empty host in grant role",
 			src:   myConn + "user \"u\" {}\ndatabase \"d\" {}\ngrant {\n  role = \"u@\"\n  database = database.d.name\n  privileges = [\"SELECT\"]\n}\n",
-			want:  []string{`role "u@" has an empty host`, "dbfence.hcl line 9"},
+			want:  []string{`role "u@" has an empty host`, "dbfence.hcl line 8"},
 			count: 1,
 		},
 	})
@@ -62,19 +62,19 @@ func TestLoadMySQLHostWithAt(t *testing.T) {
 		{
 			name:  "role host in member_of",
 			src:   myConn + "role \"ro\" {\n  host = \"a@b\"\n}\nuser \"u\" {\n  member_of = [role.ro.id]\n}\n",
-			want:  []string{"Invalid host", `host must not contain "@"`, "dbfence.hcl line 7"},
+			want:  []string{"Invalid host", `host must not contain "@"`, "dbfence.hcl line 6"},
 			count: 1,
 		},
 		{
 			name:  "user host in grant role",
 			src:   myConn + "user \"u\" {\n  host = \"a@B\"\n}\ndatabase \"d\" {}\ngrant {\n  role       = user.u.id\n  database   = database.d.name\n  privileges = [\"SELECT\"]\n}\n",
-			want:  []string{"Invalid host", `host must not contain "@"`, "dbfence.hcl line 7"},
+			want:  []string{"Invalid host", `host must not contain "@"`, "dbfence.hcl line 6"},
 			count: 1,
 		},
 		{
 			name:  "host from a function",
 			src:   myConn + "user \"u\" {\n  host = format(\"%s@%s\", \"a\", \"b\")\n}\n",
-			want:  []string{"Invalid host", "dbfence.hcl line 7"},
+			want:  []string{"Invalid host", "dbfence.hcl line 6"},
 			count: 1,
 		},
 	})

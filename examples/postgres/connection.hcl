@@ -1,9 +1,7 @@
 # dbfence reads every *.hcl file in this directory and merges them into one
 # configuration: run it with `dbfence -C examples/postgres plan`.
 
-connection {
-  engine = "postgres"
-
+connection "postgres" {
   # Connect as the superuser of examples/compose.yaml. Reading password
   # verifiers (pg_authid) needs superuser; without it dbfence still works but
   # cannot tell whether a declared password already matches.

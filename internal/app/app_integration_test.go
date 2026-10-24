@@ -20,6 +20,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/mazrean/dbfence/internal/app"
 	"github.com/mazrean/dbfence/internal/apply"
+	"github.com/mazrean/dbfence/internal/auth"
 	"github.com/mazrean/dbfence/internal/driver/mysql"
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
@@ -156,7 +157,7 @@ func (h *harness) exec(q string) {
 func (h *harness) write(body string) {
 	h.t.Helper()
 	c := h.conn
-	src := fmt.Sprintf("connection {\n  engine = %q\n  host = %q\n  port = %d\n  user = %q\n  password = env(\"DBFENCE_IT_PASSWORD\")\n  tls = \"disable\"\n",
+	src := fmt.Sprintf("connection %q {\n  host = %q\n  port = %d\n  user = %q\n  password = env(\"DBFENCE_IT_PASSWORD\")\n  tls = \"disable\"\n",
 		c.Engine, c.Host, c.Port, c.User)
 	if c.Database != "" {
 		src += fmt.Sprintf("  database = %q\n", c.Database)
@@ -399,7 +400,7 @@ func TestMySQLRetainedPassword(t *testing.T) {
 func TestMySQLOneStatementPerExec(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, model.EngineMySQL, mysqlContainer)
-	d, err := mysql.Open(t.Context(), h.conn)
+	d, err := mysql.Open(t.Context(), h.conn, auth.Static(h.conn.Password))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,7 +732,7 @@ func TestMySQLWithoutSystemTableAccess(t *testing.T) {
 func TestMySQLErrorsDoNotLeakSecrets(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, model.EngineMySQL, mysqlContainer)
-	drv, err := mysql.Open(t.Context(), h.conn)
+	drv, err := mysql.Open(t.Context(), h.conn, auth.Static(h.conn.Password))
 	if err != nil {
 		t.Fatal(err)
 	}

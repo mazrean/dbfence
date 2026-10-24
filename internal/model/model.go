@@ -26,29 +26,60 @@ type TLSMode string
 const (
 	// TLSDisable never uses TLS.
 	TLSDisable TLSMode = "disable"
+	// TLSAllow uses TLS only when the server requires it (PostgreSQL only).
+	TLSAllow TLSMode = "allow"
 	// TLSPrefer uses TLS when the server supports it, without verifying
 	// the server certificate.
 	TLSPrefer TLSMode = "prefer"
 	// TLSRequire always uses TLS, without verifying the server certificate.
 	TLSRequire TLSMode = "require"
+	// TLSVerifyCA always uses TLS and verifies the server certificate,
+	// but not the host name (PostgreSQL only).
+	TLSVerifyCA TLSMode = "verify-ca"
 	// TLSVerifyFull always uses TLS and verifies the server certificate
 	// and host name.
 	TLSVerifyFull TLSMode = "verify-full"
 )
 
-// TLSModes lists the valid TLS modes.
-var TLSModes = []TLSMode{TLSDisable, TLSPrefer, TLSRequire, TLSVerifyFull}
+// TLSModes lists the valid TLS modes of each engine.
+var TLSModes = map[Engine][]TLSMode{
+	EnginePostgres: {TLSDisable, TLSAllow, TLSPrefer, TLSRequire, TLSVerifyCA, TLSVerifyFull},
+	EngineMySQL:    {TLSDisable, TLSPrefer, TLSRequire, TLSVerifyFull},
+}
+
+// AuthMethod is how dbfence authenticates to the server.
+type AuthMethod string
+
+const (
+	// AuthPassword sends Connection.Password.
+	AuthPassword AuthMethod = "password"
+	// AuthAWSIAM sends an Amazon RDS IAM authentication token.
+	AuthAWSIAM AuthMethod = "aws_iam"
+	// AuthGCPIAM sends a Google Cloud SQL IAM access token.
+	AuthGCPIAM AuthMethod = "gcp_iam"
+)
 
 // Connection is the server dbfence connects to and how it authenticates.
 type Connection struct {
-	Engine   Engine
-	Host     string
+	Engine Engine
+	Auth   AuthMethod
+	// Host is a host name or address; on PostgreSQL a path is the
+	// directory of a Unix-domain socket.
+	Host string
+	// Socket is the path of a Unix-domain socket (MySQL only); Host and
+	// Port are then unused.
+	Socket   string
 	User     string
 	Password string
 	// Database is the database to connect to; empty connects to none
 	// (MySQL only).
-	Database       string
-	TLS            TLSMode
+	Database string
+	TLS      TLSMode
+	// TLSCAFile is a PEM file of the certificates that verify the server.
+	TLSCAFile string
+	// AWSRegion is the region of an AWS IAM token; empty takes the
+	// region of the AWS configuration.
+	AWSRegion      string
 	Port           int
 	ConnectTimeout time.Duration
 }

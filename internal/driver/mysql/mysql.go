@@ -3,11 +3,14 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
 	"github.com/mazrean/dbfence/internal/plan"
+	"github.com/mazrean/dbfence/internal/secret"
 )
 
 // Driver is a MySQL driver. All statements run on the configured
@@ -48,9 +52,13 @@ type grantRef struct {
 	proxy    bool
 }
 
-// Open connects to the server of conn.
-func Open(ctx context.Context, conn model.Connection) (*Driver, error) {
-	cfg := newConfig(conn)
+// Open connects to the server of conn, with the password that password
+// returns for each new connection.
+func Open(ctx context.Context, conn model.Connection, password func(context.Context) (string, error)) (*Driver, error) {
+	cfg, err := newConfig(conn, password)
+	if err != nil {
+		return nil, err
+	}
 	connector, err := gomysql.NewConnector(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mysql connector: %w", err)
@@ -107,14 +115,31 @@ var tlsConfigs = map[model.TLSMode]string{
 }
 
 // newConfig builds the go-sql-driver/mysql configuration of conn.
-func newConfig(conn model.Connection) *gomysql.Config {
+func newConfig(conn model.Connection, password func(context.Context) (string, error)) (*gomysql.Config, error) {
 	cfg := gomysql.NewConfig()
-	cfg.Net = "tcp"
-	cfg.Addr = net.JoinHostPort(conn.Host, strconv.Itoa(conn.Port))
+	if conn.Socket != "" {
+		cfg.Net, cfg.Addr = "unix", conn.Socket
+	} else {
+		cfg.Net, cfg.Addr = "tcp", net.JoinHostPort(conn.Host, strconv.Itoa(conn.Port))
+	}
 	cfg.User = conn.User
-	cfg.Passwd = conn.Password
 	cfg.DBName = conn.Database
 	cfg.TLSConfig = tlsConfigs[conn.TLS]
+	if conn.TLSCAFile != "" {
+		pem, err := os.ReadFile(conn.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read tls_ca_file: %w", err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("read tls_ca_file %s: no PEM certificates", conn.TLSCAFile)
+		}
+		// The configuration allows tls_ca_file only with verify-full.
+		cfg.TLS = &tls.Config{RootCAs: roots, ServerName: conn.Host, MinVersion: tls.VersionTLS12}
+	}
+	// IAM tokens are sent with the cleartext plugin; the configuration
+	// requires TLS for them unless the connection is a local socket.
+	cfg.AllowCleartextPasswords = conn.Auth != model.AuthPassword
 	cfg.Timeout = conn.ConnectTimeout
 	// Each Exec sends exactly one statement: without multiStatements the
 	// server rejects a query holding a second one, so a quoting mistake
@@ -126,7 +151,20 @@ func newConfig(conn model.Connection) *gomysql.Config {
 	// NewConfig copies the driver's default logger, which writes to
 	// os.Stderr directly (see SetLogOutput).
 	cfg.Logger = *logger.Load()
-	return cfg
+	// Each connection gets a fresh password, since IAM tokens expire.
+	err := cfg.Apply(gomysql.BeforeConnect(func(ctx context.Context, c *gomysql.Config) error {
+		pw, err := password(ctx)
+		if err != nil {
+			return err
+		}
+		secret.Register(pw)
+		c.Passwd = pw
+		return nil
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("mysql config: %w", err)
+	}
+	return cfg, nil
 }
 
 // unsafeCharsets are client character sets with multibyte characters

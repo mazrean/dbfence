@@ -15,13 +15,13 @@ func TestLoadMemberships(t *testing.T) {
 		{
 			name:  "self membership",
 			src:   pgConn + "user \"u\" {\n  member_of = [user.u.id]\n}\n",
-			want:  []string{"Membership cycle", `role "u" cannot be a member of itself`, "dbfence.hcl line 7"},
+			want:  []string{"Membership cycle", `role "u" cannot be a member of itself`, "dbfence.hcl line 6"},
 			count: 1,
 		},
 		{
 			name:  "two-role cycle",
 			src:   pgConn + "role \"a\" {\n  member_of = [role.b.id]\n}\nrole \"b\" {\n  member_of = [role.a.id]\n}\n",
-			want:  []string{`role memberships form a cycle: "a" -> "b" -> "a"`, "dbfence.hcl line 10"},
+			want:  []string{`role memberships form a cycle: "a" -> "b" -> "a"`, "dbfence.hcl line 9"},
 			count: 1,
 		},
 		{
@@ -33,13 +33,13 @@ func TestLoadMemberships(t *testing.T) {
 		{
 			name:  "duplicate membership",
 			src:   pgConn + "role \"a\" {}\nuser \"u\" {\n  member_of = [role.a.id, \"a\"]\n}\n",
-			want:  []string{`member_of lists role "a" more than once`, "dbfence.hcl line 8"},
+			want:  []string{`member_of lists role "a" more than once`, "dbfence.hcl line 7"},
 			count: 1,
 		},
 		{
 			name:  "mysql host-less member_of misses the declared account",
 			src:   myConn + "role \"ro\" { host = \"localhost\" }\nuser \"u\" {\n  member_of = [role.ro.name]\n}\n",
-			want:  []string{`member_of entry "ro" resolves to "ro"@"%"`, `"ro"@"localhost" (role "ro")`, "role.<label>.id", "dbfence.hcl line 8"},
+			want:  []string{`member_of entry "ro" resolves to "ro"@"%"`, `"ro"@"localhost" (role "ro")`, "role.<label>.id", "dbfence.hcl line 7"},
 			count: 1,
 		},
 		{
@@ -129,7 +129,7 @@ func TestLoadMembershipOptionErrors(t *testing.T) {
 		{
 			name:  "inherit on mysql",
 			src:   myConn + "role \"g\" {}\nuser \"u\" {\n  member_of = [{ role = role.g.id, inherit = false }]\n}\n",
-			want:  []string{"Invalid member_of", `option inherit of role "g@%" is only supported for postgres`, "dbfence.hcl line 8"},
+			want:  []string{"Invalid member_of", `option inherit of role "g@%" is only supported for postgres`, "dbfence.hcl line 7"},
 			count: 1,
 		},
 		{

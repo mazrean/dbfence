@@ -27,8 +27,7 @@ func load(t *testing.T, src string) (*Config, error) {
 func TestLoadPostgres(t *testing.T) {
 	t.Parallel()
 	cfg, err := load(t, `
-connection {
-  engine   = "postgres"
+connection "postgres" {
   host     = env("HOST")
   port     = "6543"
   user     = "admin"
@@ -83,7 +82,7 @@ ignore {
 		},
 		Ignore: model.Ignore{Roles: []string{"datadog"}, Schemas: []string{"vendor", `app\.audit`}},
 	}
-	wantConn := model.Connection{Engine: model.EnginePostgres, Host: "db.internal", Port: 6543, User: "admin", Password: "secret",
+	wantConn := model.Connection{Engine: model.EnginePostgres, Auth: model.AuthPassword, Host: "db.internal", Port: 6543, User: "admin", Password: "secret",
 		Database: "postgres", TLS: model.TLSPrefer, ConnectTimeout: 10 * time.Second}
 	if diff := cmp.Diff(wantConn, cfg.Connection); diff != "" {
 		t.Errorf("Connection mismatch (-want +got):\n%s", diff)
@@ -96,8 +95,7 @@ ignore {
 func TestLoadMySQL(t *testing.T) {
 	t.Parallel()
 	cfg, err := load(t, `
-connection {
-  engine          = "mysql"
+connection "mysql" {
   host            = "localhost"
   user            = "root"
   database        = "app"
@@ -139,7 +137,7 @@ grant {
 	if diff := cmp.Diff(want, cfg.Desired); diff != "" {
 		t.Errorf("Desired mismatch (-want +got):\n%s", diff)
 	}
-	wantConn := model.Connection{Engine: model.EngineMySQL, Host: "localhost", Port: 3306, User: "root", Database: "app",
+	wantConn := model.Connection{Engine: model.EngineMySQL, Auth: model.AuthPassword, Host: "localhost", Port: 3306, User: "root", Database: "app",
 		TLS: model.TLSVerifyFull, ConnectTimeout: 3 * time.Second}
 	if diff := cmp.Diff(wantConn, cfg.Connection); diff != "" {
 		t.Errorf("Connection mismatch (-want +got):\n%s", diff)
@@ -148,15 +146,15 @@ grant {
 
 func TestLoadErrors(t *testing.T) {
 	t.Parallel()
-	const pg = "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n}\n"
-	const my = "connection {\n engine = \"mysql\"\n host = \"h\"\n user = \"u\"\n}\n"
+	const pg = "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n}\n"
+	const my = "connection \"mysql\" {\n host = \"h\"\n user = \"u\"\n}\n"
 	tests := []struct {
 		name, src, want string
 	}{
 		{"missing connection", `role "a" {}`, "Missing connection block"},
-		{"bad engine", "connection {\n engine = \"sqlite\"\n host = \"h\"\n user = \"u\"\n}", "Unsupported engine"},
+		{"bad engine", "connection \"sqlite\" {\n host = \"h\"\n user = \"u\"\n}", "Unsupported engine"},
 		{"duplicate connection", pg + pg, "Duplicate connection block"},
-		{"unset env", "connection {\n engine = \"postgres\"\n host = env(\"NOPE\")\n user = \"u\"\n}", `"NOPE" is not set`},
+		{"unset env", "connection \"postgres\" {\n host = env(\"NOPE\")\n user = \"u\"\n}", `"NOPE" is not set`},
 		{"env default", pg + `role "a" { password = env("NOPE", 1, 2) }`, "at most one default"},
 		{"pg only attr on mysql", my + `role "a" { superuser = true }`, `"superuser" is only supported for postgres`},
 		{"mysql only attr on pg", pg + `database "a" { charset = "utf8" }`, `"charset" is only supported for mysql`},
@@ -191,7 +189,7 @@ func TestLoadDirectory(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	files := map[string]string{
-		"a.hcl": "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n}",
+		"a.hcl": "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n}",
 		"b.hcl": `role "r" {}`,
 		"c.txt": `garbage`,
 	}
@@ -257,7 +255,7 @@ func TestExpandPrivilegesErrors(t *testing.T) {
 
 func TestLoadDirectoryEntries(t *testing.T) {
 	t.Parallel()
-	conn := "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n}"
+	conn := "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n}"
 	tests := []struct {
 		setup func(t *testing.T, dir string)
 		name  string
@@ -321,12 +319,12 @@ func TestLoadMissingDirectory(t *testing.T) {
 // the first diagnostic (the CLI adds it) and no cascaded diagnostics.
 func TestLoadDiagnosticOutput(t *testing.T) {
 	t.Parallel()
-	const pg = "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n}\n"
+	const pg = "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n}\n"
 	tests := []struct {
 		name, src, prefix string
 		count             int
 	}{
-		{"unset env", "connection {\n engine = \"postgres\"\n host = env(\"NOPE\")\n user = \"u\"\n}", "Invalid function argument", 1},
+		{"unset env", "connection \"postgres\" {\n host = env(\"NOPE\")\n user = \"u\"\n}", "Invalid function argument", 1},
 		{"unknown reference", pg + `database "d" { owner = role.nope.name }`, "Unsupported attribute", 1},
 		{
 			"two unknown references",
@@ -367,8 +365,7 @@ func TestLoadResolvesTFStateRelativeToConfig(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	state := `{"version": 4, "serial": 1, "lineage": "x", "outputs": {"db_host": {"value": "db.internal", "type": "string"}}, "resources": []}`
-	cfgSrc := `connection {
-  engine = "postgres"
+	cfgSrc := `connection "postgres" {
   host   = tfstate("terraform.tfstate", "output.db_host")
   user   = "u"
 }
@@ -398,17 +395,17 @@ func TestLoadRegistersConnectionSecrets(t *testing.T) {
 	}{
 		{
 			name:   "password from env",
-			src:    "connection {\n engine = \"mysql\"\n host = \"h\"\n user = \"u\"\n password = env(\"CONNPW\")\n}\n",
+			src:    "connection \"mysql\" {\n host = \"h\"\n user = \"u\"\n password = env(\"CONNPW\")\n}\n",
 			hidden: "Cn1ConnPw9",
 		},
 		{
 			name:  "user equal to the password",
-			src:   "connection {\n engine = \"mysql\"\n host = \"h\"\n user = \"cfguser7\"\n password = \"cfguser7\"\n}\n",
+			src:   "connection \"mysql\" {\n host = \"h\"\n user = \"cfguser7\"\n password = \"cfguser7\"\n}\n",
 			shown: "cfguser7",
 		},
 		{
 			name:  "database equal to the password",
-			src:   "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n password = \"cfgdb7x\"\n database = \"cfgdb7x\"\n}\n",
+			src:   "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n password = \"cfgdb7x\"\n database = \"cfgdb7x\"\n}\n",
 			shown: "cfgdb7x",
 		},
 	}

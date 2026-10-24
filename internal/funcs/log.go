@@ -42,8 +42,8 @@ func SetLogOutput(w io.Writer) {
 	log.SetOutput(w)
 }
 
-// sdkLogger returns the logger that the GCP clients log to.
-func sdkLogger() *slog.Logger {
+// SDKLogger returns the logger that the GCP clients log to.
+func SDKLogger() *slog.Logger {
 	w := logOutput.Load()
 	if w == nil {
 		return slog.New(slog.DiscardHandler)

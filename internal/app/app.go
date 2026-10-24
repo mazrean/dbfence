@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mazrean/dbfence/internal/apply"
+	"github.com/mazrean/dbfence/internal/auth"
 	"github.com/mazrean/dbfence/internal/config"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/driver/mysql"
@@ -48,9 +49,9 @@ func NewOpener() Opener { return DefaultOpener{} }
 func (DefaultOpener) Open(ctx context.Context, conn model.Connection) (Driver, error) {
 	switch conn.Engine {
 	case model.EnginePostgres:
-		return postgres.Open(ctx, conn)
+		return postgres.Open(ctx, conn, auth.New(conn))
 	case model.EngineMySQL:
-		return mysql.Open(ctx, conn)
+		return mysql.Open(ctx, conn, auth.New(conn))
 	default:
 		return nil, fmt.Errorf("unsupported engine %q", conn.Engine)
 	}

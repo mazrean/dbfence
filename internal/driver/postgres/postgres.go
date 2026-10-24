@@ -20,6 +20,7 @@ import (
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
 	"github.com/mazrean/dbfence/internal/plan"
+	"github.com/mazrean/dbfence/internal/secret"
 )
 
 // sqlstateInsufficientPrivilege is returned when pg_authid is not readable.
@@ -29,9 +30,11 @@ const sqlstateInsufficientPrivilege = "42501"
 // separate connection with the database name replaced.
 type Driver struct {
 	Dialect
-	cfg   *pgx.ConnConfig
-	db    *sql.DB
-	conns map[string]*sql.DB
+	cfg *pgx.ConnConfig
+	// password returns the password of each new connection.
+	password func(context.Context) (string, error)
+	db       *sql.DB
+	conns    map[string]*sql.DB
 	// st is the state captured by the last Inspect. Driver methods that
 	// override Dialect use it to render grantor-aware statements.
 	st      *state
@@ -39,16 +42,17 @@ type Driver struct {
 	mu      sync.Mutex
 }
 
-// Open connects to the server of conn.
-func Open(ctx context.Context, conn model.Connection) (*Driver, error) {
+// Open connects to the server of conn, with the password that password
+// returns for each new connection.
+func Open(ctx context.Context, conn model.Connection, password func(context.Context) (string, error)) (*Driver, error) {
 	cfg, err := parseConfig(conn)
 	if err != nil {
 		return nil, err
 	}
-	d := &Driver{cfg: cfg, conns: map[string]*sql.DB{}}
+	d := &Driver{cfg: cfg, conns: map[string]*sql.DB{}, password: password}
 	// Per-database connections copy the handler.
 	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { d.notices.add(n) }
-	d.db = stdlib.OpenDB(*cfg)
+	d.db = d.openDB(cfg)
 	if err = d.db.PingContext(ctx); err != nil {
 		_ = d.db.Close()
 		return nil, fmt.Errorf("connect to postgres: %w", dedupLines(err))
@@ -130,29 +134,25 @@ func noticeError(notices []*pgconn.Notice) error {
 	return nil
 }
 
-// sslModes maps TLS modes to libpq sslmode values.
-var sslModes = map[model.TLSMode]string{
-	model.TLSDisable:    "disable",
-	model.TLSPrefer:     "prefer",
-	model.TLSRequire:    "require",
-	model.TLSVerifyFull: "verify-full",
-}
-
 // parseConfig builds the pgx configuration of conn and applies the
 // session settings dbfence relies on. Per-database connections copy the
 // result.
 func parseConfig(conn model.Connection) (*pgx.ConnConfig, error) {
 	// Every setting is given, so that PG* environment variables and
 	// ~/.pgpass cannot fill in one that the configuration leaves out.
+	// The password is set for each connection (see openDB).
 	settings := []struct{ key, value string }{
 		{"host", conn.Host},
 		{"port", strconv.Itoa(conn.Port)},
 		{"user", conn.User},
-		{"password", conn.Password},
+		{"password", ""},
 		{"passfile", ""},
 		{"dbname", conn.Database},
-		{"sslmode", sslModes[conn.TLS]},
+		{"sslmode", string(conn.TLS)},
 		{"connect_timeout", strconv.Itoa(int(conn.ConnectTimeout / time.Second))},
+	}
+	if conn.TLSCAFile != "" {
+		settings = append(settings, struct{ key, value string }{"sslrootcert", conn.TLSCAFile})
 	}
 	var sb strings.Builder
 	for _, kv := range settings {
@@ -172,6 +172,20 @@ func parseConfig(conn model.Connection) (*pgx.ConnConfig, error) {
 	// from changing it.
 	cfg.RuntimeParams["client_encoding"] = "UTF8"
 	return cfg, nil
+}
+
+// openDB opens a pool of connections of cfg, each with a password from
+// d.password, which output redacts.
+func (d *Driver) openDB(cfg *pgx.ConnConfig) *sql.DB {
+	return stdlib.OpenDB(*cfg, stdlib.OptionBeforeConnect(func(ctx context.Context, cc *pgx.ConnConfig) error {
+		pw, err := d.password(ctx)
+		if err != nil {
+			return err
+		}
+		secret.Register(pw)
+		cc.Password = pw
+		return nil
+	}))
 }
 
 // quoteSetting quotes a value of a libpq keyword/value connection string.
@@ -209,7 +223,7 @@ func (d *Driver) conn(ctx context.Context, database string) (*sql.DB, error) {
 	}
 	cfg := d.cfg.Copy()
 	cfg.Database = database
-	c := stdlib.OpenDB(*cfg)
+	c := d.openDB(cfg)
 	c.SetMaxOpenConns(1)
 	if err := c.PingContext(ctx); err != nil {
 		_ = c.Close()

@@ -12,7 +12,7 @@ func TestLoadAttributeValues(t *testing.T) {
 		{
 			name:  "pg empty password",
 			src:   pgConn + "user \"a\" {\n  password = \"\"\n}\n",
-			want:  []string{"Empty password", `user "a" at`, "dbfence.hcl:6,1", "it clears the password"},
+			want:  []string{"Empty password", `user "a" at`, "dbfence.hcl:5,1", "it clears the password"},
 			deny:  []string{"password = "},
 			count: 1,
 		},
@@ -40,7 +40,7 @@ func TestLoadAttributeValues(t *testing.T) {
 		{
 			name:  "connection_limit below -1",
 			src:   pgConn + "user \"a\" {\n  connection_limit = -5\n}\n",
-			want:  []string{"Invalid connection_limit", "dbfence.hcl line 7", "got -5"},
+			want:  []string{"Invalid connection_limit", "dbfence.hcl line 6", "got -5"},
 			count: 1,
 		},
 		{
@@ -52,7 +52,7 @@ func TestLoadAttributeValues(t *testing.T) {
 		{
 			name:  "pg role name over 63 bytes",
 			src:   pgConn + "role \"long\" {\n  name = \"" + long64 + "\"\n}\n",
-			want:  []string{"Name too long", "dbfence.hcl line 7", "64 bytes long; postgres allows at most 63"},
+			want:  []string{"Name too long", "dbfence.hcl line 6", "64 bytes long; postgres allows at most 63"},
 			count: 1,
 		},
 		{
@@ -88,19 +88,19 @@ func TestLoadAttributeValues(t *testing.T) {
 		{
 			name:  "mysql host over 255 characters",
 			src:   myConn + "user \"u\" {\n  host = \"" + strings.Repeat("h", 256) + "\"\n}\n",
-			want:  []string{"dbfence.hcl line 7", "256 characters long; mysql allows at most 255"},
+			want:  []string{"dbfence.hcl line 6", "256 characters long; mysql allows at most 255"},
 			count: 1,
 		},
 		{
 			name:  "pg empty optional strings",
 			src:   pgConn + "role \"o\" {}\ndatabase \"d\" {\n  owner = \"\"\n  encoding = \"\"\n}\nschema \"s\" {\n  database = database.d.name\n  owner = \"\"\n}\n",
-			want:  []string{"owner must not be empty", "encoding must not be empty", "dbfence.hcl line 8", "dbfence.hcl line 13"},
+			want:  []string{"owner must not be empty", "encoding must not be empty", "dbfence.hcl line 7", "dbfence.hcl line 12"},
 			count: 3,
 		},
 		{
 			name:  "mysql charset, collation and auth_plugin are identifiers",
 			src:   myConn + "database \"d\" {\n  charset = \"utf8mb4; DROP\"\n  collation = \"\"\n}\nuser \"u\" {\n  auth_plugin = \"a b\"\n}\n",
-			want:  []string{"Invalid charset", "Invalid collation", "Invalid auth_plugin", "dbfence.hcl line 7", "dbfence.hcl line 11"},
+			want:  []string{"Invalid charset", "Invalid collation", "Invalid auth_plugin", "dbfence.hcl line 6", "dbfence.hcl line 10"},
 			count: 3,
 		},
 	})

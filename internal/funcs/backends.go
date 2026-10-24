@@ -21,8 +21,14 @@ import (
 
 type awsSecretsManager struct{ c *secretsmanager.Client }
 
+// LoadAWSConfig loads the default AWS configuration, logging to the
+// output set by SetLogOutput.
+func LoadAWSConfig(ctx context.Context) (aws.Config, error) {
+	return awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(awsLogger()))
+}
+
 func newAWSSecretsManager(ctx context.Context) (AWSSecretsManager, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithLogger(awsLogger()))
+	cfg, err := LoadAWSConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -50,10 +56,10 @@ func newGCPSecretManager(ctx context.Context) (GCPSecretManager, error) {
 	return c, nil
 }
 
-// dialGCPSecretManager returns a client that logs to sdkLogger, with
+// dialGCPSecretManager returns a client that logs to SDKLogger, with
 // extra options such as a test endpoint.
 func dialGCPSecretManager(ctx context.Context, extra ...option.ClientOption) (*gcpSecretManager, error) {
-	c, err := secretmanager.NewClient(ctx, append([]option.ClientOption{option.WithLogger(sdkLogger())}, extra...)...)
+	c, err := secretmanager.NewClient(ctx, append([]option.ClientOption{option.WithLogger(SDKLogger())}, extra...)...)
 	if err != nil {
 		return nil, err
 	}

@@ -12,7 +12,7 @@ import (
 
 func TestRun(t *testing.T) {
 	t.Parallel()
-	src := "connection {\n  engine = \"postgres\"\n  host = \"h\"\n  user = \"u\"\n}\nrole \"r\" {}\n"
+	src := "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\nrole \"r\" {}\n"
 	valid := writeConfig(t, src)
 	unknownAttr := writeConfig(t, strings.Replace(src, "role \"r\" {}", "role \"r\" {\n  bogus = true\n}", 1))
 	escAttr := writeConfig(t, strings.Replace(src, "role \"r\" {}", "role \"r\" {\n  bogus = true # \x1b[2K\n}", 1))
@@ -31,8 +31,8 @@ func TestRun(t *testing.T) {
 		{name: "plan help lists flags", args: []string{"plan", "--help"}, wantCode: exitOK, wantOut: "--detailed-exitcode", wantErrOut: ""},
 		{name: "apply unknown flag", args: []string{"apply", "--detailed-exitcode"}, wantCode: exitError, wantOut: "", wantErrOut: "unknown flag --detailed-exitcode"},
 		{name: "validate ok", args: []string{"-C", valid, "validate"}, wantCode: exitOK, wantOut: "The configuration is valid (postgres: 0 databases, 1 role, 0 schemas, 0 privileges).\n", wantErrOut: ""},
-		{name: "validate unknown attribute renders the diagnostic unindented", args: []string{"-C", unknownAttr, "validate"}, wantCode: exitError, wantOut: "", wantErrOut: "dbfence: error: Unsupported argument\n\n  on " + filepath.Join(unknownAttr, "dbfence.hcl") + " line 7, in role \"r\":\n   7:   bogus = true\n\nAn argument named \"bogus\" is not expected here.\n"},
-		{name: "error escapes control characters but keeps lines", args: []string{"-C", escAttr, "validate"}, wantCode: exitError, wantOut: "", wantErrOut: "   7:   bogus = true # \\x1b[2K\n"},
+		{name: "validate unknown attribute renders the diagnostic unindented", args: []string{"-C", unknownAttr, "validate"}, wantCode: exitError, wantOut: "", wantErrOut: "dbfence: error: Unsupported argument\n\n  on " + filepath.Join(unknownAttr, "dbfence.hcl") + " line 6, in role \"r\":\n   6:   bogus = true\n\nAn argument named \"bogus\" is not expected here.\n"},
+		{name: "error escapes control characters but keeps lines", args: []string{"-C", escAttr, "validate"}, wantCode: exitError, wantOut: "", wantErrOut: "   6:   bogus = true # \\x1b[2K\n"},
 		{name: "validate missing directory", args: []string{"--chdir", filepath.Join(valid, "none"), "validate"}, wantCode: exitError, wantOut: "", wantErrOut: "read configuration directory (set -C/--chdir or DBFENCE_CHDIR): open "},
 		{name: "validate directory without *.hcl", args: []string{"validate", "-C", t.TempDir()}, wantCode: exitError, wantOut: "", wantErrOut: "no *.hcl files in "},
 	}
@@ -71,7 +71,7 @@ func writeConfig(t *testing.T, src string) string {
 }
 
 func TestRunLoadsEveryHCLFileInTheWorkingDirectory(t *testing.T) {
-	dir := writeConfig(t, "connection {\n  engine = \"postgres\"\n  host = \"h\"\n  user = \"u\"\n}\n")
+	dir := writeConfig(t, "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\n")
 	for name, src := range map[string]string{
 		"roles.hcl":     "role \"r\" {}\n",
 		"roles.hcl.bak": "bogus\n",

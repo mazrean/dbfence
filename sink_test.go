@@ -45,7 +45,7 @@ func (emptyServerOpener) Open(context.Context, model.Connection) (app.Driver, er
 func TestRunRedactsSecrets(t *testing.T) {
 	t.Parallel()
 	const pw = "cli-sink-secret-pw"
-	dir := writeConfig(t, "connection {\n  engine = \"postgres\"\n  host = \"h\"\n  user = \"u\"\n}\nuser \""+pw+"\" {\n  password = \""+pw+"\"\n}\n")
+	dir := writeConfig(t, "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\nuser \""+pw+"\" {\n  password = \""+pw+"\"\n}\n")
 	tests := []struct {
 		name  string
 		want  string

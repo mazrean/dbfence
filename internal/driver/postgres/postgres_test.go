@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/mazrean/dbfence/internal/auth"
+	"github.com/mazrean/dbfence/internal/driver/internal/tlstest"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
 	"github.com/mazrean/dbfence/internal/plan"
@@ -40,28 +43,34 @@ func TestParseConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		password string
+		user     string
 		tls      model.TLSMode
+		caFile   bool
 		wantTLS  bool
 		fallback bool
 	}{
-		{name: "disable", password: "pw", tls: model.TLSDisable},
-		{name: "prefer falls back to plain", password: "pw", tls: model.TLSPrefer, wantTLS: true, fallback: true},
-		{name: "require", password: "pw", tls: model.TLSRequire, wantTLS: true},
-		{name: "verify-full", password: "pw", tls: model.TLSVerifyFull, wantTLS: true},
-		{name: "quotes, backslashes and spaces", password: `a'b\c d@e=f`, tls: model.TLSDisable},
-		{name: "no password", tls: model.TLSDisable},
+		{name: "disable", user: "admin", tls: model.TLSDisable},
+		{name: "allow tries plain first", user: "admin", tls: model.TLSAllow, fallback: true},
+		{name: "prefer falls back to plain", user: "admin", tls: model.TLSPrefer, wantTLS: true, fallback: true},
+		{name: "require", user: "admin", tls: model.TLSRequire, wantTLS: true},
+		{name: "verify-ca with a CA file", user: "admin", tls: model.TLSVerifyCA, caFile: true, wantTLS: true},
+		{name: "verify-full", user: "admin", tls: model.TLSVerifyFull, wantTLS: true},
+		{name: "quotes, backslashes and spaces", user: `a'b\c d@e=f`, tls: model.TLSDisable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			conn := testConnection()
-			conn.Password, conn.TLS = tt.password, tt.tls
+			conn.User, conn.TLS = tt.user, tt.tls
+			if tt.caFile {
+				conn.TLSCAFile = tlstest.CAFile(t)
+			}
 			cfg, err := parseConfig(conn)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.Host != "db" || cfg.Port != 5433 || cfg.User != "admin" || cfg.Password != tt.password || cfg.Database != "app" {
+			// The password is set for each connection (see openDB).
+			if cfg.Host != "db" || cfg.Port != 5433 || cfg.User != tt.user || cfg.Password != "" || cfg.Database != "app" {
 				t.Errorf("config = %s@%s:%d/%s password %q", cfg.User, cfg.Host, cfg.Port, cfg.Database, cfg.Password)
 			}
 			if cfg.ConnectTimeout != 3*time.Second {
@@ -75,6 +84,9 @@ func TestParseConfig(t *testing.T) {
 			}
 			if tt.tls == model.TLSVerifyFull && (cfg.TLSConfig.InsecureSkipVerify || cfg.TLSConfig.ServerName != "db") {
 				t.Errorf("verify-full TLS config skips verification")
+			}
+			if tt.caFile && cfg.TLSConfig.RootCAs == nil {
+				t.Errorf("tls_ca_file is not used")
 			}
 			if got := cfg.Copy().RuntimeParams["standard_conforming_strings"]; got != "on" {
 				t.Errorf("standard_conforming_strings = %q, want on (also on per-database copies)", got)
@@ -408,11 +420,23 @@ func TestOpenTimeoutReportedOnce(t *testing.T) {
 	}()
 	conn := testConnection()
 	conn.Host, conn.Port, conn.TLS, conn.ConnectTimeout = "127.0.0.1", ln.Addr().(*net.TCPAddr).Port, model.TLSPrefer, time.Second
-	_, err = Open(t.Context(), conn)
+	_, err = Open(t.Context(), conn, auth.Static("pw"))
 	if err == nil {
 		t.Fatal("Open() succeeded")
 	}
 	if n := strings.Count(err.Error(), ln.Addr().String()+" ("); n != 1 {
 		t.Errorf("Open() error names the host %d times: %v", n, err)
+	}
+}
+
+// TestOpenAsksForThePassword checks that Open takes the password of a
+// connection from the source, and fails with its error.
+func TestOpenAsksForThePassword(t *testing.T) {
+	t.Parallel()
+	conn := testConnection()
+	conn.Host, conn.Port = "127.0.0.1", 1
+	_, err := Open(t.Context(), conn, func(context.Context) (string, error) { return "", errors.New("no token today") })
+	if err == nil || !strings.Contains(err.Error(), "no token today") {
+		t.Errorf("Open() error = %v, want the password source error", err)
 	}
 }

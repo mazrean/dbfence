@@ -29,7 +29,7 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 		},
 		{
 			name:   "connection password with an error after the literal",
-			src:    "connection {\n  engine   = \"postgres\"\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://u:Hj4tPq8sWe@h/d\" + 1\n}\n",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://u:Hj4tPq8sWe@h/d\" + 1\n}\n",
 			leaked: "Hj4tPq8sWe",
 			shown:  "password =****",
 		},
@@ -71,7 +71,7 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 		},
 		{
 			name:   "connection multi-line password format, unknown variable",
-			src:    "connection {\n  engine   = \"postgres\"\n  host     = \"h\"\n  user     = \"u\"\n  password = format(\n    \"postgres://u:Ee1Lp3sWq9@h/d${nope}\"\n  )\n}\n",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = format(\n    \"postgres://u:Ee1Lp3sWq9@h/d${nope}\"\n  )\n}\n",
 			leaked: "Ee1Lp3sWq9",
 			shown:  "****",
 		},
@@ -83,13 +83,13 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 		},
 		{
 			name:   "connection password interpolation across lines, parse error",
-			src:    "connection {\n  engine   = \"postgres\"\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://${\n    \"app\"\n  }:Rr9DsnPw7@h/d\" 1\n}\n",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://${\n    \"app\"\n  }:Rr9DsnPw7@h/d\" 1\n}\n",
 			leaked: "Rr9DsnPw7",
 			shown:  "****",
 		},
 		{
 			name:   "connection password interpolation across lines, unknown variable",
-			src:    "connection {\n  engine   = \"postgres\"\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://${\n    \"app\"\n  }:Rr8DsnPw7@h/${nope}\"\n}\n",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://${\n    \"app\"\n  }:Rr8DsnPw7@h/${nope}\"\n}\n",
 			leaked: "Rr8DsnPw7",
 			shown:  "****",
 		},
@@ -131,7 +131,7 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 		},
 		{
 			name:   "connection password on the line after =",
-			src:    "connection {\n  engine   = \"postgres\"\n  host     = \"h\"\n  user     = \"u\"\n  password =\n    \"postgres://u:Qq5NextDsnPw9@h/d\"\n}\n",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password =\n    \"postgres://u:Qq5NextDsnPw9@h/d\"\n}\n",
 			leaked: "Qq5NextDsnPw9",
 			shown:  "****",
 		},
@@ -250,7 +250,7 @@ func TestRegisterLiteralSecrets(t *testing.T) {
 		},
 		{
 			name:       "connection password",
-			src:        "connection {\n  engine   = \"postgres\"\n  host     = \"h\"\n  user     = \"u\"\n  password = \"Vb6nMq1wEr\"\n}\nuser \"app\" { login = \"maybe\" }\n",
+			src:        "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = \"Vb6nMq1wEr\"\n}\nuser \"app\" { login = \"maybe\" }\n",
 			registered: []string{"Vb6nMq1wEr"},
 		},
 		{

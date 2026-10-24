@@ -39,7 +39,7 @@ func TestLoadReferenceErrors(t *testing.T) {
 		{
 			name:  "schema database self reference",
 			src:   pgConn + "database \"app\" {}\nschema \"a\" {\n  database = schema.a.database\n}\n",
-			want:  []string{"Cyclic reference", `schema "a"`, "dbfence.hcl line 8"},
+			want:  []string{"Cyclic reference", `schema "a"`, "dbfence.hcl line 7"},
 			count: 1,
 		},
 		{
@@ -57,7 +57,7 @@ func TestLoadReferenceErrors(t *testing.T) {
 		{
 			name:  "name references another block",
 			src:   pgConn + "database \"app\" {}\nrole \"r\" {\n  name = \"${database.app.name}_owner\"\n}\n",
-			want:  []string{"References not allowed", "name cannot reference other blocks", "dbfence.hcl line 8"},
+			want:  []string{"References not allowed", "name cannot reference other blocks", "dbfence.hcl line 7"},
 			count: 1,
 		},
 		{
@@ -68,31 +68,31 @@ func TestLoadReferenceErrors(t *testing.T) {
 		},
 		{
 			name:  "empty host",
-			src:   "connection {\n engine = \"mysql\"\n host = \"\"\n user = \"u\"\n}\n",
-			want:  []string{"Empty value", "connection.host must not be empty", "dbfence.hcl line 3"},
+			src:   "connection \"mysql\" {\n host = \"\"\n user = \"u\"\n}\n",
+			want:  []string{"Empty value", "connection.host must not be empty", "dbfence.hcl line 2"},
 			count: 1,
 		},
 		{
 			name:  "blank user from env default",
-			src:   "connection {\n engine = \"postgres\"\n host = \"h\"\n user = env(\"NOPE\", \" \")\n}\n",
+			src:   "connection \"postgres\" {\n host = \"h\"\n user = env(\"NOPE\", \" \")\n}\n",
 			want:  []string{"Empty value", "connection.user must not be empty"},
 			count: 1,
 		},
 		{
 			name:  "empty postgres database",
-			src:   "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n database = \"\"\n}\n",
+			src:   "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n database = \"\"\n}\n",
 			want:  []string{"connection.database must not be empty"},
 			count: 1,
 		},
 		{
 			name:  "missing user",
-			src:   "connection {\n engine = \"postgres\"\n host = \"h\"\n}\n",
+			src:   "connection \"postgres\" {\n host = \"h\"\n}\n",
 			want:  []string{`The argument "user" is required`},
 			count: 1,
 		},
 		{
 			name:  "invalid connection settings",
-			src:   "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n port = 70000\n tls = \"verify-ca\"\n connect_timeout = 0\n}\n",
+			src:   "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n port = 70000\n tls = \"verify-x\"\n connect_timeout = 0\n}\n",
 			want:  []string{"Invalid port", "Invalid tls", "Invalid connect_timeout"},
 			count: 3,
 		},
