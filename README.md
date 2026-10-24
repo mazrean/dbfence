@@ -142,13 +142,13 @@ Every SQL statement is sent on its own, so the server rejects a query that holds
 
 ### Blocks
 
-- **`connection`**: required, exactly one. Only these attributes are used; `PG*` environment variables and `~/.pgpass` are not read.
+- **`connection`**: required, exactly one. The attributes below, and the password, are always taken from the configuration: on PostgreSQL the matching `PG*` environment variables and `~/.pgpass` are not read. TLS certificate settings (`PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `~/.postgresql/`), `PGOPTIONS` and `PGSERVICE` still apply as in libpq.
   - `engine`: `"postgres"` or `"mysql"`.
   - `host` and `user`: required, not empty. On PostgreSQL a `host` starting with `/` is the directory of a Unix-domain socket.
   - `password`: optional; without it dbfence connects without a password.
   - `port`: default 5432 (PostgreSQL) or 3306 (MySQL).
   - `database`: the database to connect to; default `"postgres"` on PostgreSQL, none on MySQL.
-  - `tls`: `"disable"`, `"prefer"` (default: TLS when the server supports it), `"require"` (always TLS, the certificate is not verified) or `"verify-full"` (always TLS, the certificate and host name are verified against the system roots).
+  - `tls`: `"disable"`, `"prefer"` (default: TLS when the server supports it), `"require"` (always TLS, the certificate is not verified) or `"verify-full"` (always TLS, the certificate and host name are verified: on PostgreSQL against `PGSSLROOTCERT` or `~/.postgresql/root.crt` when present, otherwise the system roots; on MySQL against the system roots).
   - `connect_timeout`: seconds, default 10. On MySQL it covers the handshake and session setup as well as the dial (`connect to mysql: timed out after 10s`). PostgreSQL reports a host's timeout once, even with `tls = "prefer"`.
 - **`role "<label>"` / `user "<label>"`**: these two are the same thing, except for the login default.
   - `name` overrides the label. Use it, with an identifier-safe label, for names with upper case, spaces or quotes, because only such labels can be referenced (`user.<label>.name`).
