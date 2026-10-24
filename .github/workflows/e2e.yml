@@ -266,7 +266,7 @@ jobs:
       - name: Show the job output
         if: always()
         run: |
-          execution=$(gcloud run jobs executions list --job "$JOB" --region "$REGION" --limit 1 --format 'value(metadata.name)')
+          execution=$(gcloud run jobs executions list --job "$JOB" --region "$REGION" --sort-by '~metadata.creationTimestamp' --limit 1 --format 'value(metadata.name)')
           [ -n "$execution" ] || exit 0
           echo "execution: $execution"
           sleep 15 # log ingestion delay
