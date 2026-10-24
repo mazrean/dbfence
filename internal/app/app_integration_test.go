@@ -399,6 +399,42 @@ func TestMySQLOneStatementPerExec(t *testing.T) {
 	}
 }
 
+// TestMySQLPruneKeepsTableRoutineAndProxyPrivileges checks that --prune
+// keeps accounts whose DROP USER would delete table, column, routine or
+// PROXY privileges naming a database or account dbfence does not manage,
+// and still drops an account without them.
+func TestMySQLPruneKeepsTableRoutineAndProxyPrivileges(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	for _, q := range []string{
+		"CREATE DATABASE `ev\x01db`",
+		"CREATE TABLE `ev\x01db`.t (c INT)",
+		"CREATE PROCEDURE `ev\x01db`.p() BEGIN END",
+		"CREATE USER 'dbf_tbl'@'%', 'dbf_col'@'%', 'dbf_proc'@'%', 'dbf_proxy'@'%', 'dbf_plain'@'%', 'ev\x01u'@'%'",
+		"GRANT SELECT ON `ev\x01db`.t TO 'dbf_tbl'@'%'",
+		"GRANT SELECT (c) ON `ev\x01db`.t TO 'dbf_col'@'%'",
+		"GRANT EXECUTE ON PROCEDURE `ev\x01db`.p TO 'dbf_proc'@'%'",
+		// root@'%' may not grant PROXY; GRANT PROXY writes this row.
+		"INSERT INTO mysql.proxies_priv (Host, User, Proxied_host, Proxied_user, With_grant) VALUES ('%', 'dbf_proxy', '%', 'ev\x01u', 0)",
+		"FLUSH PRIVILEGES",
+	} {
+		h.exec(q)
+	}
+	h.write(mysqlConfig("pw"))
+	_, out := h.plan(app.Options{Prune: true})
+	for _, u := range []string{"dbf_tbl", "dbf_col", "dbf_proc", "dbf_proxy"} {
+		if strings.Contains(out, "DROP USER '"+u+"'") {
+			t.Errorf("prune drops %s:\n%s", u, out)
+		}
+		if !strings.Contains(out, `user "`+u+`"@"%" is granted to, has as a granted or default role, or holds privileges`) {
+			t.Errorf("plan does not say why %s is kept:\n%s", u, out)
+		}
+	}
+	if !strings.Contains(out, "DROP USER 'dbf_plain'@'%'") {
+		t.Errorf("prune does not drop dbf_plain:\n%s", out)
+	}
+}
+
 func mysqlConfig(pw string) string {
 	return fmt.Sprintf(`
 role "ro" { name = "dbf_it_ro" }

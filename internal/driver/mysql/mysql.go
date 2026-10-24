@@ -30,7 +30,22 @@ type Driver struct {
 	// keepRoles lists the accounts whose DROP USER would change an
 	// account or database dbfence does not manage (see KeepRole).
 	keepRoles map[model.RoleID]bool
+	// grantRefs lists the databases and proxied accounts that the rows of
+	// mysql.tables_priv, columns_priv, procs_priv and proxies_priv name
+	// (see inspectGrantRefs); grantRefsUnreadable is set when some of
+	// these tables cannot be read.
+	grantRefs           []grantRef
+	grantRefsUnreadable bool
 	Dialect
+}
+
+// grantRef is what a table, column, routine or proxy privilege of
+// account names: a database, or (proxy) the proxied account.
+type grantRef struct {
+	account  model.RoleID
+	database string
+	proxied  model.RoleID
+	proxy    bool
 }
 
 // Open connects to dsn (go-sql-driver/mysql format).
@@ -184,6 +199,9 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	if err := d.inspectDBPrivileges(ctx, cur, desired); err != nil {
 		return nil, err
 	}
+	if err := d.inspectGrantRefs(ctx); err != nil {
+		return nil, err
+	}
 	if err := d.dropUntrusted(cur, desired); err != nil {
 		return nil, err
 	}
@@ -203,8 +221,9 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 // ROLE replaces all default roles, so the default roles of an account
 // that has one of them are left alone. DROP USER removes the account
 // from the role grants and default roles of every account and revokes
-// its privileges, so accounts whose drop would change one of them are
-// recorded for KeepRole.
+// its privileges (also those on tables, columns, routines and proxied
+// accounts, see grantRefs), so accounts whose drop would change one of
+// them are recorded for KeepRole.
 func (d *Driver) dropUntrusted(cur *model.Current, desired *model.Desired) error {
 	untrusted := func(id model.RoleID) bool { return model.CheckRoleID(model.EngineMySQL, id) != "" }
 	d.keepDefaultRoles = map[model.RoleID]bool{}
@@ -228,6 +247,18 @@ func (d *Driver) dropUntrusted(cur *model.Current, desired *model.Desired) error
 			d.keepRoles[p.Grantee] = true
 		}
 	}
+	for _, g := range d.grantRefs {
+		if !untrusted(g.account) && (g.proxy && untrusted(g.proxied) ||
+			!g.proxy && model.CheckName(model.EngineMySQL, model.NameDatabase, g.database) != "") {
+			d.keepRoles[g.account] = true
+		}
+	}
+	if d.grantRefsUnreadable && slices.ContainsFunc(cur.Roles, func(r model.RoleState) bool {
+		return r.ID != cur.CurrentUser && !untrusted(r.ID) && !d.IsSystemRole(r.ID) &&
+			(desired == nil || !slices.ContainsFunc(desired.Roles, func(dr model.Role) bool { return dr.ID == r.ID }))
+	}) {
+		cur.Warnings = append(cur.Warnings, "cannot read mysql.tables_priv, mysql.columns_priv, mysql.procs_priv or mysql.proxies_priv: --prune does not check whether dropping an account removes table, column, routine or proxy privileges that name a database or account dbfence does not manage")
+	}
 	if _, err := cur.DropUntrusted(model.EngineMySQL); err != nil {
 		return fmt.Errorf("inspect: %w", err)
 	}
@@ -245,10 +276,13 @@ func (d *Driver) dropUntrusted(cur *model.Current, desired *model.Desired) error
 // KeepRole implements diff.RoleKeeper. An account is kept when DROP USER
 // would change an account or database dbfence does not manage: it is
 // granted to or a default role of such an account, has such an account
-// as a granted or default role, or holds privileges on such a database.
+// as a granted or default role, holds privileges on such a database or
+// on tables, columns or routines in one, or may proxy such an account.
+// Table, column, routine and proxy privileges are only checked when
+// their tables are readable (Inspect warns otherwise).
 func (d *Driver) KeepRole(id model.RoleID, _ []string) string {
 	if d.keepRoles[id] {
-		return "is granted to, has as a granted or default role, or holds privileges on an account or database that dbfence does not manage (see its warning), which dropping it would change; handle it manually"
+		return "is granted to, has as a granted or default role, or holds privileges (also table, column, routine or PROXY privileges) on an account or database that dbfence does not manage (see its warning), which dropping it would change; handle it manually"
 	}
 	return ""
 }
@@ -513,6 +547,39 @@ func (d *Driver) inspectDefaultRoles(ctx context.Context, cur *model.Current) er
 		return nil
 	}
 	return err
+}
+
+// inspectGrantRefs reads the databases named by the rows of
+// mysql.tables_priv, columns_priv and procs_priv, and the proxied
+// accounts named by mysql.proxies_priv, into d.grantRefs. DROP USER
+// deletes these rows of the dropped account. A table that cannot be read
+// sets d.grantRefsUnreadable.
+func (d *Driver) inspectGrantRefs(ctx context.Context) error {
+	d.grantRefs, d.grantRefsUnreadable = nil, false
+	for _, q := range []string{
+		"SELECT DISTINCT User, LOWER(Host), Db, '', '' FROM mysql.tables_priv",
+		"SELECT DISTINCT User, LOWER(Host), Db, '', '' FROM mysql.columns_priv",
+		"SELECT DISTINCT User, LOWER(Host), Db, '', '' FROM mysql.procs_priv",
+		"SELECT DISTINCT User, LOWER(Host), '', Proxied_user, LOWER(Proxied_host) FROM mysql.proxies_priv",
+	} {
+		proxy := strings.Contains(q, "proxies_priv")
+		err := query(ctx, d.db, q, func(r *sql.Rows) error {
+			g := grantRef{proxy: proxy}
+			if err := r.Scan(&g.account.Name, &g.account.Host, &g.database, &g.proxied.Name, &g.proxied.Host); err != nil {
+				return err
+			}
+			d.grantRefs = append(d.grantRefs, g)
+			return nil
+		})
+		if isAccessDenied(err) {
+			d.grantRefsUnreadable = true
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dbPrivilegeColumns maps mysql.db columns to privilege names.
