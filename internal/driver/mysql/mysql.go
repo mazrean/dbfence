@@ -364,14 +364,19 @@ func roleWarnings(desired *model.Desired, cur *model.Current, plugins []string) 
 	}
 	var warns []string
 	for _, r := range desired.Roles {
+		r = withIAM(r)
 		if r.AuthPlugin != "" && plugins != nil && !slices.ContainsFunc(plugins, func(p string) bool { return strings.EqualFold(p, r.AuthPlugin) }) {
 			hint := ""
 			if strings.EqualFold(r.AuthPlugin, password.PluginNative) {
 				hint = " (MySQL 8.4 loads it only with --mysql-native-password=ON)"
 			}
+			if r.IAM == model.AuthAWSIAM {
+				warns = append(warns, fmt.Sprintf("aws_iam of %q needs the %s authentication plugin, which is not active on the server (enable IAM database authentication on the RDS instance); creating or changing the account will fail", r.ID, awsAuthPlugin))
+				continue
+			}
 			warns = append(warns, fmt.Sprintf("auth_plugin %q of %q is not an active authentication plugin on the server%s; creating or changing the account will fail", r.AuthPlugin, r.ID, hint))
 		}
-		if r.Login == nil || !*r.Login || r.Password != nil || (r.AuthPlugin != "" && !isPasswordPlugin(r.AuthPlugin)) {
+		if r.Login == nil || !*r.Login || r.Password != nil || r.IAM != "" || (r.AuthPlugin != "" && !isPasswordPlugin(r.AuthPlugin)) {
 			continue
 		}
 		i := slices.IndexFunc(cur.Roles, func(s model.RoleState) bool { return s.ID == r.ID })
@@ -1065,12 +1070,30 @@ func isPasswordPlugin(plugin string) bool {
 	return slices.ContainsFunc(passwordPlugins, func(p string) bool { return strings.EqualFold(p, plugin) })
 }
 
+// Amazon RDS IAM authentication: accounts identified with the plugin and
+// the authentication string "RDS" log in with IAM authentication tokens.
+const (
+	awsAuthPlugin = "AWSAuthenticationPlugin"
+	rdsAuthString = "RDS"
+)
+
+// withIAM returns r with the authentication plugin its IAM
+// authentication uses.
+func withIAM(r model.Role) model.Role {
+	if r.IAM == model.AuthAWSIAM {
+		r.AuthPlugin = awsAuthPlugin
+	}
+	return r
+}
+
 // identified renders the IDENTIFIED clause, or nil when neither a plugin
 // nor a password is set.
 func (d Dialect) identified(plugin string, pw *string) plan.Fragment {
 	switch {
 	case pw == nil && plugin == "":
 		return nil
+	case pw == nil && strings.EqualFold(plugin, awsAuthPlugin):
+		return plan.Keyword(" IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'")
 	case pw == nil:
 		return plan.Seq{plan.Keyword(" IDENTIFIED WITH "), Name(plugin)}
 	}
@@ -1088,6 +1111,7 @@ func (d Dialect) CreateRole(r model.Role) []plan.Statement {
 }
 
 func (d Dialect) createUser(verb plan.Keyword, r model.Role) []plan.Statement {
+	r = withIAM(r)
 	parts := plan.Seq{verb, d.Account(r.ID)}
 	var change plan.RoleChange
 	if id := d.identified(r.AuthPlugin, r.Password); id != nil {
@@ -1115,6 +1139,7 @@ func (d Dialect) EnsureRole(r model.Role) []plan.Statement {
 
 // AlterRole implements diff.Dialect.
 func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]plan.Statement, []string) {
+	r = withIAM(r)
 	setsPassword := plan.RoleChange{SetsPassword: true}
 	if cur.AttributesUnknown {
 		// Nothing can be compared; only an explicitly forced password is set.
@@ -1132,6 +1157,8 @@ func (d Dialect) AlterRole(r model.Role, cur model.RoleState, force bool) ([]pla
 	case r.Password == nil:
 		switch {
 		case !pluginChanged:
+			// Without "RDS" the plugin does not accept IAM tokens.
+			identify = strings.EqualFold(r.AuthPlugin, awsAuthPlugin) && string(cur.PasswordHash) != rdsAuthString
 		case isPasswordPlugin(r.AuthPlugin):
 			// Switching without BY would set an empty password.
 			warns = append(warns, fmt.Sprintf("auth_plugin of %q is %s, not %s, but no password is declared; declare one to change the plugin", r.ID, cur.AuthPlugin, r.AuthPlugin))

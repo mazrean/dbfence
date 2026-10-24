@@ -17,7 +17,9 @@ func TestCreateRolePlugin(t *testing.T) {
 		role model.Role
 	}{
 		{name: "plugin without password", role: model.Role{ID: app, AuthPlugin: "sha256_password"}, want: "CREATE USER 'app'@'%' IDENTIFIED WITH sha256_password"},
-		{name: "passwordless plugin", role: model.Role{ID: app, AuthPlugin: "AWSAuthenticationPlugin"}, want: "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin"},
+		{name: "passwordless plugin", role: model.Role{ID: app, AuthPlugin: "auth_socket"}, want: "CREATE USER 'app'@'%' IDENTIFIED WITH auth_socket"},
+		{name: "aws_iam", role: model.Role{ID: app, IAM: model.AuthAWSIAM}, want: "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"},
+		{name: "AWS plugin gets its authentication string", role: model.Role{ID: app, AuthPlugin: "awsauthenticationplugin"}, want: "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"},
 		{name: "plugin with password", role: model.Role{ID: app, AuthPlugin: "caching_sha2_password", Password: new("p")}, want: "CREATE USER 'app'@'%' IDENTIFIED WITH caching_sha2_password BY '<redacted>'"},
 		{
 			name: "plugin is quoted",
@@ -77,6 +79,11 @@ func TestRoleWarnings(t *testing.T) {
 			name: "inactive plugin", role: model.Role{ID: app, Login: new(true), Password: new("p"), AuthPlugin: "mysql_native_password"}, plugins: active,
 			want: []string{`auth_plugin "mysql_native_password" of "app"@"%" is not an active authentication plugin on the server (MySQL 8.4 loads it only with --mysql-native-password=ON)`},
 		},
+		{name: "aws_iam", role: model.Role{ID: app, Login: new(true), IAM: model.AuthAWSIAM}, plugins: []string{"AWSAuthenticationPlugin"}},
+		{
+			name: "aws_iam without the plugin", role: model.Role{ID: app, Login: new(true), IAM: model.AuthAWSIAM}, plugins: active,
+			want: []string{`aws_iam of "app"@"%" needs the AWSAuthenticationPlugin authentication plugin, which is not active on the server`},
+		},
 		{name: "unknown plugins", role: model.Role{ID: app, Login: new(true), Password: new("p"), AuthPlugin: "mysql_native_password"}},
 	}
 	for _, tt := range tests {
@@ -126,6 +133,28 @@ func TestAlterRolePlugin(t *testing.T) {
 			role: model.Role{ID: app, AuthPlugin: "mysql_native_password", Password: new("p")},
 			cur:  model.RoleState{ID: app, AuthPlugin: "caching_sha2_password"},
 			want: []string{"ALTER USER 'app'@'%' IDENTIFIED WITH mysql_native_password BY '<redacted>'"},
+		},
+		{
+			name: "aws_iam matches",
+			role: model.Role{ID: app, IAM: model.AuthAWSIAM},
+			cur:  model.RoleState{ID: app, AuthPlugin: "AWSAuthenticationPlugin", PasswordReadable: true, PasswordHash: []byte("RDS")},
+		},
+		{
+			name: "aws_iam switches a password account",
+			role: model.Role{ID: app, IAM: model.AuthAWSIAM},
+			cur:  model.RoleState{ID: app, AuthPlugin: "caching_sha2_password", PasswordReadable: true, PasswordHash: []byte("$A$005$x")},
+			want: []string{"ALTER USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"},
+		},
+		{
+			name: "aws_iam sets a missing authentication string",
+			role: model.Role{ID: app, IAM: model.AuthAWSIAM},
+			cur:  model.RoleState{ID: app, AuthPlugin: "AWSAuthenticationPlugin", PasswordReadable: true},
+			want: []string{"ALTER USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"},
+		},
+		{
+			name: "aws_iam with unknown attributes",
+			role: model.Role{ID: app, IAM: model.AuthAWSIAM},
+			cur:  model.RoleState{ID: app, AttributesUnknown: true},
 		},
 	}
 	for _, tt := range tests {

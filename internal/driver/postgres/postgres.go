@@ -454,6 +454,26 @@ func (Dialect) IsSystemRole(id model.RoleID) bool {
 		hasAnyPrefix(n, "pg_", "rds_", "cloudsql", "azure", "alloydb")
 }
 
+// rdsIAM is the Amazon RDS role whose members log in with IAM
+// authentication tokens.
+var rdsIAM = model.RoleID{Name: "rds_iam"}
+
+// cloudSQLIAM are the Cloud SQL roles of IAM users, service accounts and
+// groups, which only Cloud SQL grants.
+var cloudSQLIAM = []model.RoleID{{Name: "cloudsqliamgroup"}, {Name: "cloudsqliamserviceaccount"}, {Name: "cloudsqliamuser"}}
+
+// IAMRoles implements diff.IAMMembership.
+func (Dialect) IAMRoles(method model.AuthMethod) ([]model.RoleID, bool) {
+	switch method {
+	case model.AuthAWSIAM:
+		return []model.RoleID{rdsIAM}, true
+	case model.AuthGCPIAM:
+		return cloudSQLIAM, false
+	case model.AuthPassword:
+	}
+	return nil, false
+}
+
 // IsSystemDatabase implements diff.Dialect.
 func (Dialect) IsSystemDatabase(name string) bool {
 	return slices.Contains([]string{"postgres", "template0", "template1", "rdsadmin", "cloudsqladmin", "azure_maintenance", "azure_sys", "alloydbadmin"}, name)

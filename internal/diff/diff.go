@@ -76,6 +76,15 @@ type RoleKeeper interface {
 	KeepRole(id model.RoleID, databases []string) string
 }
 
+// IAMMembership is implemented by dialects on which a role logs in with
+// IAM authentication by being a member of a provider role (PostgreSQL:
+// rds_iam on Amazon RDS, cloudsqliam* on Cloud SQL). IAMRoles returns
+// those roles for method. When grant is false the provider grants them
+// and only they may be held: they are kept, never granted or revoked.
+type IAMMembership interface {
+	IAMRoles(method model.AuthMethod) (roles []model.RoleID, grant bool)
+}
+
 // PublicDefaulter is implemented by dialects whose new objects grant
 // privileges to PUBLIC (PostgreSQL). DefaultPublicPrivileges returns the
 // privileges PUBLIC holds on obj right after the plan creates it: obj is
@@ -134,6 +143,7 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 			return nil, err
 		}
 	}
+	df.addIAMMemberships()
 	df.warnUnreadable()
 	df.roles()
 	dropped := df.databases()
@@ -231,6 +241,16 @@ func (df *differ) checkReferences() error {
 		for _, m := range r.MemberOf {
 			check(df.roleResource(r.ID)+" member_of", m)
 		}
+		if _, exists := df.currentRole(r.ID); r.IAM == model.AuthGCPIAM && !exists {
+			missing = append(missing, fmt.Sprintf("%s gcp_iam: the Cloud SQL IAM user does not exist; create it with gcloud sql users create (--type=cloud_iam_user, cloud_iam_service_account or cloud_iam_group) or the Cloud SQL Admin API", df.roleResource(r.ID)))
+		}
+		if roles, grant := df.iamRoles(r); grant {
+			for _, m := range roles {
+				if !known(m) {
+					missing = append(missing, fmt.Sprintf("%s %s needs role %q, which does not exist: is IAM database authentication available on this server?", df.roleResource(r.ID), r.IAM, m))
+				}
+			}
+		}
 	}
 	for _, db := range df.desired.Databases {
 		check(fmt.Sprintf("database %q owner", db.Name), model.RoleID{Name: db.Owner})
@@ -242,6 +262,58 @@ func (df *differ) checkReferences() error {
 		return fmt.Errorf("invalid references:\n  %s", strings.Join(missing, "\n  "))
 	}
 	return nil
+}
+
+// iamRoles lists the roles r is a member of to log in with IAM, and
+// whether dbfence grants them (see IAMMembership).
+func (df *differ) iamRoles(r model.Role) ([]model.RoleID, bool) {
+	m, ok := df.d.(IAMMembership)
+	if !ok || r.IAM == "" {
+		return nil, false
+	}
+	return m.IAMRoles(r.IAM)
+}
+
+// addIAMMemberships adds the memberships that IAM authentication needs
+// to the desired roles. A role that does not manage member_of keeps its
+// current memberships, so that only the missing ones are granted.
+// Memberships the provider grants are added only when the role holds
+// them, so that member_of neither grants nor revokes them.
+func (df *differ) addIAMMemberships() {
+	var roles []model.Role
+	for i, r := range df.desired.Roles {
+		need, grant := df.iamRoles(r)
+		cur, _ := df.currentRole(r.ID)
+		if !grant {
+			if r.MemberOf == nil {
+				continue
+			}
+			need = slices.DeleteFunc(slices.Clone(need), func(m model.RoleID) bool { return !slices.Contains(cur.MemberOf, m) })
+		}
+		if len(need) == 0 {
+			continue
+		}
+		if roles == nil {
+			roles = slices.Clone(df.desired.Roles)
+		}
+		if r.MemberOf == nil {
+			r.MemberOf = slices.Clone(cur.MemberOf)
+		} else {
+			r.MemberOf = slices.Clone(r.MemberOf)
+		}
+		for _, m := range need {
+			if !slices.Contains(r.MemberOf, m) {
+				r.MemberOf = append(r.MemberOf, m)
+			}
+		}
+		model.SortRoleIDs(r.MemberOf)
+		roles[i] = r
+	}
+	if roles != nil {
+		d := *df.desired
+		d.Roles = roles
+		df.desired = &d
+	}
 }
 
 // warnUnreadable explains how missing read access changes the plan.
@@ -279,6 +351,11 @@ func (df *differ) roles() {
 			}
 		}
 		switch {
+		case !exists && r.IAM == model.AuthGCPIAM:
+			// Only the Cloud SQL Admin API creates it; checkReferences
+			// rejects a missing one when roles can be listed.
+			df.warn("cannot check that the Cloud SQL IAM user %q exists: it is not created, and its grants fail if it does not exist", df.show(r.ID))
+			cur = model.RoleState{ID: r.ID, AttributesUnknown: true}
 		case !exists && u.Roles:
 			// Existence is unknown: create idempotently and only apply
 			// what does not need the current state.
