@@ -36,7 +36,7 @@ On PostgreSQL the admin of Aurora and Cloud SQL is not a superuser, and both ser
 - The admin does not become a member of the roles it creates, so `createrole_self_grant` has no effect, yet it may still grant, revoke and drop them. On Cloud SQL its membership grants are recorded with the grantor `cloudsqladmin`.
 - It may not make those roles owners: `CREATE DATABASE ... OWNER` fails with `must be able to SET ROLE`, as dbfence's warning about the owner's privileges says. So the PostgreSQL scenario leaves `owner` out, and the admin owns the database and schemas. A configuration that hands databases to an owner role needs `GRANT <owner> TO <admin> WITH SET TRUE, INHERIT TRUE` first.
 - dbfence warns that `--prune` of those roles will fail at `REASSIGN OWNED` because the admin lacks their privileges, and it does fail for a role that still holds privileges in a database (`permission denied to reassign objects`). The scenario therefore takes the privileges away first (stage 2 revokes `e2e_migrator`'s `CONNECT`) and prunes the roles at cleanup in the same plan that drops their database, which needs no `REASSIGN OWNED`; `expected-warnings` lists the warning. Pruning a role that holds privileges on a database that stays needs `GRANT <role> TO <admin>` first.
-- On Cloud SQL dbfence does not revoke a membership granted by `cloudsqladmin` (`it needs superuser, since another role granted it`), so a `member_of` that drops such a membership is not applied. The scenario never revokes one; dropping the role at cleanup removes the IAM user's memberships.
+- On Cloud SQL the admin's membership grants are recorded with the grantor `cloudsqladmin`. A plain `REVOKE` by the admin removes them, which dbfence plans for a connected Cloud SQL admin user (a member of `cloudsqlsuperuser`); cleanup revokes the IAM user's memberships that way (`e2e/targets/gcp-postgres/cleanup.hcl`). Changing their options is still skipped with a warning (`it needs superuser, since another role granted it`).
 
 On plain PostgreSQL 16+ (the local target) the server grants every role a non-superuser creates to its creator, and `--prune` keeps roles granted to the connected user, so the `e2e_*` roles stay between local runs (also listed in `expected-warnings`).
 
@@ -168,7 +168,7 @@ Enable the APIs `run`, `sqladmin`, `secretmanager`, `artifactregistry`, `iamcred
 **Users and secrets**:
 
 - An admin `google_sql_user` per instance (type `BUILT_IN`) with a `random_password`, stored as a `google_secret_manager_secret_version` of a secret per engine (`DBFENCE_E2E_*_ADMIN_SECRET`). The payload is the bare password.
-- A `google_sql_user` of type `CLOUD_IAM_SERVICE_ACCOUNT` for the runtime service account on each instance. On PostgreSQL its `name` is the email without `.gserviceaccount.com`; on MySQL pass the email, and Cloud SQL names the database user after the part before `@`. dbfence never creates this user; the scenario grants it memberships (`e2e/targets/gcp-*/iam_user.hcl`) which go away with the `e2e_*` roles at cleanup.
+- A `google_sql_user` of type `CLOUD_IAM_SERVICE_ACCOUNT` for the runtime service account on each instance. On PostgreSQL its `name` is the email without `.gserviceaccount.com`; on MySQL pass the email, and Cloud SQL names the database user after the part before `@`. dbfence never creates this user; the scenario grants it memberships (`e2e/targets/gcp-*/iam_user.hcl`) and takes them away at cleanup.
 
 **Service accounts**:
 
