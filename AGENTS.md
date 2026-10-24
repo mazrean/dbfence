@@ -14,7 +14,7 @@ MySQL / PostgreSQL servers — databases, users/roles, memberships, grants, Post
 - Generate (kessoku DI): `mise run generate` (= `go generate ./...`)
 - Release: `mise run release:check` / `release:build` (snapshot) / `release:publish`
 - API compat: `mise run apicompat` (no-op: no public packages)
-- Run: `go run . plan -f dbfence.hcl`
+- Run: `go run . plan` (every `*.hcl` in the working directory; `-C DIR` for another directory)
 
 ## Tech Stack
 

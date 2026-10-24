@@ -31,12 +31,12 @@ func (r *observingReader) Read(p []byte) (int, error) {
 // output sink before the answer is read.
 func TestApplyPromptVisibleBeforeRead(t *testing.T) {
 	t.Parallel()
-	_, d, _, path := newApp(t, "")
+	_, d, _, dir := newApp(t, "")
 	var out strings.Builder
 	in := &observingReader{out: &out, answer: strings.NewReader("yes\n")}
 	w := secret.NewWriter(&out, secret.NewRegistry())
 	a := app.New(funcs.NewRegistry(t.Context()), fakeOpener{d}, &app.IO{In: in, Out: w, Err: w})
-	if err := a.Apply(t.Context(), app.Options{Path: path}); err != nil {
+	if err := a.Apply(t.Context(), app.Options{Dir: dir}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasSuffix(in.seen, "Apply these changes? Only 'yes' is accepted: ") {

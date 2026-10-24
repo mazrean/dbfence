@@ -19,14 +19,19 @@ go install github.com/mazrean/dbfence@latest
 ## Usage
 
 ```sh
-dbfence validate -f dbfence.hcl          # load and evaluate the configuration
-dbfence plan     -f dbfence.hcl          # dry run: print the SQL
-dbfence apply    -f dbfence.hcl          # print the SQL, ask for "yes", then execute
+dbfence validate          # load and evaluate every *.hcl file in the working directory
+dbfence plan              # dry run: print the SQL
+dbfence apply             # print the SQL, ask for "yes", then execute
+dbfence -C infra/db plan  # use the *.hcl files in infra/db instead
 ```
+
+Like Terraform, dbfence reads every `*.hcl` file directly in the directory
+(not in subdirectories) and merges them into one configuration, so other
+HCL files (Packer, Nomad, ...) must not share the directory.
 
 | Flag | Commands | Meaning |
 |---|---|---|
-| `-f`, `--file` (`$DBFENCE_FILE`) | all | A configuration file, or a directory of `*.hcl` files (default `dbfence.hcl`; an empty value also means the default) |
+| `-C`, `--chdir` (`$DBFENCE_CHDIR`) | all | The directory whose `*.hcl` files are the configuration (default `.`, the working directory; an empty value also means the default) |
 | `--prune` | plan, apply | Drop databases, schemas and roles that are not declared (without it they only produce warnings) |
 | `--force-password` | plan, apply | Set declared passwords even if they cannot be verified or already match. The plan then always contains a password statement for every role that declares one |
 | `--show-secrets` | plan, apply | Turn off all redaction: print passwords instead of `'<redacted>'`, and print known secrets in every message on stdout and stderr, errors included (see [Output and exit codes](#output-and-exit-codes)) |
