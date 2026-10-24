@@ -59,3 +59,48 @@ func TestIntegrationUntrustedNames(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationPruneKeepsRolesReachingUnmanaged checks against a real
+// server that --prune keeps roles whose REASSIGN OWNED or DROP OWNED would
+// change a schema with an unmanaged name in an undeclared database (read
+// without ignore.schemas), or a database Inspect does not read (here one
+// that refuses connections), and still drops a role without such objects.
+func TestIntegrationPruneKeepsRolesReachingUnmanaged(t *testing.T) {
+	t.Parallel()
+	s := startServer(t)
+	s.exec(t,
+		"CREATE ROLE owner_s", "CREATE ROLE holder_s", "CREATE ROLE owner_db", "CREATE ROLE plain",
+		`CREATE SCHEMA "evil`+"\x01"+`" AUTHORIZATION owner_s`,
+		`CREATE SCHEMA "evil`+"\x02"+`"`,
+		`GRANT USAGE ON SCHEMA "evil`+"\x02"+`" TO holder_s`,
+		`CREATE DATABASE "nc`+"\n"+`db" OWNER owner_db`,
+		`ALTER DATABASE "nc`+"\n"+`db" ALLOW_CONNECTIONS false`,
+		"CREATE DATABASE app",
+	)
+	d := s.open(t, "postgres")
+	desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app"}}}
+	cur, err := d.Inspect(t.Context(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := compute(t, desired, cur, d, diff.Options{Prune: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sqlOf(p.Statements())
+	warns := strings.Join(p.Warnings, "\n")
+	for _, role := range []string{"owner_s", "holder_s", "owner_db"} {
+		if strings.Contains(got, `OWNED BY "`+role+`"`) || strings.Contains(got, `DROP ROLE "`+role+`"`) {
+			t.Errorf("prune drops %s:\n%s\nwarnings:\n%s", role, got, warns)
+		}
+		if !strings.Contains(warns, `role "`+role+`" `) {
+			t.Errorf("warnings do not say why %s is kept:\n%s", role, warns)
+		}
+	}
+	if !strings.Contains(warns, `owns or has privileges on database "nc\ndb"`) {
+		t.Errorf("warnings do not name the database owner_db owns:\n%s", warns)
+	}
+	if !strings.Contains(got, `DROP ROLE "plain"`) {
+		t.Errorf("prune does not drop plain:\n%s\nwarnings:\n%s", got, warns)
+	}
+}

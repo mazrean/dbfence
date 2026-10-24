@@ -32,9 +32,16 @@ type state struct {
 	connectable map[string]bool
 	// owners maps databases (Schema "") and inspected schemas to owners.
 	owners map[model.Object]string
-	// otherOwners maps the schemas of other databases (read when ignore
-	// lists schemas, see inspectSchemaOwners) to owners.
+	// otherOwners maps the schemas of other databases (see
+	// inspectSchemaOwners) to owners.
 	otherOwners map[model.Object]string
+	// otherACL holds the schema privileges of those databases. Unlike
+	// acl, it is only used to keep roles from --prune.
+	otherACL []aclEntry
+	// shared holds the dependencies of roles on shared objects
+	// (pg_shdepend with dbid 0), which REASSIGN OWNED and DROP OWNED
+	// change from any database.
+	shared []sharedDep
 	// objects counts the objects in inspected schemas.
 	objects map[model.Object]int
 	roles   map[string]roleAccess
@@ -67,6 +74,13 @@ type aclEntry struct {
 	grantor   string
 	priv      string
 	grantable bool
+}
+
+// sharedDep is a dependency of role on a shared object: class is its
+// catalog (pg_database, pg_tablespace, ...), name the database or
+// tablespace name ("" for other catalogs).
+type sharedDep struct {
+	role, class, name string
 }
 
 // memberEntry is one pg_auth_members row.
@@ -102,7 +116,7 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	cur.Warnings = append(cur.Warnings, warns...)
 
 	steps := []func(context.Context, *model.Current, *state) error{
-		d.inspectDatabases, d.inspectRoles, d.inspectMembership, d.inspectDatabaseACL,
+		d.inspectDatabases, d.inspectRoles, d.inspectMembership, d.inspectDatabaseACL, d.inspectSharedDependencies,
 	}
 	for _, step := range steps {
 		if err := step(ctx, cur, st); err != nil {
@@ -135,14 +149,18 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		}
 		cur.InspectedDatabases = append(cur.InspectedDatabases, db.Name)
 	}
-	if len(desired.Ignore.Schemas) > 0 {
+	// Pruning a role runs REASSIGN OWNED and DROP OWNED in the other
+	// databases too, so their schemas are read when a role may be pruned
+	// or ignored schemas may be there.
+	ignoreRoles := compileIgnore(desired.Ignore.Roles)
+	if len(desired.Ignore.Schemas) > 0 || slices.ContainsFunc(cur.Roles, func(r model.RoleState) bool { return st.prunable(r.ID.Name, ignoreRoles) }) {
 		for _, db := range otherSchemaDatabases(desired, cur, st.connectable) {
-			ok, err := d.inspectSchemaOwners(ctx, cur, db)
+			ok, err := d.inspectSchemaOwners(ctx, cur, st, db)
 			if err != nil {
 				return nil, err
 			}
 			if !ok {
-				cur.Warnings = append(cur.Warnings, fmt.Sprintf("cannot connect to database %q: owners of ignored schemas there are not known", db))
+				cur.Warnings = append(cur.Warnings, fmt.Sprintf("cannot connect to database %q: owners of and privileges on its schemas are not known, so --prune does not run REASSIGN OWNED and DROP OWNED there", db))
 				delete(st.connectable, db)
 			}
 		}
@@ -645,6 +663,32 @@ func (d *Driver) inspectMembership(ctx context.Context, cur *model.Current, st *
 		})
 }
 
+// inspectSharedDependencies reads the dependencies of roles on shared
+// objects: the owners of and privileges on databases (also those that
+// inspectDatabases leaves out), tablespaces and, from PostgreSQL 15 on,
+// parameters. REASSIGN OWNED and DROP OWNED change them wherever they
+// run. Memberships (pg_auth_members, PostgreSQL 16+) are left out:
+// inspectMembership reads them. The catalog is named by classid so that
+// older servers, which lack some catalogs, accept the query.
+func (d *Driver) inspectSharedDependencies(ctx context.Context, _ *model.Current, st *state) error {
+	return query(ctx, d.db, `SELECT DISTINCT r.rolname, s.classid::regclass::text, coalesce(db.datname, ts.spcname, '')
+		FROM pg_shdepend s
+		JOIN pg_roles r ON r.oid = s.refobjid
+		LEFT JOIN pg_database db ON s.classid = 'pg_database'::regclass AND db.oid = s.objid
+		LEFT JOIN pg_tablespace ts ON s.classid = 'pg_tablespace'::regclass AND ts.oid = s.objid
+		WHERE s.refclassid = 'pg_authid'::regclass AND s.dbid = 0 AND s.deptype <> 'p'
+			AND s.classid <> 'pg_auth_members'::regclass
+		ORDER BY 1, 2, 3`,
+		func(rows *sql.Rows) error {
+			var e sharedDep
+			if err := rows.Scan(&e.role, &e.class, &e.name); err != nil {
+				return err
+			}
+			st.shared = append(st.shared, e)
+			return nil
+		})
+}
+
 func (d *Driver) inspectDatabaseACL(ctx context.Context, cur *model.Current, st *state) error {
 	listed := func(name string) bool {
 		return slices.ContainsFunc(cur.Databases, func(db model.Database) bool { return db.Name == name })
@@ -687,9 +731,10 @@ func (st *state) addACL(cur *model.Current, e aclEntry) {
 }
 
 // otherSchemaDatabases returns the connectable databases that are neither
-// declared nor ignored: pruning a role runs REASSIGN OWNED there, so the
-// owners of ignored schemas in them must be known (see
-// model.Current.OtherSchemas).
+// declared nor ignored: pruning a role runs REASSIGN OWNED and DROP OWNED
+// there, so the owners of their schemas (ignored ones, see
+// model.Current.OtherSchemas, and unmanaged ones) and the privileges on
+// them must be known.
 func otherSchemaDatabases(desired *model.Desired, cur *model.Current, connectable map[string]bool) []string {
 	ignoreDBs := compileIgnore(desired.Ignore.Databases)
 	var out []string
@@ -705,10 +750,12 @@ func otherSchemaDatabases(desired *model.Desired, cur *model.Current, connectabl
 }
 
 // inspectSchemaOwners reads the schemas and their owners of an undeclared
-// database into cur.OtherSchemas. It reports false when the database
-// cannot be connected to.
-func (d *Driver) inspectSchemaOwners(ctx context.Context, cur *model.Current, database string) (bool, error) {
+// database into cur.OtherSchemas, and the privileges on them into
+// st.otherACL. It reports false when the database cannot be connected to.
+// The connection is closed afterwards: the plan may drop the database.
+func (d *Driver) inspectSchemaOwners(ctx context.Context, cur *model.Current, st *state, database string) (bool, error) {
 	c, err := d.conn(ctx, database)
+	defer d.closeConn(database)
 	if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) &&
 		slices.Contains([]string{sqlstateInsufficientPrivilege, sqlstateInvalidAuthorization, sqlstateInvalidCatalogName}, pgErr.Code) {
 		return false, nil
@@ -729,8 +776,31 @@ func (d *Driver) inspectSchemaOwners(ctx context.Context, cur *model.Current, da
 	if err != nil {
 		return false, fmt.Errorf("schemas of database %q: %w", database, err)
 	}
+	err = query(ctx, c, schemaACLQuery, func(rows *sql.Rows) error {
+		e := aclEntry{obj: model.Object{Type: model.ObjectSchema, Database: database}}
+		if scanErr := rows.Scan(&e.obj.Schema, &e.grantee, &e.grantor, &e.priv, &e.grantable); scanErr != nil {
+			return scanErr
+		}
+		st.otherACL = append(st.otherACL, e)
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("schema privileges of database %q: %w", database, err)
+	}
 	return true, nil
 }
+
+// schemaACLQuery reads the privileges on the schemas of the connected
+// database.
+const schemaACLQuery = `SELECT n.nspname, CASE WHEN a.grantee = 0 THEN 'public' ELSE r.rolname END,
+		g.rolname, a.privilege_type, a.is_grantable
+	FROM pg_namespace n
+	CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
+	LEFT JOIN pg_roles r ON r.oid = a.grantee
+	JOIN pg_roles g ON g.oid = a.grantor
+	WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
+		AND (a.grantee = 0 OR r.oid IS NOT NULL)
+	ORDER BY 1, 2, 4, 3`
 
 // inspectSchemas reads the schemas of database. It reports false when the
 // database cannot be connected to.
@@ -763,15 +833,7 @@ func (d *Driver) inspectSchemas(ctx context.Context, cur *model.Current, st *sta
 		}); err != nil {
 		return false, err
 	}
-	return true, query(ctx, c, `SELECT n.nspname, CASE WHEN a.grantee = 0 THEN 'public' ELSE r.rolname END,
-			g.rolname, a.privilege_type, a.is_grantable
-		FROM pg_namespace n
-		CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
-		LEFT JOIN pg_roles r ON r.oid = a.grantee
-		JOIN pg_roles g ON g.oid = a.grantor
-		WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
-			AND (a.grantee = 0 OR r.oid IS NOT NULL)
-		ORDER BY 1, 2, 4, 3`,
+	return true, query(ctx, c, schemaACLQuery,
 		func(rows *sql.Rows) error {
 			e := aclEntry{obj: model.Object{Type: model.ObjectSchema, Database: database}}
 			if err := rows.Scan(&e.obj.Schema, &e.grantee, &e.grantor, &e.priv, &e.grantable); err != nil {

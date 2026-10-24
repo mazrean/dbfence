@@ -348,6 +348,18 @@ func withDetail(err error) error {
 	return err
 }
 
+// closeConn closes the connection to database that conn opened, so that
+// it does not keep the plan from dropping that database. A later conn
+// opens it again.
+func (d *Driver) closeConn(database string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if c, ok := d.conns[database]; ok {
+		_ = c.Close()
+		delete(d.conns, database)
+	}
+}
+
 // Close implements driver.Driver.
 func (d *Driver) Close() error {
 	d.mu.Lock()

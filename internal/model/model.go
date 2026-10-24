@@ -291,8 +291,9 @@ type Current struct {
 	InspectedDatabases []string
 	// OtherSchemas lists the schemas, with their owners only, of the
 	// undeclared databases where pruning a role runs REASSIGN OWNED
-	// (PostgreSQL only, read only when ignore lists schema patterns), so
-	// that --prune keeps the owners of ignored schemas there.
+	// (PostgreSQL only, read when ignore lists schema patterns or a role
+	// may be pruned), so that --prune keeps the owners of ignored schemas
+	// there.
 	OtherSchemas []Schema
 	// CurrentDatabase is the database dbfence is connected to
 	// (PostgreSQL only). It is never pruned.

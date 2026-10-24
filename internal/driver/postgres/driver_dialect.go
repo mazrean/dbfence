@@ -45,15 +45,47 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 // schema with such a name): DROP ROLE removes its memberships and its
 // members, REASSIGN OWNED changes the owner of what it owns, and DROP
 // OWNED revokes what it holds and, with CASCADE, what it granted,
-// directly or through other roles.
+// directly or through other roles. Both also change the shared objects it
+// owns or has privileges on, from whichever database they run in, so a
+// role is also kept when those include a tablespace or parameter, or a
+// database that Inspect did not read (templates and databases that refuse
+// connections, unless declared).
 func (d *Driver) KeepRole(id model.RoleID, databases []string) string {
 	if d.st == nil {
 		return ""
+	}
+	if what := d.st.unmanagedShared(id.Name); len(what) > 0 {
+		return "owns or has privileges on " + strings.Join(what, ", ") + ", which dbfence does not manage, and dropping it would change them; handle it manually"
 	}
 	if d.st.dropReachesUnmanaged(id.Name, slices.ContainsFunc(databases, func(db string) bool { return d.st.connectable[db] })) {
 		return "owns, holds or granted something that names a role, database or schema dbfence does not manage (see its warning), or granted privileges or memberships (directly or through other roles) to such a role, which dropping it would change; handle it manually"
 	}
 	return ""
+}
+
+// unmanagedShared names the shared objects role depends on that dbfence
+// neither manages nor inspected: databases missing from st.owners,
+// tablespaces and the entries of other shared catalogs.
+func (st *state) unmanagedShared(role string) []string {
+	var out []string
+	for _, e := range st.shared {
+		var what string
+		switch e.class {
+		case "pg_database":
+			if _, ok := st.owners[model.Object{Type: model.ObjectDatabase, Database: e.name}]; ok {
+				continue
+			}
+			what = fmt.Sprintf("database %q", e.name)
+		case "pg_tablespace":
+			what = fmt.Sprintf("tablespace %q", e.name)
+		default:
+			what = fmt.Sprintf("an entry of %s", e.class)
+		}
+		if e.role == role && !slices.Contains(out, what) {
+			out = append(out, what)
+		}
+	}
+	return out
 }
 
 // dropReachesUnmanaged reports whether dropping role changes something
@@ -63,6 +95,7 @@ func (d *Driver) KeepRole(id model.RoleID, databases []string) string {
 // or, when DROP OWNED runs (owned), a privilege or (PostgreSQL 16+)
 // membership granted by role, directly or transitively, to such a role
 // or in such a role. Grants on objects role owns survive REASSIGN OWNED.
+// Schemas of undeclared databases (otherOwners, otherACL) count too.
 func (st *state) dropReachesUnmanaged(role string, owned bool) bool {
 	if slices.ContainsFunc(st.members, func(e memberEntry) bool {
 		return (e.role == role || e.member == role) && (unmanagedRole(e.role) || unmanagedRole(e.member) || unmanagedRole(e.grantor))
@@ -76,24 +109,32 @@ func (st *state) dropReachesUnmanaged(role string, owned bool) bool {
 			}
 		}
 	}
-	if slices.ContainsFunc(st.acl, func(e aclEntry) bool {
-		return (e.grantee == role || e.grantor == role) && unmanagedObject(e.obj) || e.grantee == role && unmanagedRole(e.grantor)
-	}) {
-		return true
+	for _, l := range []struct {
+		owners map[model.Object]string
+		acl    []aclEntry
+	}{{st.owners, st.acl}, {st.otherOwners, st.otherACL}} {
+		if slices.ContainsFunc(l.acl, func(e aclEntry) bool {
+			return (e.grantee == role || e.grantor == role) && unmanagedObject(e.obj) || e.grantee == role && unmanagedRole(e.grantor)
+		}) {
+			return true
+		}
+		if !owned {
+			continue
+		}
+		privs := map[model.Object][]string{}
+		for _, e := range l.acl {
+			if e.grantor == role && e.grantee != role && l.owners[e.obj] != role && !slices.Contains(privs[e.obj], e.priv) {
+				privs[e.obj] = append(privs[e.obj], e.priv)
+			}
+		}
+		for obj, ps := range privs {
+			if anyUnmanaged(aclDependents(l.acl, obj, role, ps)) {
+				return true
+			}
+		}
 	}
 	if !owned {
 		return false
-	}
-	privs := map[model.Object][]string{}
-	for _, e := range st.acl {
-		if e.grantor == role && e.grantee != role && st.owners[e.obj] != role && !slices.Contains(privs[e.obj], e.priv) {
-			privs[e.obj] = append(privs[e.obj], e.priv)
-		}
-	}
-	for obj, ps := range privs {
-		if anyUnmanaged(st.aclDependents(obj, role, ps)) {
-			return true
-		}
 	}
 	return st.version >= pg16 && slices.ContainsFunc(st.members, func(e memberEntry) bool {
 		return e.grantor == role && (unmanagedRole(e.role) || anyUnmanaged(st.memberDependents(role, e.role)))
@@ -624,12 +665,17 @@ func (st *state) heldOn(role string, obj model.Object) []string {
 // aclDependents returns the roles that hold privs on obj through grants
 // made, directly or transitively, by grantee.
 func (st *state) aclDependents(obj model.Object, grantee string, privs []string) []string {
+	return aclDependents(st.acl, obj, grantee, privs)
+}
+
+// aclDependents is state.aclDependents over the entries acl.
+func aclDependents(acl []aclEntry, obj model.Object, grantee string, privs []string) []string {
 	var out []string
 	queue := []string{grantee}
 	for len(queue) > 0 {
 		grantor := queue[0]
 		queue = queue[1:]
-		for _, e := range st.acl {
+		for _, e := range acl {
 			if e.obj == obj && e.grantor == grantor && e.grantee != grantee && slices.Contains(privs, e.priv) && !slices.Contains(out, e.grantee) {
 				out = append(out, e.grantee)
 				queue = append(queue, e.grantee)
