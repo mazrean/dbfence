@@ -24,7 +24,7 @@ The workflow runs on pushes to `main` that touch Go code or `e2e/`, on demand (`
 |---|---|---|
 | cleanup | admin (password from Secrets Manager / Secret Manager) | `plan --prune` (retried while Aurora resumes from 0 ACU), `apply --prune` |
 | stage1 | admin | `apply --target user.e2e_app`, then `apply`: roles, users with passwords, an IAM user, a database, schemas (PostgreSQL), memberships with options, grants, PUBLIC revokes |
-| stage2 | admin | `apply --prune --force-password`: a password rotation, changed attributes and grants, a dropped user |
+| stage2 | admin | `apply --prune --force-password`: a password rotation, changed attributes, memberships and grants (MySQL also drops a user) |
 | login | `e2e_app` with the rotated password | `plan` with nothing declared |
 | iam | the IAM database user, with an RDS IAM token / a Google access token | `plan` with nothing declared |
 | cleanup | admin | `apply --prune` |
@@ -35,7 +35,7 @@ On PostgreSQL the admin of Aurora and Cloud SQL is not a superuser, and both ser
 
 - The admin does not become a member of the roles it creates, so `createrole_self_grant` has no effect, yet it may still grant, revoke and drop them. On Cloud SQL its membership grants are recorded with the grantor `cloudsqladmin`.
 - It may not make those roles owners: `CREATE DATABASE ... OWNER` fails with `must be able to SET ROLE`, as dbfence's warning about the owner's privileges says. So the PostgreSQL scenario leaves `owner` out, and the admin owns the database and schemas. A configuration that hands databases to an owner role needs `GRANT <owner> TO <admin> WITH SET TRUE, INHERIT TRUE` first.
-- dbfence warns that `--prune` of those roles will fail at `REASSIGN OWNED` because the admin lacks their privileges. They own nothing, so the drop succeeds; `expected-warnings` lists the warning.
+- dbfence warns that `--prune` of those roles will fail at `REASSIGN OWNED` because the admin lacks their privileges, and it does fail for a role that still holds privileges in a database (`permission denied to reassign objects`). The scenario therefore takes the privileges away first (stage 2 revokes `e2e_migrator`'s `CONNECT`) and prunes the roles at cleanup in the same plan that drops their database, which needs no `REASSIGN OWNED`; `expected-warnings` lists the warning. Pruning a role that holds privileges on a database that stays needs `GRANT <role> TO <admin>` first.
 - On Cloud SQL dbfence does not revoke a membership granted by `cloudsqladmin` (`it needs superuser, since another role granted it`), so a `member_of` that drops such a membership is not applied. The scenario never revokes one; dropping the role at cleanup removes the IAM user's memberships.
 
 On plain PostgreSQL 16+ (the local target) the server grants every role a non-superuser creates to its creator, and `--prune` keeps roles granted to the connected user, so the `e2e_*` roles stay between local runs (also listed in `expected-warnings`).
