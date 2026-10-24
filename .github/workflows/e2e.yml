@@ -132,15 +132,9 @@ jobs:
           DBFENCE_E2E_ENGINE: ${{ matrix.engine }}
           DBFENCE_E2E_IMAGE: ${{ needs.aws-image.outputs.image }}
           DBFENCE_E2E_ECS_CLUSTER: ${{ vars.DBFENCE_E2E_ECS_CLUSTER }}
-          DBFENCE_E2E_ECS_EXECUTION_ROLE_ARN: ${{ vars.DBFENCE_E2E_ECS_EXECUTION_ROLE_ARN }}
-          DBFENCE_E2E_ECS_TASK_ROLE_ARN: ${{ vars.DBFENCE_E2E_ECS_TASK_ROLE_ARN }}
-          DBFENCE_E2E_ECS_SUBNETS: ${{ vars.DBFENCE_E2E_ECS_SUBNETS }}
-          DBFENCE_E2E_ECS_SECURITY_GROUPS: ${{ vars.DBFENCE_E2E_ECS_SECURITY_GROUPS }}
-          DBFENCE_E2E_ECS_ASSIGN_PUBLIC_IP: ${{ vars.DBFENCE_E2E_ECS_ASSIGN_PUBLIC_IP }}
-          DBFENCE_E2E_ECS_LOG_GROUP: ${{ vars.DBFENCE_E2E_ECS_LOG_GROUP }}
-          DBFENCE_E2E_HOST: ${{ vars[format('DBFENCE_E2E_{0}_HOST', matrix.prefix)] }}
-          DBFENCE_E2E_ADMIN_USER: ${{ vars[format('DBFENCE_E2E_{0}_ADMIN_USER', matrix.prefix)] }}
-          DBFENCE_E2E_ADMIN_SECRET: ${{ vars[format('DBFENCE_E2E_{0}_ADMIN_SECRET', matrix.prefix)] }}
+          # The task and service definitions read the rest from the outputs
+          # in this Terraform state.
+          DBFENCE_E2E_TFSTATE_URL: ${{ vars.DBFENCE_E2E_TFSTATE_URL }}
 
   gcp-image:
     needs: build

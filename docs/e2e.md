@@ -11,7 +11,7 @@ build ──► aws-image (ECR) ──► aws  [postgres, mysql]: ecspresso run 
 
 1. `build` compiles a static linux/amd64 `dbfence` with the repository's toolchain.
 2. `aws-image` and `gcp-image` build [`e2e/Dockerfile`](../e2e/Dockerfile) (the binary, [`e2e/run.sh`](../e2e/run.sh), the scenario and the RDS CA bundle) and push it to ECR and Artifact Registry, tagged `<commit>-<run attempt>`.
-3. `aws` runs `ecspresso run --config e2e/aws/ecspresso.yml` once per engine. ecspresso registers a task definition revision, starts the task with the network configuration of the local service definition (there is no ECS service), streams its CloudWatch Logs and fails when the container exits non-zero.
+3. `aws` runs `ecspresso run --config e2e/aws/ecspresso.yml` once per engine. The task and service definitions read the ARNs, subnets, endpoints and so on from the Terraform outputs in the state ([tfstate plugin](https://github.com/kayac/ecspresso#plugins)). ecspresso registers a task definition revision, starts the task with the network configuration of the local service definition (there is no ECS service), streams its CloudWatch Logs and fails when the container exits non-zero.
 4. `gcp` starts the Cloud SQL instance of the engine (`gcloud sql instances patch --activation-policy ALWAYS`, which returns once it runs), deploys the Cloud Run job `dbfence-e2e-<engine>` with the new image, runs it with `gcloud run jobs execute --wait` and prints the execution's logs. Finally it stops the instance again (`--activation-policy NEVER`), also when the run failed or was cancelled, so the instances cost only storage between runs.
 
 The workflow runs on pushes to `main` that touch Go code or `e2e/`, weekly, and on demand. Runs against the same server are serialized (`concurrency`), because the scenario uses fixed names.
@@ -52,7 +52,7 @@ Use the [`integrations/github`](https://registry.terraform.io/providers/integrat
 - `github_repository_environment` `e2e-aws` and `e2e-gcp`. Restrict deployments to the `main` branch (`deployment_branch_policy`), since the cloud credentials trust these environments.
 - `github_actions_environment_variable` for every row below. Create the variable after its environment (`depends_on`, or reference `github_repository_environment.*.environment`).
 
-No GitHub secrets are needed: the workflow authenticates with OIDC (no long-lived keys), and the database passwords stay in Secrets Manager / Secret Manager, which the tasks read themselves. The variables hold only names, ARNs and addresses.
+No GitHub secrets are needed: the workflow authenticates with OIDC (no long-lived keys), and the database passwords stay in Secrets Manager / Secret Manager, which the tasks read themselves. The variables hold only names, ARNs and addresses. On AWS, what the ECS task needs is not copied into variables at all: ecspresso reads it from the Terraform state.
 
 ### `e2e-aws` variables
 
@@ -61,19 +61,29 @@ No GitHub secrets are needed: the workflow authenticates with OIDC (no long-live
 | `AWS_REGION` | Region of every resource below | — |
 | `AWS_ROLE_ARN` | Role the workflow assumes with OIDC | `aws_iam_role.github.arn` |
 | `DBFENCE_E2E_ECR_REPOSITORY` | Repository URI, without tag | `aws_ecr_repository.e2e.repository_url` |
-| `DBFENCE_E2E_ECS_CLUSTER` | Cluster name | `aws_ecs_cluster.e2e.name` |
-| `DBFENCE_E2E_ECS_EXECUTION_ROLE_ARN` | Task execution role | `aws_iam_role.execution.arn` |
-| `DBFENCE_E2E_ECS_TASK_ROLE_ARN` | Task role | `aws_iam_role.task.arn` |
-| `DBFENCE_E2E_ECS_SUBNETS` | Comma-separated subnet IDs for the task | `join(",", ...)` |
-| `DBFENCE_E2E_ECS_SECURITY_GROUPS` | Comma-separated security group IDs for the task | `join(",", ...)` |
-| `DBFENCE_E2E_ECS_ASSIGN_PUBLIC_IP` | `ENABLED` in public subnets, `DISABLED` (default) behind NAT or VPC endpoints | — |
-| `DBFENCE_E2E_ECS_LOG_GROUP` | CloudWatch Logs group of the task | `aws_cloudwatch_log_group.e2e.name` |
-| `DBFENCE_E2E_POSTGRES_HOST` | Writer endpoint of the PostgreSQL cluster | `aws_rds_cluster.postgres.endpoint` |
-| `DBFENCE_E2E_POSTGRES_ADMIN_USER` | Master user name | `aws_rds_cluster.postgres.master_username` |
-| `DBFENCE_E2E_POSTGRES_ADMIN_SECRET` | ARN of the master user secret | `aws_rds_cluster.postgres.master_user_secret[0].secret_arn` |
-| `DBFENCE_E2E_MYSQL_HOST` | Writer endpoint of the MySQL cluster | `aws_rds_cluster.mysql.endpoint` |
-| `DBFENCE_E2E_MYSQL_ADMIN_USER` | Master user name | `aws_rds_cluster.mysql.master_username` |
-| `DBFENCE_E2E_MYSQL_ADMIN_SECRET` | ARN of the master user secret | `aws_rds_cluster.mysql.master_user_secret[0].secret_arn` |
+| `DBFENCE_E2E_ECS_CLUSTER` | Cluster name. `ecspresso.yml` is rendered before its plugins are set up, so the cluster cannot come from the state | `aws_ecs_cluster.e2e.name` |
+| `DBFENCE_E2E_TFSTATE_URL` | URL of the Terraform state that holds the outputs below, for example `s3://<bucket>/<key>` (with workspaces: `s3://<bucket>/env:/<workspace>/<key>`) | the backend configuration |
+
+### Terraform outputs read by ecspresso
+
+The root module of the state at `DBFENCE_E2E_TFSTATE_URL` must define these outputs. [`e2e/aws/ecs-task-def.jsonnet`](../e2e/aws/ecs-task-def.jsonnet) and [`ecs-service-def.jsonnet`](../e2e/aws/ecs-service-def.jsonnet) read them with `tfstate('output.<name>')`.
+
+| Output | Type | Value |
+|---|---|---|
+| `ecs_execution_role_arn` | string | `aws_iam_role.execution.arn` |
+| `ecs_task_role_arn` | string | `aws_iam_role.task.arn` |
+| `ecs_task_subnet_ids` | list(string) | Subnets of the task |
+| `ecs_task_security_group_ids` | list(string) | Security groups of the task |
+| `ecs_task_assign_public_ip` | string | `ENABLED` in public subnets, `DISABLED` behind NAT or VPC endpoints |
+| `ecs_log_group_name` | string | `aws_cloudwatch_log_group.e2e.name` |
+| `postgres_endpoint` | string | `aws_rds_cluster.postgres.endpoint` |
+| `postgres_master_username` | string | `aws_rds_cluster.postgres.master_username` |
+| `postgres_master_user_secret_arn` | string | `aws_rds_cluster.postgres.master_user_secret[0].secret_arn` |
+| `mysql_endpoint` | string | `aws_rds_cluster.mysql.endpoint` |
+| `mysql_master_username` | string | `aws_rds_cluster.mysql.master_username` |
+| `mysql_master_user_secret_arn` | string | `aws_rds_cluster.mysql.master_user_secret[0].secret_arn` |
+
+The GitHub role reads the whole state file, so keep the e2e resources in a state of their own, without unrelated secrets: anything in it (including `sensitive` outputs and resource attributes) is readable by the workflow. With `manage_master_user_password` the master passwords are not in the state.
 
 ### AWS resources
 
@@ -90,7 +100,7 @@ No GitHub secrets are needed: the workflow authenticates with OIDC (no long-live
 
 - `aws_ecs_cluster` (Fargate; no capacity provider configuration needed). No service and no task definition: ecspresso registers the task definition `dbfence-e2e-<engine>` on every run.
 - `aws_cloudwatch_log_group` for the task (for example 14 days retention).
-- Task subnets that reach the clusters and also ECR, CloudWatch Logs, Secrets Manager and STS: public subnets with `DBFENCE_E2E_ECS_ASSIGN_PUBLIC_IP = ENABLED`, or private subnets with a NAT gateway or VPC endpoints (`ecr.api`, `ecr.dkr`, `s3` gateway, `logs`, `secretsmanager`, `sts`).
+- Task subnets that reach the clusters and also ECR, CloudWatch Logs, Secrets Manager and STS: public subnets with `ecs_task_assign_public_ip = "ENABLED"`, or private subnets with a NAT gateway or VPC endpoints (`ecr.api`, `ecr.dkr`, `s3` gateway, `logs`, `secretsmanager`, `sts`).
 - A security group for the task with outbound HTTPS and the database ports.
 
 **ECR**: `aws_ecr_repository` (for example `dbfence-e2e`), with a lifecycle policy that expires old images. Every run pushes a new tag, so tag immutability may be on.
@@ -105,7 +115,8 @@ No GitHub secrets are needed: the workflow authenticates with OIDC (no long-live
   - `ecr:GetAuthorizationToken` (resource `*`), and `ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, `ecr:PutImage`, `ecr:BatchGetImage` on the repository;
   - `ecs:RegisterTaskDefinition`, `ecs:DescribeTaskDefinition`, `ecs:ListTaskDefinitions`, `ecs:TagResource` (resource `*`), and `ecs:RunTask`, `ecs:DescribeTasks`, `ecs:StopTask`, `ecs:DescribeClusters` on the cluster and its tasks;
   - `iam:PassRole` on the execution and task roles (condition `iam:PassedToService` = `ecs-tasks.amazonaws.com`);
-  - `logs:GetLogEvents`, `logs:FilterLogEvents`, `logs:DescribeLogStreams` on the log group, so that ecspresso can stream the output.
+  - `logs:GetLogEvents`, `logs:FilterLogEvents`, `logs:DescribeLogStreams` on the log group, so that ecspresso can stream the output;
+  - `s3:GetObject` on the state object (and `kms:Decrypt` on its key if the bucket uses SSE-KMS), for the tfstate plugin.
 
 ### `e2e-gcp` variables
 
@@ -193,18 +204,7 @@ locals {
     AWS_ROLE_ARN                        = aws_iam_role.github.arn
     DBFENCE_E2E_ECR_REPOSITORY          = aws_ecr_repository.e2e.repository_url
     DBFENCE_E2E_ECS_CLUSTER             = aws_ecs_cluster.e2e.name
-    DBFENCE_E2E_ECS_EXECUTION_ROLE_ARN  = aws_iam_role.execution.arn
-    DBFENCE_E2E_ECS_TASK_ROLE_ARN       = aws_iam_role.task.arn
-    DBFENCE_E2E_ECS_SUBNETS             = join(",", var.task_subnet_ids)
-    DBFENCE_E2E_ECS_SECURITY_GROUPS     = aws_security_group.task.id
-    DBFENCE_E2E_ECS_ASSIGN_PUBLIC_IP    = "DISABLED"
-    DBFENCE_E2E_ECS_LOG_GROUP           = aws_cloudwatch_log_group.e2e.name
-    DBFENCE_E2E_POSTGRES_HOST           = aws_rds_cluster.postgres.endpoint
-    DBFENCE_E2E_POSTGRES_ADMIN_USER     = aws_rds_cluster.postgres.master_username
-    DBFENCE_E2E_POSTGRES_ADMIN_SECRET   = aws_rds_cluster.postgres.master_user_secret[0].secret_arn
-    DBFENCE_E2E_MYSQL_HOST              = aws_rds_cluster.mysql.endpoint
-    DBFENCE_E2E_MYSQL_ADMIN_USER        = aws_rds_cluster.mysql.master_username
-    DBFENCE_E2E_MYSQL_ADMIN_SECRET      = aws_rds_cluster.mysql.master_user_secret[0].secret_arn
+    DBFENCE_E2E_TFSTATE_URL             = "s3://${var.state_bucket}/${var.state_key}"
   }
 }
 
@@ -218,3 +218,21 @@ resource "github_actions_environment_variable" "e2e_aws" {
 ```
 
 `e2e-gcp` follows the same pattern with the variables of its table.
+
+### Example: outputs for ecspresso
+
+```hcl
+output "ecs_execution_role_arn" { value = aws_iam_role.execution.arn }
+output "ecs_task_role_arn" { value = aws_iam_role.task.arn }
+output "ecs_task_subnet_ids" { value = var.task_subnet_ids }
+output "ecs_task_security_group_ids" { value = [aws_security_group.task.id] }
+output "ecs_task_assign_public_ip" { value = "DISABLED" }
+output "ecs_log_group_name" { value = aws_cloudwatch_log_group.e2e.name }
+
+output "postgres_endpoint" { value = aws_rds_cluster.postgres.endpoint }
+output "postgres_master_username" { value = aws_rds_cluster.postgres.master_username }
+output "postgres_master_user_secret_arn" { value = aws_rds_cluster.postgres.master_user_secret[0].secret_arn }
+output "mysql_endpoint" { value = aws_rds_cluster.mysql.endpoint }
+output "mysql_master_username" { value = aws_rds_cluster.mysql.master_username }
+output "mysql_master_user_secret_arn" { value = aws_rds_cluster.mysql.master_user_secret[0].secret_arn }
+```
