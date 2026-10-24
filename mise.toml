@@ -46,9 +46,10 @@ run = [
 description = "Run the project linter for every released GOOS/GOARCH"
 # Lint sees only the files built for its GOOS/GOARCH, so it runs once per
 # target in .goreleaser.yaml, with its CGO_ENABLED=0, and once for the host
-# with cgo. The linter is built
-# once for the host (go tool -n, without GOOS set) and that binary loads the
-# packages for each target.
+# with cgo. The linter is built once for the host (go tool -n, without GOOS
+# set) and runs under go vet, which checks one package at a time from
+# compiled export data: run directly, it type-checks every dependency from
+# source at once and needs about 9 GB, more than CI runners can spare.
 run = '''
 set -eu
 lint=$(go tool -n lint)
@@ -56,14 +57,14 @@ status=0
 for goos in linux darwin windows; do
   for goarch in amd64 arm64; do
     echo "lint: $goos/$goarch" >&2
-    CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch "$lint" ./... || status=1
+    CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go vet -vettool="$lint" ./... || status=1
   done
 done
 # go install and go build use cgo when a C compiler is present, which adds
 # files constrained to cgo builds; lint the host build with cgo too.
 if command -v "$(go env CC)" >/dev/null 2>&1; then
   echo "lint: host with cgo" >&2
-  CGO_ENABLED=1 "$lint" ./... || status=1
+  CGO_ENABLED=1 go vet -vettool="$lint" ./... || status=1
 else
   echo "lint: no C compiler, cgo build not checked" >&2
   status=1
