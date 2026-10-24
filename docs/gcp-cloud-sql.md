@@ -80,22 +80,18 @@ To let dbfence itself connect with IAM on PostgreSQL, declare its user while con
 user "dbfence" {
   name       = "dbfence@my-project.iam"
   gcp_iam {}
-  member_of  = ["cloudsqlsuperuser"]   # the privileges of the admin users' group
-  createrole = true                    # role attributes are not inherited through
-  createdb   = true                    # cloudsqlsuperuser, so give them directly
+  member_of  = ["cloudsqlsuperuser"]
+  createrole = true   # role attributes are not inherited from cloudsqlsuperuser
+  createdb   = true
 }
 ```
 
 ## What to expect on Cloud SQL
 
-Checked on Cloud SQL for PostgreSQL and MySQL by the [end-to-end test](e2e.md).
-
-- The `postgres` user (and any built-in user, a member of `cloudsqlsuperuser`) is not a superuser, so dbfence cannot read password verifiers on PostgreSQL: plan prints one warning listing the roles whose passwords are not compared, and declared passwords are not set again. Run with `--force-password` to set (rotate) them. See [Passwords](passwords.md).
-- On PostgreSQL the admin user does not become a member of the roles it creates, unlike on plain PostgreSQL 16+, and `createrole_self_grant` has no effect. It may still alter, grant, revoke and drop them, but it lacks their privileges, which these changes need ([Required privileges](privileges.md)). dbfence plans them anyway, so `apply` fails:
-  - A database or schema whose `owner` is another role: `CREATE DATABASE ... OWNER` and `ALTER ... OWNER TO` fail with `must be able to SET ROLE`.
-  - `--prune` of a role that owns objects or holds privileges in a database: `REASSIGN OWNED` fails with `permission denied to reassign objects`. A role that holds nothing is dropped, despite the warning that `REASSIGN OWNED` will fail.
-
-  For both, run the `GRANT` that the warning names (`GRANT <role> TO <admin> WITH SET TRUE, INHERIT TRUE`) first, or leave such owners out and let the admin own databases and schemas.
-- On PostgreSQL, Cloud SQL records the memberships the admin grants with the grantor `cloudsqladmin`. dbfence revokes or changes a membership only as a superuser or as its grantor, so afterwards it does not revoke such a membership or change its `admin`, `inherit` or `set` options: a `member_of` that drops it, or changes them, is not applied, with a warning (`it needs superuser, since another role granted it`). Dropping the role (`--prune`) still removes its memberships. Revoke a membership by hand when it has to go.
+- The `postgres` user is not a superuser, so dbfence cannot read password verifiers on PostgreSQL: plan prints one warning listing the roles whose passwords are not compared, and declared passwords are not set again. Run with `--force-password` to set (rotate) them. See [Passwords](passwords.md).
+- On PostgreSQL the admin user is not a member of the roles it creates: it may alter, grant and drop them, but not act as them. Plan warns about the changes that need that, and they fail at `apply` unless you first run the `GRANT` the warning names (`GRANT <role> TO <admin user> WITH SET TRUE, INHERIT TRUE`):
+  - an `owner` other than the admin user (`must be able to SET ROLE`); or leave `owner` out, so that the admin user owns databases and schemas;
+  - `--prune` of a role that still owns objects or holds privileges (`permission denied to reassign objects`). A role that holds nothing is dropped despite the warning.
+- On PostgreSQL, Cloud SQL records the memberships the admin user grants as granted by `cloudsqladmin`, so dbfence cannot revoke them or change their options later: such a `member_of` change is skipped with a warning (`it needs superuser`). Dropping the role still removes them.
 - Other changes the connected user may not make are skipped with a warning; see [Required privileges](privileges.md).
 - Cloud SQL's own roles and databases (`cloudsql*`, `cloudsqladmin`) are never reported or pruned. See [Safety](safety.md#built-in-objects).

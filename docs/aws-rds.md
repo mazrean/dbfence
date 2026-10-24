@@ -44,9 +44,9 @@ The database user itself must log in with IAM. dbfence can create it (see [Users
 ```hcl
 user "dbfence" {
   aws_iam {}
-  member_of  = ["rds_superuser"]   # the privileges of the master user's group
-  createrole = true                # role attributes are not inherited through
-  createdb   = true                # rds_superuser, so give them directly
+  member_of  = ["rds_superuser"]
+  createrole = true   # role attributes are not inherited from rds_superuser
+  createdb   = true
 }
 ```
 
@@ -74,13 +74,9 @@ user "app" {
 
 ## What to expect on RDS
 
-Checked on Aurora PostgreSQL and Aurora MySQL by the [end-to-end test](e2e.md).
-
 - The master user is not a superuser, so dbfence cannot read password verifiers on PostgreSQL: plan prints one warning listing the roles whose passwords are not compared, and declared passwords are not set again. Run with `--force-password` to set (rotate) them. See [Passwords](passwords.md).
-- On PostgreSQL the master user does not become a member of the roles it creates, unlike on plain PostgreSQL 16+, and `createrole_self_grant` has no effect. It may still alter, grant, revoke and drop them, but it lacks their privileges, which these changes need ([Required privileges](privileges.md)). dbfence plans them anyway, so `apply` fails:
-  - A database or schema whose `owner` is another role: `CREATE DATABASE ... OWNER` and `ALTER ... OWNER TO` fail with `must be able to SET ROLE`.
-  - `--prune` of a role that owns objects or holds privileges in a database: `REASSIGN OWNED` fails with `permission denied to reassign objects`. A role that holds nothing is dropped, despite the warning that `REASSIGN OWNED` will fail.
-
-  For both, run the `GRANT` that the warning names (`GRANT <role> TO <master user> WITH SET TRUE, INHERIT TRUE`) first, or leave such owners out and let the master user own databases and schemas.
+- On PostgreSQL the master user is not a member of the roles it creates: it may alter, grant and drop them, but not act as them. Plan warns about the changes that need that, and they fail at `apply` unless you first run the `GRANT` the warning names (`GRANT <role> TO <master user> WITH SET TRUE, INHERIT TRUE`):
+  - an `owner` other than the master user (`must be able to SET ROLE`); or leave `owner` out, so that the master user owns databases and schemas;
+  - `--prune` of a role that still owns objects or holds privileges (`permission denied to reassign objects`). A role that holds nothing is dropped despite the warning.
 - Other changes the master user may not make are skipped with a warning; see [Required privileges](privileges.md).
 - RDS's own roles and databases (`rdsadmin`, `rds_*`, ...) are never reported or pruned. See [Safety](safety.md#built-in-objects).
