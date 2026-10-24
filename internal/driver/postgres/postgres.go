@@ -458,12 +458,20 @@ func (Dialect) IsSystemRole(id model.RoleID) bool {
 // authentication tokens.
 var rdsIAM = model.RoleID{Name: "rds_iam"}
 
+// cloudSQLIAM are the Cloud SQL roles of IAM users, service accounts and
+// groups, which only Cloud SQL grants.
+var cloudSQLIAM = []model.RoleID{{Name: "cloudsqliamgroup"}, {Name: "cloudsqliamserviceaccount"}, {Name: "cloudsqliamuser"}}
+
 // IAMRoles implements diff.IAMMembership.
-func (Dialect) IAMRoles(method model.AuthMethod) []model.RoleID {
-	if method == model.AuthAWSIAM {
-		return []model.RoleID{rdsIAM}
+func (Dialect) IAMRoles(method model.AuthMethod) ([]model.RoleID, bool) {
+	switch method {
+	case model.AuthAWSIAM:
+		return []model.RoleID{rdsIAM}, true
+	case model.AuthGCPIAM:
+		return cloudSQLIAM, false
+	case model.AuthPassword:
 	}
-	return nil
+	return nil, false
 }
 
 // IsSystemDatabase implements diff.Dialect.

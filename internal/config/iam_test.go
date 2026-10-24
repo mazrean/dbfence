@@ -23,6 +23,19 @@ func TestLoadRoleAWSIAM(t *testing.T) {
 	}
 }
 
+func TestLoadRoleGCPIAM(t *testing.T) {
+	t.Parallel()
+	cfg, err := load(t, pgConn+"user \"sa\" {\n  name = \"sa@p.iam\"\n  gcp_iam {}\n}\nrole \"group\" {\n  name = \"g@example.com\"\n  gcp_iam {}\n}\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range cfg.Desired.Roles {
+		if r.IAM != model.AuthGCPIAM {
+			t.Errorf("IAM of %q = %q, want gcp_iam", r.ID, r.IAM)
+		}
+	}
+}
+
 func TestLoadRoleAWSIAMErrors(t *testing.T) {
 	t.Parallel()
 	runDiagCases(t, []diagCase{
@@ -59,8 +72,21 @@ func TestLoadRoleAWSIAMErrors(t *testing.T) {
 		},
 		{
 			name:  "other nested block",
-			src:   pgConn + "user \"a\" {\n  gcp_iam {}\n}\n",
+			src:   pgConn + "user \"a\" {\n  azure_iam {}\n}\n",
 			want:  []string{"Unsupported block type"},
+			count: 1,
+		},
+		{
+			name:  "gcp_iam with password",
+			src:   myConn + "user \"a\" {\n  password = \"hunter2secret\"\n  gcp_iam {}\n}\n",
+			want:  []string{"Conflicting authentication", "both gcp_iam and password"},
+			deny:  []string{"hunter2secret"},
+			count: 1,
+		},
+		{
+			name:  "both IAM blocks",
+			src:   pgConn + "user \"a\" {\n  aws_iam {}\n  gcp_iam {}\n}\n",
+			want:  []string{"Conflicting authentication", "both aws_iam and gcp_iam"},
 			count: 1,
 		},
 	})

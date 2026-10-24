@@ -265,6 +265,21 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("gcp_iam users keep their Cloud SQL role", func(t *testing.T) {
+		// Stands in for an IAM user that Cloud SQL created.
+		s.exec(t, "CREATE ROLE cloudsqliamuser", `CREATE ROLE "dev@example.com" LOGIN`, `GRANT cloudsqliamuser TO "dev@example.com"`, "CREATE ROLE devs")
+		login := true
+		d := s.open(t, "postgres")
+		desired := &model.Desired{Engine: model.EnginePostgres, Roles: []model.Role{
+			{ID: pg("dev@example.com"), Login: &login, IAM: model.AuthGCPIAM, MemberOf: []model.RoleID{pg("devs")}},
+			{ID: pg("devs")},
+		}}
+		converge(t, d, desired, diff.Options{})
+		if got := s.queryStrings(t, "SELECT b.rolname FROM pg_auth_members m JOIN pg_roles a ON a.oid = m.member JOIN pg_roles b ON b.oid = m.roleid WHERE a.rolname = 'dev@example.com' ORDER BY 1"); len(got) != 2 || got[0] != "cloudsqliamuser" || got[1] != "devs" {
+			t.Errorf("memberships of dev@example.com = %q, want cloudsqliamuser and devs", got)
+		}
+	})
+
 	t.Run("databases that refuse connections", func(t *testing.T) {
 		s.exec(t,
 			"CREATE DATABASE noconn", "ALTER DATABASE noconn ALLOW_CONNECTIONS false",

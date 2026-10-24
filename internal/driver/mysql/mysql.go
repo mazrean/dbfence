@@ -376,7 +376,7 @@ func roleWarnings(desired *model.Desired, cur *model.Current, plugins []string) 
 			}
 			warns = append(warns, fmt.Sprintf("auth_plugin %q of %q is not an active authentication plugin on the server%s; creating or changing the account will fail", r.AuthPlugin, r.ID, hint))
 		}
-		if r.Login == nil || !*r.Login || r.Password != nil || (r.AuthPlugin != "" && !isPasswordPlugin(r.AuthPlugin)) {
+		if r.Login == nil || !*r.Login || r.Password != nil || r.IAM != "" || (r.AuthPlugin != "" && !isPasswordPlugin(r.AuthPlugin)) {
 			continue
 		}
 		i := slices.IndexFunc(cur.Roles, func(s model.RoleState) bool { return s.ID == r.ID })

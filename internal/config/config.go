@@ -68,6 +68,7 @@ type roleBlock struct {
 	ConnectionLimit *int           `hcl:"connection_limit"`
 	AuthPlugin      *string        `hcl:"auth_plugin"`
 	AWSIAM          *roleIAMBlock  `hcl:"aws_iam,block"`
+	GCPIAM          *roleIAMBlock  `hcl:"gcp_iam,block"`
 }
 
 // roleIAMBlock declares that a role logs in with IAM authentication.
@@ -660,8 +661,12 @@ func decodeRole(r resource, typ string, ctx *hcl.EvalContext, engine model.Engin
 		login = &v
 	}
 	var iam model.AuthMethod
-	if blk.AWSIAM != nil {
+	switch {
+	case blk.AWSIAM != nil:
 		iam = model.AuthAWSIAM
+		diags = append(diags, checkRoleIAM(r, typ, blk, *login)...)
+	case blk.GCPIAM != nil:
+		iam = model.AuthGCPIAM
 		diags = append(diags, checkRoleIAM(r, typ, blk, *login)...)
 	}
 	role := model.Role{
@@ -980,26 +985,32 @@ func checkPassword(r resource, typ string, pw *string, engine model.Engine) hcl.
 	return nil
 }
 
-// checkRoleIAM rejects what cannot go with the aws_iam block of r: a
-// role authenticates either with IAM or with a password (on PostgreSQL
-// rds_iam turns password authentication off), and IAM is a login.
+// checkRoleIAM rejects what cannot go with the aws_iam or gcp_iam block
+// of r: a role authenticates either with IAM or with a password (on
+// PostgreSQL rds_iam turns password authentication off), and an aws_iam
+// role logs in. A gcp_iam role may be a Cloud SQL IAM group, which does
+// not.
 func checkRoleIAM(r resource, typ string, blk roleBlock, login bool) hcl.Diagnostics {
-	nested, _, _ := r.block.Body.PartialContent(&hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "aws_iam"}}})
+	nested, _, _ := r.block.Body.PartialContent(&hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "aws_iam"}, {Type: "gcp_iam"}}})
 	rng := r.block.DefRange
 	if len(nested.Blocks) > 0 {
 		rng = nested.Blocks[0].DefRange
+	}
+	block := "aws_iam"
+	if blk.AWSIAM == nil {
+		block = "gcp_iam"
 	}
 	var diags hcl.Diagnostics
 	for _, a := range []struct {
 		name string
 		set  bool
-	}{{"password", blk.Password != nil}, {"auth_plugin", blk.AuthPlugin != nil}} {
+	}{{"password", blk.Password != nil}, {"auth_plugin", blk.AuthPlugin != nil}, {"gcp_iam", blk.AWSIAM != nil && blk.GCPIAM != nil}} {
 		if a.set {
 			diags = append(diags, errAt(rng, "Conflicting authentication",
-				fmt.Sprintf("%s %q cannot set both aws_iam and %s: with aws_iam it logs in with an IAM authentication token instead.", typ, r.block.Labels[0], a.name)))
+				fmt.Sprintf("%s %q cannot set both %s and %s: with %s it logs in with an IAM authentication token instead.", typ, r.block.Labels[0], block, a.name, block)))
 		}
 	}
-	if !login {
+	if !login && blk.AWSIAM != nil {
 		diags = append(diags, errAt(rng, "IAM authentication without login",
 			fmt.Sprintf("%s %q has aws_iam but cannot log in; use a user block or set login = true.", typ, r.block.Labels[0])))
 	}
