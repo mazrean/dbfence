@@ -99,5 +99,4 @@ See [Safety](docs/safety.md) for the details.
 - [Passwords](docs/passwords.md): how passwords are compared and set
 - [Safety](docs/safety.md): what dbfence never drops or changes
 - [Required privileges](docs/privileges.md): what the connected user needs
-- [Upgrading](docs/upgrading.md): behavior changes between versions
 - [Development](docs/development.md): tests, lint and the SQL building rules
