@@ -1,6 +1,11 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
 
+# Build the dbfence module alone: in workspace mode the go commands below
+# rewrite go.work.sum, which would dirty the tree (see the hooks below).
+env:
+  - GOWORK=off
+
 before:
   hooks:
     # NOTE: never `go mod tidy` here. The binary's version comes from
