@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 
 	"cloud.google.com/go/auth"
@@ -16,6 +18,7 @@ import (
 	rdsauth "github.com/aws/aws-sdk-go-v2/feature/rds/auth"
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/secret"
 )
 
 // Source returns the password of a new connection. IAM tokens expire,
@@ -64,6 +67,12 @@ func awsIAM(conn model.Connection, load func(context.Context) (aws.Config, error
 		token, err := rdsauth.BuildAuthToken(ctx, endpoint, region, conn.User, c.Credentials)
 		if err != nil {
 			return "", fmt.Errorf("aws_iam: build authentication token: %w", err)
+		}
+		// The token is a presigned URL; its signature is the secret part,
+		// and output may quote it alone. The drivers register the token.
+		_, query, _ := strings.Cut(token, "?")
+		if v, err := url.ParseQuery(query); err == nil {
+			secret.Register(v.Get("X-Amz-Signature"))
 		}
 		return token, nil
 	}

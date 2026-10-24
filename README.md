@@ -153,7 +153,7 @@ Every SQL statement is sent on its own, so the server rejects a query that holds
   - Authentication, one of:
     - `password`: optional; without it (and without the blocks below) dbfence connects without a password.
     - `aws_iam { region = "..." }`: an [Amazon RDS IAM authentication token](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html) for `host`, `port` and `user`, signed with the standard AWS credentials. `region` defaults to that of the AWS configuration (`AWS_REGION`). Needs `host`, not `socket`.
-    - `gcp_iam {}`: a Google Cloud access token of the [application default credentials](https://cloud.google.com/docs/authentication/application-default-credentials) for a Cloud SQL IAM database user (`user` is the IAM user or service account name as Cloud SQL shows it).
+    - `gcp_iam {}`: a Google Cloud access token of the [application default credentials](https://cloud.google.com/docs/authentication/application-default-credentials) for a Cloud SQL IAM database user; `user` is the database user name of the IAM principal, which Cloud SQL derives from its email address as described in the [Cloud SQL IAM documentation](https://cloud.google.com/sql/docs/postgres/iam-logins).
 
     IAM tokens expire, so a new one is taken for every connection dbfence opens; they are known secrets. They are sent as a cleartext password (MySQL: the `mysql_clear_password` plugin), so `tls` must be `"require"` or a verifying mode, except over a MySQL `socket`.
 - **`role "<label>"` / `user "<label>"`**: these two are the same thing, except for the login default.

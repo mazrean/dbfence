@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/secret"
 )
 
 func TestStatic(t *testing.T) {
@@ -49,6 +51,14 @@ func TestAWSIAM(t *testing.T) {
 				}
 				if err != nil {
 					t.Fatal(err)
+				}
+				_, query, _ := strings.Cut(token, "?")
+				v, err := url.ParseQuery(query)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if sig := v.Get("X-Amz-Signature"); sig == "" || secret.Default().Redact(sig) != secret.Placeholder {
+					t.Errorf("signature %q is not registered as a secret", sig)
 				}
 				for _, w := range []string{"db.example.com:3306?Action=connect", "DBUser=app", "X-Amz-Credential=AKIDEXAMPLE%2F", "%2F" + tt.want + "%2Frds-db%2F"} {
 					if !strings.Contains(token, w) {
