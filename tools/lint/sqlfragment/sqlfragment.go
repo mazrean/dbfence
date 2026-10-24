@@ -40,6 +40,10 @@ import (
 // PlanPath is the import path of the package that defines the fragments.
 const PlanPath = "github.com/mazrean/dbfence/internal/plan"
 
+// DriverPrefix is the import path prefix of the engine Dialects, the only
+// packages besides internal/plan that may call the Constructors.
+const DriverPrefix = "github.com/mazrean/dbfence/internal/driver/"
+
 // Constructors wrap a runtime value that the caller has already quoted,
 // escaped or validated.
 var Constructors = []string{"QuotedIdent", "EscapedLiteral", "NewToken"}
@@ -62,7 +66,7 @@ var Analyzer = &analysis.Analyzer{
 
 func run(pass *analysis.Pass) (any, error) {
 	inPlan := pass.Pkg.Path() == PlanPath
-	trusted := inPlan || strings.Contains(pass.Pkg.Path()+"/", "/internal/driver/")
+	trusted := inPlan || strings.HasPrefix(pass.Pkg.Path()+"/", DriverPrefix)
 	if !inPlan {
 		checkOtherFiles(pass)
 	}

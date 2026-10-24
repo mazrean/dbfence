@@ -15,6 +15,7 @@ func TestAnalyzer(t *testing.T) {
 	}{
 		{name: "rejects runtime strings as SQL text and constructors outside the drivers", pkg: "github.com/mazrean/dbfence/a"},
 		{name: "allows constructors in a driver", pkg: "github.com/mazrean/dbfence/internal/driver/x"},
+		{name: "rejects constructors in a package that only contains internal/driver in its path", pkg: "github.com/mazrean/dbfence/a/internal/driver/spoof"},
 		{name: "allows constructors in the plan package", pkg: sqlfragment.PlanPath},
 	}
 	for _, tt := range tests {
