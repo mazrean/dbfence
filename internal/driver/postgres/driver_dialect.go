@@ -36,8 +36,39 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 		// No DROP OWNED runs; DROP ROLE fails on the dependencies.
 		return out
 	}
+	// DROP OWNED revokes privileges on shared objects, such as CONNECT on
+	// a database, from whichever database it runs in first.
+	dependents := roleIDs(d.st.ownedDependents(id.Name))
+	for i, s := range out {
+		if s.Kind() == plan.KindDropOwned {
+			out[i] = s.WithDependents(dependents)
+		}
+	}
 	out = append(d.st.revokeOwnerMemberships(id.Name), out...)
 	return append(out, d.st.regrantAfterDrop(id.Name, databases, reachable)...)
+}
+
+// ownedDependents returns the roles from which DROP OWNED BY role revokes,
+// with CASCADE, something the connected user may rely on: CONNECT on the
+// database it is connected to (unless it is a superuser) and (PostgreSQL
+// 16+) memberships, granted directly or transitively by role. Grants on a
+// database role owns survive, since REASSIGN OWNED makes the new owner
+// their grantor.
+func (st *state) ownedDependents(role string) []string {
+	var out []string
+	db := model.Object{Type: model.ObjectDatabase, Database: st.database}
+	if !st.superuser && st.database != "" && st.owners[db] != role {
+		out = append(out, aclDependents(st.acl, db, role, []string{"CONNECT"})...)
+	}
+	if st.version >= pg16 {
+		for _, e := range st.members {
+			if e.grantor == role {
+				out = append(out, st.memberDependents(role, e.role)...)
+			}
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // KeepRole implements diff.RoleKeeper. A role is kept when dropping it
@@ -49,7 +80,9 @@ func (d *Driver) DropRole(id model.RoleID, databases []string) []plan.Statement 
 // owns or has privileges on, from whichever database they run in, so a
 // role is also kept when those include a tablespace or parameter, or a
 // database that Inspect did not read (templates and databases that refuse
-// connections, unless declared).
+// connections, unless declared). It is kept as well when DROP OWNED would
+// revoke from the connected user, or a role it is a member of, a CONNECT
+// or membership it relies on (ownedDependents).
 func (d *Driver) KeepRole(id model.RoleID, databases []string) string {
 	if d.st == nil {
 		return ""
@@ -59,6 +92,11 @@ func (d *Driver) KeepRole(id model.RoleID, databases []string) string {
 	}
 	if d.st.dropReachesUnmanaged(id.Name, slices.ContainsFunc(databases, func(db string) bool { return d.st.connectable[db] })) {
 		return "owns, holds or granted something that names a role, database or schema dbfence does not manage (see its warning), or granted privileges or memberships (directly or through other roles) to such a role, which dropping it would change; handle it manually"
+	}
+	if slices.ContainsFunc(databases, func(db string) bool { return d.st.connectable[db] }) &&
+		slices.ContainsFunc(d.st.ownedDependents(id.Name), func(r string) bool { return (model.RoleID{Name: r}).IsPublic() || d.st.reachedByUser(r) }) {
+		return fmt.Sprintf("granted, directly or through other roles, CONNECT on database %q or a membership that %q relies on, which DROP OWNED would revoke with CASCADE; handle it manually",
+			d.st.database, d.st.user)
 	}
 	return ""
 }
