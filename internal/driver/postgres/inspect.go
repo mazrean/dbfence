@@ -45,6 +45,10 @@ type state struct {
 	// objects counts the objects in inspected schemas.
 	objects map[model.Object]int
 	roles   map[string]roleAccess
+	// unmanagedDeps maps databases in which a role dbfence does not
+	// manage (model.CheckName) owns objects or holds privileges
+	// (pg_shdepend) to the first such role.
+	unmanagedDeps map[string]string
 	// createroleSelfGrant is the createrole_self_grant setting (PG16+).
 	createroleSelfGrant string
 	user                string
@@ -99,6 +103,8 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		owners:      map[model.Object]string{},
 		objects:     map[model.Object]int{},
 		roles:       map[string]roleAccess{},
+		// Filled by unreachableDependencyWarnings.
+		unmanagedDeps: map[string]string{},
 	}
 	cur := &model.Current{}
 	var authidReadable bool
@@ -185,6 +191,7 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		return nil, depErr
 	}
 	cur.Warnings = append(cur.Warnings, depWarns...)
+	st.entangleSchemaObjects(cur)
 	d.st = st
 	return cur, nil
 }
@@ -443,6 +450,9 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 				return err
 			}
 			if unmanagedRole(role) && !unmanagedName(model.NameDatabase, db) {
+				if _, ok := st.unmanagedDeps[db]; !ok {
+					st.unmanagedDeps[db] = role
+				}
 				cur.Entangle(model.Object{Type: model.ObjectDatabase, Database: db},
 					fmt.Sprintf("role %q, which dbfence does not manage, owns objects or holds privileges in it", role))
 				return nil
@@ -734,6 +744,24 @@ func (st *state) addACL(cur *model.Current, e aclEntry) {
 		}
 	}
 	cur.Privileges = append(cur.Privileges, p)
+}
+
+// entangleSchemaObjects records in cur.Entangled the inspected schemas
+// that contain objects in a database where a role dbfence does not manage
+// owns objects or holds privileges: which schemas those objects are in is
+// not read, and DROP SCHEMA ... CASCADE could drop them. A schema without
+// objects is dropped without CASCADE, which fails if anything depends on
+// it.
+func (st *state) entangleSchemaObjects(cur *model.Current) {
+	for _, s := range cur.Schemas {
+		obj := model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}
+		role, ok := st.unmanagedDeps[s.Database]
+		if !ok || st.objects[obj] == 0 {
+			continue
+		}
+		cur.Entangle(obj, fmt.Sprintf("it contains %d objects, which may include objects of or privileges held by role %q, which dbfence does not manage (it owns objects or holds privileges in database %q)",
+			st.objects[obj], role, s.Database))
+	}
 }
 
 // entangleUnread records in cur.Entangled the undeclared databases with

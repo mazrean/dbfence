@@ -110,7 +110,8 @@ func TestIntegrationPruneKeepsRolesReachingUnmanaged(t *testing.T) {
 // drop would drop what dbfence does not manage, read without a prunable
 // role: a database owned by an unmanaged role, one holding a schema with
 // an unmanaged name, one holding a table of an unmanaged role (seen in
-// pg_shdepend), a schema owned by and one granting to an unmanaged role.
+// pg_shdepend), a schema owned by and one granting to an unmanaged role,
+// and a schema holding a table of an unmanaged role.
 func TestIntegrationPruneKeepsContainersOfUnmanaged(t *testing.T) {
 	t.Parallel()
 	s := startServer(t)
@@ -126,6 +127,7 @@ func TestIntegrationPruneKeepsContainersOfUnmanaged(t *testing.T) {
 		"CREATE SCHEMA old AUTHORIZATION "+bad,
 		"CREATE SCHEMA granted", "GRANT USAGE ON SCHEMA granted TO "+bad,
 		"CREATE SCHEMA plain",
+		"CREATE SCHEMA tabled_s", "CREATE TABLE tabled_s.t (id int)", "ALTER TABLE tabled_s.t OWNER TO "+bad,
 	)
 	d := s.open(t, "postgres")
 	desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app"}}}
@@ -139,7 +141,7 @@ func TestIntegrationPruneKeepsContainersOfUnmanaged(t *testing.T) {
 	}
 	got := sqlOf(p.Statements())
 	warns := strings.Join(p.Warnings, "\n")
-	for _, stmt := range []string{`DROP DATABASE "owned"`, `DROP DATABASE "named"`, `DROP DATABASE "tabled"`, `DROP SCHEMA "old"`, `DROP SCHEMA "granted"`} {
+	for _, stmt := range []string{`DROP DATABASE "owned"`, `DROP DATABASE "named"`, `DROP DATABASE "tabled"`, `DROP SCHEMA "old"`, `DROP SCHEMA "granted"`, `DROP SCHEMA "tabled_s"`} {
 		if strings.Contains(got, stmt) {
 			t.Errorf("plan contains %s:\n%s\nwarnings:\n%s", stmt, got, warns)
 		}
@@ -155,6 +157,7 @@ func TestIntegrationPruneKeepsContainersOfUnmanaged(t *testing.T) {
 		`database "tabled": role "bad\x01", which dbfence does not manage, owns objects or holds privileges in it`,
 		`schema "old" in database "app": it is owned by role "bad\x01"`,
 		`schema "granted" in database "app": it grants USAGE to role "bad\x01"`,
+		`schema "tabled_s" in database "app": it contains 1 objects, which may include objects of or privileges held by role "bad\x01"`,
 	} {
 		if !strings.Contains(warns, w) {
 			t.Errorf("warnings do not contain %q:\n%s", w, warns)
