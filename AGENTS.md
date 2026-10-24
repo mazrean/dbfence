@@ -10,6 +10,7 @@ MySQL / PostgreSQL servers — databases, users/roles, memberships, grants, Post
 - Test incl. Docker integration: `mise run test:integration` (= `go test ./...`)
 - Test (CI): `mise run test:ci` (`-race -coverprofile=coverage.out -covermode=atomic`; Docker required when `CI` is set)
 - Lint: `mise run lint` (= `go vet -vettool=$(go tool -n lint) ./...`; `go tool lint ./...` does the same but needs ~9 GB); it checks the host build, and `TestNoBuildConstrainedFiles` forbids build-constrained files so that every target compiles the same files; lint failures block commits
+- E2E: `mise run e2e:local` (Docker; `e2e/run.sh` against local servers); Aurora / Cloud SQL via `.github/workflows/e2e.yml` (`docs/e2e.md`)
 - Fuzz: `mise run test:fuzz` (each `Fuzz*` target for 30s; seed corpora run in `mise run test`)
 - Generate (kessoku DI): `mise run generate` (= `go generate ./...`)
 - Release: `mise run release:check` / `release:build` (snapshot) / `release:publish`
@@ -43,6 +44,7 @@ internal/secret/     secret registry + redacting, control-escaping output Writer
 internal/apply/      sequential execution, stop at first error
 internal/di/         kessoku injectors
 tools/lint/          repo linter module (+ outputsink analyzer)
+e2e/                 end-to-end scenario (run.sh, HCL per phase), image, ecspresso task
 ```
 
 ## Coding Standards

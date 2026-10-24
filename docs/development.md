@@ -6,7 +6,10 @@ mise run test:integration   # also starts MySQL 8.4 / PostgreSQL 17 containers w
 mise run lint               # go vet -vettool=$(go tool -n lint) ./...
 mise run generate           # regenerate kessoku injectors
 mise run test:fuzz          # run each Go fuzz target for 30s
+mise run e2e:local          # run the end-to-end scenario against local Docker servers
 ```
+
+The end-to-end scenario also runs against Aurora and Cloud SQL from GitHub Actions; see [End-to-end tests](e2e.md).
 
 ## Fuzzing
 

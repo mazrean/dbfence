@@ -105,3 +105,4 @@ See [Safety](docs/safety.md) for the details.
 - [Required privileges](docs/privileges.md): what the connected user needs
 - [Amazon RDS](docs/aws-rds.md) and [Google Cloud SQL](docs/gcp-cloud-sql.md): IAM authentication and other setups
 - [Development](docs/development.md): tests, lint and the SQL building rules
+- [End-to-end tests](docs/e2e.md): the Aurora and Cloud SQL test workflow and the Terraform it needs
