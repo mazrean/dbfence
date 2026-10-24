@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -748,20 +749,51 @@ func (st *state) addACL(cur *model.Current, e aclEntry) {
 
 // entangleSchemaObjects records in cur.Entangled the inspected schemas
 // that contain objects in a database where a role dbfence does not manage
-// owns objects or holds privileges: which schemas those objects are in is
-// not read, and DROP SCHEMA ... CASCADE could drop them. A schema without
-// objects is dropped without CASCADE, which fails if anything depends on
-// it.
+// owns objects or holds privileges, or that contains a schema with a name
+// dbfence does not manage or owned by such a role: which schemas those
+// objects are in, and which objects depend on which, is not read, and
+// DROP SCHEMA ... CASCADE could drop them. A schema without objects is
+// dropped without CASCADE, which fails if anything depends on it.
 func (st *state) entangleSchemaObjects(cur *model.Current) {
+	unmanagedSchemas := st.unmanagedSchemas()
 	for _, s := range cur.Schemas {
 		obj := model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}
-		role, ok := st.unmanagedDeps[s.Database]
-		if !ok || st.objects[obj] == 0 {
+		n := st.objects[obj]
+		if n == 0 {
 			continue
 		}
-		cur.Entangle(obj, fmt.Sprintf("it contains %d objects, which may include objects of or privileges held by role %q, which dbfence does not manage (it owns objects or holds privileges in database %q)",
-			st.objects[obj], role, s.Database))
+		if role, ok := st.unmanagedDeps[s.Database]; ok {
+			cur.Entangle(obj, fmt.Sprintf("it contains %d objects, which may include objects of or privileges held by role %q, which dbfence does not manage (it owns objects or holds privileges in database %q)",
+				n, role, s.Database))
+		}
+		if what, ok := unmanagedSchemas[s.Database]; ok {
+			cur.Entangle(obj, fmt.Sprintf("it contains %d objects, on which objects in %s, which dbfence does not manage, may depend (DROP SCHEMA ... CASCADE would drop them too)",
+				n, what))
+		}
 	}
+}
+
+// unmanagedSchemas maps the inspected databases that contain a schema
+// dbfence does not manage (by its name or its owner's) to a description
+// of the first such schema.
+func (st *state) unmanagedSchemas() map[string]string {
+	keys := slices.SortedFunc(maps.Keys(st.owners), func(a, b model.Object) int {
+		return cmp.Or(strings.Compare(a.Database, b.Database), strings.Compare(a.Schema, b.Schema))
+	})
+	out := map[string]string{}
+	for _, obj := range keys {
+		owner := st.owners[obj]
+		if _, ok := out[obj.Database]; ok || obj.Type != model.ObjectSchema {
+			continue
+		}
+		switch {
+		case unmanagedName(model.NameSchema, obj.Schema):
+			out[obj.Database] = fmt.Sprintf("schema %q", obj.Schema)
+		case unmanagedRole(owner):
+			out[obj.Database] = fmt.Sprintf("schema %q, owned by role %q", obj.Schema, owner)
+		}
+	}
+	return out
 }
 
 // entangleUnread records in cur.Entangled the undeclared databases with

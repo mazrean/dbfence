@@ -90,8 +90,10 @@ func TestPruneKeepsContainersOfUnmanaged(t *testing.T) {
 // TestPruneKeepsSchemasWithObjectsOfUnmanaged checks that --prune keeps an
 // undeclared schema with a managed name and owner that contains objects in
 // a database where a role dbfence does not manage owns objects or holds
-// privileges (pg_shdepend): DROP SCHEMA ... CASCADE could drop them. A
-// schema without objects is still dropped (without CASCADE).
+// privileges (pg_shdepend), or that contains a schema with a name dbfence
+// does not manage or owned by such a role, whose objects may depend on it:
+// DROP SCHEMA ... CASCADE could drop them. A schema without objects is
+// still dropped (without CASCADE).
 func TestPruneKeepsSchemasWithObjectsOfUnmanaged(t *testing.T) {
 	t.Parallel()
 	bad := "bad\x01"
@@ -99,8 +101,11 @@ func TestPruneKeepsSchemasWithObjectsOfUnmanaged(t *testing.T) {
 	sch := func(db, name string) model.Object { return model.Object{Type: model.ObjectSchema, Database: db, Schema: name} }
 	dbObj := func(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
 	tests := []struct {
-		deps    map[string]string
+		deps map[string]string
+		// schema is an extra schema of database app.
+		schema  *model.Schema
 		name    string
+		warn    string
 		dropped []string
 		kept    []string
 	}{
@@ -109,6 +114,21 @@ func TestPruneKeepsSchemasWithObjectsOfUnmanaged(t *testing.T) {
 			deps:    map[string]string{"app": bad},
 			dropped: []string{`DROP SCHEMA "empty"`, `DROP SCHEMA "elsewhere" CASCADE`},
 			kept:    []string{`DROP SCHEMA "old"`},
+			warn:    `schema "old" in database "app": it contains 1 objects, which may include objects of or privileges held by role "bad\x01", which dbfence does not manage (it owns objects or holds privileges in database "app"), so it is not pruned`,
+		},
+		{
+			name:    "the database contains a schema with an unmanaged name",
+			schema:  &model.Schema{Database: "app", Name: "evil\x01", Owner: "postgres"},
+			dropped: []string{`DROP SCHEMA "empty"`, `DROP SCHEMA "elsewhere" CASCADE`},
+			kept:    []string{`DROP SCHEMA "old"`, "evil"},
+			warn:    `schema "old" in database "app": it contains 1 objects, on which objects in schema "evil\x01", which dbfence does not manage, may depend (DROP SCHEMA ... CASCADE would drop them too), so it is not pruned`,
+		},
+		{
+			name:    "the database contains a schema owned by an unmanaged role",
+			schema:  &model.Schema{Database: "app", Name: "theirs", Owner: bad},
+			dropped: []string{`DROP SCHEMA "empty"`, `DROP SCHEMA "elsewhere" CASCADE`},
+			kept:    []string{`DROP SCHEMA "old"`, `DROP SCHEMA "theirs"`},
+			warn:    `schema "old" in database "app": it contains 1 objects, on which objects in schema "theirs", owned by role "bad\x01", which dbfence does not manage, may depend (DROP SCHEMA ... CASCADE would drop them too), so it is not pruned`,
 		},
 		{
 			name:    "no unmanaged dependencies",
@@ -146,6 +166,11 @@ func TestPruneKeepsSchemasWithObjectsOfUnmanaged(t *testing.T) {
 				roles:         map[string]roleAccess{},
 				unmanagedDeps: tt.deps,
 			}
+			if s := tt.schema; s != nil {
+				cur.Schemas = append(cur.Schemas, *s)
+				st.owners[sch(s.Database, s.Name)] = s.Owner
+				st.objects[sch(s.Database, s.Name)] = 1
+			}
 			if _, err := cur.DropUntrusted(model.EnginePostgres); err != nil {
 				t.Fatal(err)
 			}
@@ -166,9 +191,8 @@ func TestPruneKeepsSchemasWithObjectsOfUnmanaged(t *testing.T) {
 					t.Errorf("plan does not contain %s:\n%s", s, got)
 				}
 			}
-			w := `schema "old" in database "app": it contains 1 objects, which may include objects of or privileges held by role "bad\x01", which dbfence does not manage (it owns objects or holds privileges in database "app"), so it is not pruned`
-			if len(tt.kept) > 0 && !strings.Contains(warns, w) {
-				t.Errorf("warnings do not contain %q:\n%s", w, warns)
+			if tt.warn != "" && !strings.Contains(warns, tt.warn) {
+				t.Errorf("warnings do not contain %q:\n%s", tt.warn, warns)
 			}
 		})
 	}

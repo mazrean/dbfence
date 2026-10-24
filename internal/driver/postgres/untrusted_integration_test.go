@@ -165,6 +165,44 @@ func TestIntegrationPruneKeepsContainersOfUnmanaged(t *testing.T) {
 	}
 }
 
+// TestIntegrationPruneKeepsSchemasDependedOnByUnmanagedSchemas checks
+// against a real server that --prune keeps an undeclared schema with
+// objects in a declared database that also contains a schema with an
+// unmanaged name: a view there depends on its table, and DROP SCHEMA ...
+// CASCADE would drop the view. A schema without objects is still dropped.
+func TestIntegrationPruneKeepsSchemasDependedOnByUnmanagedSchemas(t *testing.T) {
+	t.Parallel()
+	s := startServer(t)
+	evil := `"evil` + "\x01" + `"`
+	s.exec(t, "CREATE DATABASE app")
+	s.exec(t, `\c app`,
+		"CREATE SCHEMA old", "CREATE TABLE old.t (id int)",
+		"CREATE SCHEMA "+evil, "CREATE VIEW "+evil+".v AS SELECT id FROM old.t",
+		"CREATE SCHEMA plain",
+	)
+	d := s.open(t, "postgres")
+	desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app"}}}
+	cur, err := d.Inspect(t.Context(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := compute(t, desired, cur, d, diff.Options{Prune: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sqlOf(p.Statements())
+	warns := strings.Join(p.Warnings, "\n")
+	if strings.Contains(got, `DROP SCHEMA "old"`) {
+		t.Errorf("plan drops old, on which a view in an unmanaged schema depends:\n%s\nwarnings:\n%s", got, warns)
+	}
+	if !strings.Contains(got, `DROP SCHEMA "plain"`) {
+		t.Errorf("plan does not drop plain:\n%s\nwarnings:\n%s", got, warns)
+	}
+	if w := `schema "old" in database "app": it contains 1 objects, on which objects in schema "evil\x01", which dbfence does not manage, may depend`; !strings.Contains(warns, w) {
+		t.Errorf("warnings do not contain %q:\n%s", w, warns)
+	}
+}
+
 // TestIntegrationPruneKeepsUnreadDatabases checks against a real server
 // that --prune keeps an undeclared database the connected user owns but
 // may not connect to: what it contains is not known.
