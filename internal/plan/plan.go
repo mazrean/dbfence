@@ -32,8 +32,11 @@ type Statement struct {
 	// default roles of its target; empty for SET DEFAULT ROLE NONE.
 	defaults []model.RoleID
 	// privs are the privileges a GRANT or REVOKE of privileges names.
-	privs  []string
-	target Target
+	privs []string
+	// dependents are the roles that also lose what a REVOKE ... CASCADE
+	// revokes.
+	dependents []model.RoleID
+	target     Target
 }
 
 // New builds a statement of kind on target from SQL fragments. Dialect
@@ -83,6 +86,20 @@ func (s Statement) Privileges() []string { return slices.Clone(s.privs) }
 // Privileges).
 func (s Statement) WithPrivileges(privs []string) Statement {
 	s.privs = slices.Clone(privs)
+	return s
+}
+
+// Dependents returns the roles that also lose what a statement of
+// KindRevoke or KindRevokeMembership revokes, through CASCADE: those that
+// received the privileges or memberships, directly or transitively, from
+// its grantee's grant option or ADMIN OPTION. They lose those grants even
+// when the statement revokes only the option.
+func (s Statement) Dependents() []model.RoleID { return slices.Clone(s.dependents) }
+
+// WithDependents returns s with the roles its CASCADE also revokes from
+// (see Dependents).
+func (s Statement) WithDependents(roles []model.RoleID) Statement {
+	s.dependents = slices.Clone(roles)
 	return s
 }
 
