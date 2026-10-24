@@ -48,6 +48,8 @@ type state struct {
 	// createroleSelfGrant is the createrole_self_grant setting (PG16+).
 	createroleSelfGrant string
 	user                string
+	// database is the database the connection is to.
+	database string
 	acl                 []aclEntry
 	members             []memberEntry
 	version             int
@@ -105,10 +107,11 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 			coalesce(current_setting('createrole_self_grant', true), ''),
 			r.rolsuper, r.rolcreaterole, has_table_privilege('pg_catalog.pg_authid', 'SELECT')
 		FROM pg_roles r WHERE r.rolname = current_user`).
-		Scan(&st.user, &cur.CurrentDatabase, &st.version, &st.createroleSelfGrant, &st.superuser, &st.createRole, &authidReadable); err != nil {
+		Scan(&st.user, &st.database, &st.version, &st.createroleSelfGrant, &st.superuser, &st.createRole, &authidReadable); err != nil {
 		return nil, fmt.Errorf("current user: %w", err)
 	}
 	cur.CurrentUser = model.RoleID{Name: st.user}
+	cur.CurrentDatabase = st.database
 	warns, err := checkMembershipOptions(desired, st.version)
 	if err != nil {
 		return nil, err

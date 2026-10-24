@@ -1,7 +1,7 @@
 // Package policy checks a finished plan against the protections dbfence
 // promises, independently of the diff logic that produced it. It reads
 // only statement metadata (Kind, Target, RoleChange, DefaultRoles,
-// Privileges, AsRole), never SQL text, and does no I/O.
+// Privileges, Dependents, AsRole), never SQL text, and does no I/O.
 package policy
 
 import (
@@ -129,9 +129,11 @@ func (c *checker) check(s plan.Statement) []string {
 		if t.Grantee == c.cur.CurrentUser {
 			return []string{fmt.Sprintf("revokes a membership or ADMIN OPTION of the connected user %q in %q", t.Grantee, t.Role)}
 		}
+		reasons := c.cascadeRelied(t, s.Dependents())
 		if !t.Option {
-			return c.revokeRelied(t.Grantee, t.Role)
+			reasons = append(reasons, c.revokeRelied(t.Grantee, t.Role)...)
 		}
+		return reasons
 	case plan.KindSetDefaultRole:
 		if t.Role == c.cur.CurrentUser {
 			return c.narrowsDefaultRoles(s.DefaultRoles())
@@ -141,8 +143,8 @@ func (c *checker) check(s plan.Statement) []string {
 			c.connect[t.Grantee] = true
 		}
 	case plan.KindRevoke:
-		if !t.Option && c.connectOn(s) {
-			return c.revokeConnect(t.Grantee)
+		if c.connectOn(s) {
+			return c.revokeConnect(t, s.Dependents())
 		}
 	case plan.KindAlterDatabase:
 		return c.ownerChange(t)
@@ -468,17 +470,61 @@ func (c *checker) canConnect() bool {
 }
 
 // revokeConnect records the revoke of CONNECT on the connected database
-// from grantee and checks that the connected user can still connect to
-// it: dbfence connects to it on every run. When privileges are
-// unreadable, the connected user is taken to connect through grantee.
-func (c *checker) revokeConnect(grantee model.RoleID) []string {
+// from the grantee of t (unless it revokes only the grant option) and,
+// through CASCADE, from dependents, and checks that the connected user
+// can still connect to it: dbfence connects to it on every run. A
+// dependent is taken to lose CONNECT, as it may hold it only through the
+// grantee. When privileges are unreadable, the connected user is taken
+// to connect through the roles that lose it.
+func (c *checker) revokeConnect(t plan.Target, dependents []model.RoleID) []string {
+	lost := dependents
+	if !t.Option {
+		lost = append([]model.RoleID{t.Grantee}, lost...)
+	}
+	if len(lost) == 0 {
+		return nil
+	}
 	before := c.cur.Unreadable.Privileges || c.canConnect()
-	delete(c.connect, grantee)
+	for _, id := range lost {
+		delete(c.connect, id)
+	}
 	if !before || c.canConnect() {
 		return nil
 	}
-	return []string{fmt.Sprintf("revokes CONNECT on the database %q dbfence is connected to from %q, through which the connected user %q connects to it",
-		c.cur.CurrentDatabase, grantee, c.cur.CurrentUser)}
+	if t.Option {
+		return []string{fmt.Sprintf("revokes the grant option for CONNECT on the database %q dbfence is connected to from %q with CASCADE, which revokes the CONNECT of %s, through which the connected user %q connects to it",
+			c.cur.CurrentDatabase, t.Grantee, quoteRoles(dependents), c.cur.CurrentUser)}
+	}
+	return []string{fmt.Sprintf("revokes CONNECT on the database %q dbfence is connected to from %s, through which the connected user %q connects to it",
+		c.cur.CurrentDatabase, quoteRoles(lost), c.cur.CurrentUser)}
+}
+
+// cascadeRelied checks the dependents of a REVOKE of the membership of
+// t.Grantee in t.Role, or of its ADMIN OPTION, with CASCADE: each loses
+// the grants of t.Role made, directly or transitively, by t.Grantee. A
+// dependent that is the connected user or a role granted to it may hold
+// the membership, or the INHERIT or SET it relies on, only through such
+// a grant, so neither may be one.
+func (c *checker) cascadeRelied(t plan.Target, dependents []model.RoleID) []string {
+	var out []string
+	for _, id := range dependents {
+		switch {
+		case id == c.cur.CurrentUser:
+			out = append(out, fmt.Sprintf("revokes with CASCADE the membership of the connected user %q in %q that %q granted", id, t.Role, t.Grantee))
+		case c.relied[id]:
+			out = append(out, fmt.Sprintf("revokes with CASCADE the membership of %q in %q that %q granted, through which the connected user %q has its roles", id, t.Role, t.Grantee, c.cur.CurrentUser))
+		}
+	}
+	return out
+}
+
+// quoteRoles lists ids Go-quoted and comma-separated.
+func quoteRoles(ids []model.RoleID) string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = fmt.Sprintf("%q", id)
+	}
+	return strings.Join(out, ", ")
 }
 
 // ownerChange records an ALTER DATABASE ... OWNER TO of the connected
