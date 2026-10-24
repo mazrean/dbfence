@@ -2,7 +2,7 @@
 # binary is built beforehand with the repository's toolchain:
 #
 #   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o e2e/dbfence .
-FROM alpine:3.22
+FROM alpine:3.24
 
 RUN apk add --no-cache bash ca-certificates
 
