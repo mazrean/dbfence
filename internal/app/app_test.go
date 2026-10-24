@@ -20,9 +20,14 @@ import (
 type fakeDriver struct {
 	postgres.Dialect
 	// unsafe, when set, replaces the statements CreateRole plans.
-	unsafe   []plan.Statement
+	unsafe []plan.Statement
+	// after holds statements CreateRole plans after the real ones, by
+	// role name.
+	after    map[string][]plan.Statement
 	executed []string
 	extra    []model.RoleState
+	// memberOf is what the connected user is a member of.
+	memberOf []model.RoleID
 }
 
 // CreateRole implements diff.Dialect, planning unsafe when set, to stand
@@ -31,11 +36,11 @@ func (f *fakeDriver) CreateRole(r model.Role) []plan.Statement {
 	if f.unsafe != nil {
 		return f.unsafe
 	}
-	return f.Dialect.CreateRole(r)
+	return append(f.Dialect.CreateRole(r), f.after[r.ID.Name]...)
 }
 
 func (f *fakeDriver) Inspect(context.Context, *model.Desired) (*model.Current, error) {
-	roles := append([]model.RoleState{{ID: model.RoleID{Name: "postgres"}}}, f.extra...)
+	roles := append([]model.RoleState{{ID: model.RoleID{Name: "postgres"}, MemberOf: f.memberOf}}, f.extra...)
 	return &model.Current{CurrentUser: model.RoleID{Name: "postgres"}, Roles: roles}, nil
 }
 
@@ -52,8 +57,14 @@ func (o fakeOpener) Open(context.Context, model.Connection) (app.Driver, error) 
 
 func newApp(t *testing.T, stdin string) (*app.App, *fakeDriver, *strings.Builder, string) {
 	t.Helper()
+	return newAppWith(t, stdin, "user \"app\" {\n  password = \"hunter2\"\n}\n")
+}
+
+// newAppWith is newApp with the blocks of src after the connection block.
+func newAppWith(t *testing.T, stdin, src string) (*app.App, *fakeDriver, *strings.Builder, string) {
+	t.Helper()
 	dir := t.TempDir()
-	src := "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\nuser \"app\" {\n  password = \"hunter2\"\n}\n"
+	src = "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\n" + src
 	if err := os.WriteFile(filepath.Join(dir, "dbfence.hcl"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}

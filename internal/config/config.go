@@ -27,8 +27,22 @@ import (
 
 // Config is a loaded configuration.
 type Config struct {
-	Desired    *model.Desired
+	Desired *model.Desired
+	// addresses maps resource addresses (role.<label>, user.<label>,
+	// database.<label>, schema.<label>) to the objects they declare.
+	addresses  map[string]model.Address
 	Connection model.Connection
+}
+
+// Address returns the declared object a resource address names:
+// role.<label> or user.<label> (role and user blocks share their labels,
+// as in references), database.<label> or schema.<label>.
+func (c *Config) Address(addr string) (model.Address, error) {
+	a, ok := c.addresses[addr]
+	if !ok {
+		return model.Address{}, fmt.Errorf("%q does not name a declared block; use role.<label>, user.<label>, database.<label> or schema.<label>", addr)
+	}
+	return a, nil
 }
 
 var rootSchema = &hcl.BodySchema{
@@ -316,6 +330,22 @@ func (d *decoded) desired() *model.Desired {
 	return out
 }
 
+// addresses returns the resource addresses of the labeled blocks.
+func (d *decoded) addresses() map[string]model.Address {
+	out := map[string]model.Address{}
+	for _, db := range d.databases {
+		out["database."+db.res.block.Labels[0]] = model.Address{Database: db.db.Name}
+	}
+	for _, r := range d.roles {
+		a := model.Address{Role: r.role.ID}
+		out["role."+r.res.block.Labels[0]], out["user."+r.res.block.Labels[0]] = a, a
+	}
+	for _, s := range d.schemas {
+		out["schema."+s.res.block.Labels[0]] = model.Address{Database: s.schema.Database, Schema: s.schema.Name}
+	}
+	return out
+}
+
 func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagnostics) {
 	content, diags := body.Content(rootSchema)
 	if diags.HasErrors() {
@@ -446,7 +476,7 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 	if diags.HasErrors() {
 		return nil, diags
 	}
-	return &Config{Connection: conn, Desired: dec.desired()}, diags
+	return &Config{Connection: conn, Desired: dec.desired(), addresses: dec.addresses()}, diags
 }
 
 func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resource, hcl.Diagnostics) {
