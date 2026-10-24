@@ -216,6 +216,9 @@ jobs:
       REGION: ${{ vars.GCP_REGION }}
       INSTANCE: ${{ vars[format('DBFENCE_E2E_{0}_INSTANCE', matrix.prefix)] }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
         with:
@@ -227,10 +230,10 @@ jobs:
         uses: google-github-actions/setup-gcloud@v3
 
       # The instance is kept stopped (activation policy NEVER) between runs
-      # to save cost. The patch returns once the instance is running.
+      # to save cost.
       - name: Start the Cloud SQL instance
         id: start
-        run: gcloud sql instances patch "$INSTANCE" --activation-policy ALWAYS --quiet
+        run: e2e/gcp/set-activation-policy.sh "$INSTANCE" ALWAYS
 
       - name: Deploy the Cloud Run job
         run: |
@@ -267,11 +270,13 @@ jobs:
           DB_IAM_USER: ${{ vars[format('DBFENCE_E2E_{0}_IAM_USER', matrix.prefix)] }}
 
       - name: Run the scenario
+        id: run
         run: gcloud run jobs execute "$JOB" --region "$REGION" --wait
 
       # Cloud Run does not stream job logs to the caller.
+      # Only after an execution: otherwise the latest one is a previous run's.
       - name: Show the job output
-        if: always()
+        if: always() && (steps.run.outcome == 'success' || steps.run.outcome == 'failure')
         run: |
           execution=$(gcloud run jobs executions list --job "$JOB" --region "$REGION" --sort-by '~metadata.creationTimestamp' --limit 1 --format 'value(metadata.name)')
           [ -n "$execution" ] || exit 0
@@ -284,4 +289,4 @@ jobs:
       # Also after a failure or a cancellation, once a start was attempted.
       - name: Stop the Cloud SQL instance
         if: always() && steps.start.outcome != 'skipped'
-        run: gcloud sql instances patch "$INSTANCE" --activation-policy NEVER --quiet
+        run: e2e/gcp/set-activation-policy.sh "$INSTANCE" NEVER
