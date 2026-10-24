@@ -16,6 +16,13 @@ Supported engines: MySQL 8.0+ and PostgreSQL. Membership `inherit` / `set` optio
 go install github.com/mazrean/dbfence@latest
 ```
 
+To try it on local PostgreSQL and MySQL servers, see [`examples/`](examples):
+
+```sh
+docker compose -f examples/compose.yaml up -d --wait
+go run . -C examples/postgres plan
+```
+
 ## Usage
 
 ```sh

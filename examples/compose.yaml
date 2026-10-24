@@ -1,0 +1,47 @@
+# Local servers for trying the examples. See examples/README.md.
+#
+#   docker compose -f examples/compose.yaml up -d --wait
+#   go run . -C examples/postgres plan
+#   go run . -C examples/mysql plan
+#   docker compose -f examples/compose.yaml down -v
+#
+# Ports and admin passwords can be overridden with the same environment
+# variables that the example configurations read.
+name: dbfence-examples
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: ${DBFENCE_PG_ADMIN_PASSWORD:-dbfence-admin}
+    ports:
+      - "127.0.0.1:${DBFENCE_PG_PORT:-15432}:5432"
+    volumes:
+      - ./initdb/postgres:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DBFENCE_MYSQL_ROOT_PASSWORD:-dbfence-root}
+    ports:
+      - "127.0.0.1:${DBFENCE_MYSQL_PORT:-13306}:3306"
+    volumes:
+      - ./initdb/mysql:/docker-entrypoint-initdb.d:ro
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # The entrypoint runs a temporary server without networking while it
+      # initialises; checking over TCP waits for the real one.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  postgres-data:
+  mysql-data:
