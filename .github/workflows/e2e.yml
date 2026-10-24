@@ -208,12 +208,16 @@ jobs:
             prefix: POSTGRES
           - engine: mysql
             prefix: MYSQL
+    # Runs against one instance must not overlap: besides the fixed names of
+    # the scenario, a finishing run stops the instance.
     concurrency:
       group: e2e-gcp-${{ matrix.engine }}
       cancel-in-progress: false
+    timeout-minutes: 60
     env:
       JOB: dbfence-e2e-${{ matrix.engine }}
       REGION: ${{ vars.GCP_REGION }}
+      INSTANCE: ${{ vars[format('DBFENCE_E2E_{0}_INSTANCE', matrix.prefix)] }}
     steps:
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
@@ -224,6 +228,12 @@ jobs:
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v3
+
+      # The instance is kept stopped (activation policy NEVER) between runs
+      # to save cost. The patch returns once the instance is running.
+      - name: Start the Cloud SQL instance
+        id: start
+        run: gcloud sql instances patch "$INSTANCE" --activation-policy ALWAYS --quiet
 
       - name: Deploy the Cloud Run job
         run: |
@@ -273,3 +283,8 @@ jobs:
           gcloud logging read \
             "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND labels.\"run.googleapis.com/execution_name\"=\"$execution\"" \
             --freshness 1d --order asc --limit 10000 --format 'value(textPayload)'
+
+      # Also after a failure or a cancellation, once a start was attempted.
+      - name: Stop the Cloud SQL instance
+        if: always() && steps.start.outcome != 'skipped'
+        run: gcloud sql instances patch "$INSTANCE" --activation-policy NEVER --quiet

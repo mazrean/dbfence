@@ -12,7 +12,7 @@ build ──► aws-image (ECR) ──► aws  [postgres, mysql]: ecspresso run 
 1. `build` compiles a static linux/amd64 `dbfence` with the repository's toolchain.
 2. `aws-image` and `gcp-image` build [`e2e/Dockerfile`](../e2e/Dockerfile) (the binary, [`e2e/run.sh`](../e2e/run.sh), the scenario and the RDS CA bundle) and push it to ECR and Artifact Registry, tagged `<commit>-<run attempt>`.
 3. `aws` runs `ecspresso run --config e2e/aws/ecspresso.yml` once per engine. ecspresso registers a task definition revision, starts the task with the network configuration of the local service definition (there is no ECS service), streams its CloudWatch Logs and fails when the container exits non-zero.
-4. `gcp` deploys the Cloud Run job `dbfence-e2e-<engine>` with the new image and runs it with `gcloud run jobs execute --wait`, then prints the execution's logs.
+4. `gcp` starts the Cloud SQL instance of the engine (`gcloud sql instances patch --activation-policy ALWAYS`, which returns once it runs), deploys the Cloud Run job `dbfence-e2e-<engine>` with the new image, runs it with `gcloud run jobs execute --wait` and prints the execution's logs. Finally it stops the instance again (`--activation-policy NEVER`), also when the run failed or was cancelled, so the instances cost only storage between runs.
 
 The workflow runs on pushes to `main` that touch Go code or `e2e/`, weekly, and on demand. Runs against the same server are serialized (`concurrency`), because the scenario uses fixed names.
 
@@ -119,10 +119,12 @@ No GitHub secrets are needed: the workflow authenticates with OIDC (no long-live
 | `DBFENCE_E2E_RUN_SERVICE_ACCOUNT` | Email of the job's runtime service account | `google_service_account.job.email` |
 | `DBFENCE_E2E_RUN_NETWORK` | VPC network of Direct VPC egress | `google_compute_network.e2e.name` |
 | `DBFENCE_E2E_RUN_SUBNET` | Subnet of Direct VPC egress | `google_compute_subnetwork.e2e.name` |
+| `DBFENCE_E2E_POSTGRES_INSTANCE` | Name of the PostgreSQL instance, which the workflow starts and stops | `google_sql_database_instance.postgres.name` |
 | `DBFENCE_E2E_POSTGRES_HOST` | Private IP of the PostgreSQL instance | `google_sql_database_instance.postgres.private_ip_address` |
 | `DBFENCE_E2E_POSTGRES_ADMIN_USER` | Built-in admin user (for example `postgres`) | `google_sql_user.postgres_admin.name` |
 | `DBFENCE_E2E_POSTGRES_ADMIN_SECRET` | `projects/<project>/secrets/<secret>` holding its password | `google_secret_manager_secret.postgres_admin.id` |
 | `DBFENCE_E2E_POSTGRES_IAM_USER` | Database user name of the runtime service account: its email without `.gserviceaccount.com` | `trimsuffix(google_service_account.job.email, ".gserviceaccount.com")` |
+| `DBFENCE_E2E_MYSQL_INSTANCE` | Name of the MySQL instance, which the workflow starts and stops | `google_sql_database_instance.mysql.name` |
 | `DBFENCE_E2E_MYSQL_HOST` | Private IP of the MySQL instance | `google_sql_database_instance.mysql.private_ip_address` |
 | `DBFENCE_E2E_MYSQL_ADMIN_USER` | Built-in admin user (for example `root`) | `google_sql_user.mysql_admin.name` |
 | `DBFENCE_E2E_MYSQL_ADMIN_SECRET` | `projects/<project>/secrets/<secret>` holding its password | `google_secret_manager_secret.mysql_admin.id` |
@@ -143,6 +145,8 @@ Enable the APIs `run`, `sqladmin`, `secretmanager`, `artifactregistry`, `iamcred
 - `POSTGRES_17` (16 or later) and `MYSQL_8_4` (or `MYSQL_8_0`); the smallest tier is enough (for example `db-f1-micro` / `db-custom-1-3840`).
 - `ip_configuration { ipv4_enabled = false, private_network = <network>, ssl_mode = "ENCRYPTED_ONLY" }`. dbfence connects with `tls = "require"` over the private IP.
 - Database flags `cloudsql.iam_authentication = on` (PostgreSQL) and `cloudsql_iam_authentication = on` (MySQL).
+- `settings { activation_policy = "NEVER" }`: the instance is stopped except while a run uses it. The workflow switches the policy, so add `lifecycle { ignore_changes = [settings[0].activation_policy] }`, or `terraform apply` during a run stops the instance under it. Terraform cannot change most settings of a stopped instance either: start it with `gcloud sql instances patch <name> --activation-policy ALWAYS` before such an apply, and stop it afterwards. The private IP stays the same across stops.
+- A runner that dies without running the stop step (the step runs on failure and cancellation, but not when the runner is lost) leaves the instance running until the next run of that engine stops it. Check `gcloud sql instances list --filter settings.activationPolicy=ALWAYS` if a run was lost.
 - `deletion_protection` as you prefer; the scenario only creates and drops `e2e_*` objects.
 
 **Users and secrets**:
@@ -153,7 +157,7 @@ Enable the APIs `run`, `sqladmin`, `secretmanager`, `artifactregistry`, `iamcred
 **Service accounts**:
 
 - Runtime (`DBFENCE_E2E_RUN_SERVICE_ACCOUNT`): `roles/cloudsql.client` and `roles/cloudsql.instanceUser` on the project, `roles/secretmanager.secretAccessor` on the two admin secrets, and `roles/logging.logWriter`.
-- GitHub (`GCP_SERVICE_ACCOUNT`): `roles/run.developer` on the project (creates, updates and executes the jobs), `roles/iam.serviceAccountUser` on the runtime service account, `roles/artifactregistry.writer` on the repository and `roles/logging.viewer` on the project (prints the job's logs). Allow the GitHub workload identity to impersonate it: `roles/iam.workloadIdentityUser` for `principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/subject/repo:mazrean/dbfence:environment:e2e-gcp`.
+- GitHub (`GCP_SERVICE_ACCOUNT`): `roles/run.developer` on the project (creates, updates and executes the jobs), `roles/cloudsql.editor` on the project (`cloudsql.instances.update`, to start and stop the instances; a custom role with `cloudsql.instances.get` and `cloudsql.instances.update` is enough), `roles/iam.serviceAccountUser` on the runtime service account, `roles/artifactregistry.writer` on the repository and `roles/logging.viewer` on the project (prints the job's logs). Allow the GitHub workload identity to impersonate it: `roles/iam.workloadIdentityUser` for `principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/subject/repo:mazrean/dbfence:environment:e2e-gcp`.
 
 **Workload Identity Federation**: a `google_iam_workload_identity_pool` and an OIDC `google_iam_workload_identity_pool_provider` for `https://token.actions.githubusercontent.com`, with `attribute_mapping` `google.subject = assertion.sub`, `attribute.repository = assertion.repository`, and `attribute_condition = "assertion.repository == 'mazrean/dbfence'"`.
 
