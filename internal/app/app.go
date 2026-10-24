@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mazrean/dbfence/internal/apply"
+	"github.com/mazrean/dbfence/internal/auth"
 	"github.com/mazrean/dbfence/internal/config"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/driver/mysql"
@@ -35,7 +36,7 @@ type Driver interface {
 
 // Opener connects to a server.
 type Opener interface {
-	Open(ctx context.Context, engine model.Engine, dsn string) (Driver, error)
+	Open(ctx context.Context, conn model.Connection) (Driver, error)
 }
 
 // DefaultOpener opens the built-in drivers.
@@ -45,14 +46,14 @@ type DefaultOpener struct{}
 func NewOpener() Opener { return DefaultOpener{} }
 
 // Open implements Opener.
-func (DefaultOpener) Open(ctx context.Context, engine model.Engine, dsn string) (Driver, error) {
-	switch engine {
+func (DefaultOpener) Open(ctx context.Context, conn model.Connection) (Driver, error) {
+	switch conn.Engine {
 	case model.EnginePostgres:
-		return postgres.Open(ctx, dsn)
+		return postgres.Open(ctx, conn, auth.New(conn))
 	case model.EngineMySQL:
-		return mysql.Open(ctx, dsn)
+		return mysql.Open(ctx, conn, auth.New(conn))
 	default:
-		return nil, fmt.Errorf("unsupported engine %q", engine)
+		return nil, fmt.Errorf("unsupported engine %q", conn.Engine)
 	}
 }
 
@@ -99,7 +100,7 @@ func (a *App) Validate(_ context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(a.io.Out, "The configuration is valid (%s: %s, %s, %s, %s).\n", cfg.Engine,
+	_, err = fmt.Fprintf(a.io.Out, "The configuration is valid (%s: %s, %s, %s, %s).\n", cfg.Connection.Engine,
 		plan.Count(len(cfg.Desired.Databases), "database"), plan.Count(len(cfg.Desired.Roles), "role"),
 		plan.Count(len(cfg.Desired.Schemas), "schema"), plan.Count(len(cfg.Desired.Privileges), "privilege"))
 	return err
@@ -244,7 +245,7 @@ func (a *App) compute(ctx context.Context, o Options) (*checkedPlan, Driver, err
 	if err != nil {
 		return nil, nil, err
 	}
-	drv, err := a.opener.Open(ctx, cfg.Engine, cfg.DSN)
+	drv, err := a.opener.Open(ctx, cfg.Connection)
 	if err != nil {
 		return nil, nil, err
 	}

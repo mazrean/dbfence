@@ -7,8 +7,8 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +30,11 @@ const sqlstateInsufficientPrivilege = "42501"
 // separate connection with the database name replaced.
 type Driver struct {
 	Dialect
-	cfg   *pgx.ConnConfig
-	db    *sql.DB
-	conns map[string]*sql.DB
+	cfg *pgx.ConnConfig
+	// password returns the password of each new connection.
+	password func(context.Context) (string, error)
+	db       *sql.DB
+	conns    map[string]*sql.DB
 	// st is the state captured by the last Inspect. Driver methods that
 	// override Dialect use it to render grantor-aware statements.
 	st      *state
@@ -40,20 +42,17 @@ type Driver struct {
 	mu      sync.Mutex
 }
 
-// defaultConnectTimeout bounds connection attempts when the DSN does not
-// set connect_timeout.
-const defaultConnectTimeout = 10 * time.Second
-
-// Open connects to dsn.
-func Open(ctx context.Context, dsn string) (*Driver, error) {
-	cfg, err := parseConfig(dsn)
+// Open connects to the server of conn, with the password that password
+// returns for each new connection.
+func Open(ctx context.Context, conn model.Connection, password func(context.Context) (string, error)) (*Driver, error) {
+	cfg, err := parseConfig(conn)
 	if err != nil {
 		return nil, err
 	}
-	d := &Driver{cfg: cfg, conns: map[string]*sql.DB{}}
+	d := &Driver{cfg: cfg, conns: map[string]*sql.DB{}, password: password}
 	// Per-database connections copy the handler.
 	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { d.notices.add(n) }
-	d.db = stdlib.OpenDB(*cfg)
+	d.db = d.openDB(cfg)
 	if err = d.db.PingContext(ctx); err != nil {
 		_ = d.db.Close()
 		return nil, fmt.Errorf("connect to postgres: %w", dedupLines(err))
@@ -135,53 +134,80 @@ func noticeError(notices []*pgconn.Notice) error {
 	return nil
 }
 
-// parseConfig parses dsn and applies the session settings dbfence relies
-// on. Per-database connections copy the result.
-func parseConfig(dsn string) (*pgx.ConnConfig, error) {
-	cfg, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		return nil, parseError(err)
+// parseConfig builds the pgx configuration of conn and applies the
+// session settings dbfence relies on. Per-database connections copy the
+// result.
+func parseConfig(conn model.Connection) (*pgx.ConnConfig, error) {
+	// Every setting is given, so that PG* environment variables and
+	// ~/.pgpass cannot fill in one that the configuration leaves out.
+	// The password is set for each connection (see openDB).
+	settings := []struct{ key, value string }{
+		{"host", conn.Host},
+		{"port", strconv.Itoa(conn.Port)},
+		{"user", conn.User},
+		{"password", ""},
+		{"passfile", ""},
+		{"dbname", conn.Database},
+		{"sslmode", string(conn.TLS)},
+		{"connect_timeout", strconv.Itoa(int(conn.ConnectTimeout / time.Second))},
 	}
-	// Output redacts the password wherever it appears, unless it equals
-	// the user or database name, which output shows by design.
-	secret.Register(cfg.Password)
-	secret.RegisterPublic(cfg.User)
-	secret.RegisterPublic(cfg.Database)
-	if cfg.ConnectTimeout == 0 {
-		cfg.ConnectTimeout = defaultConnectTimeout
+	if conn.TLSCAFile != "" {
+		settings = append(settings, struct{ key, value string }{"sslrootcert", conn.TLSCAFile})
+	}
+	var sb strings.Builder
+	for _, kv := range settings {
+		fmt.Fprintf(&sb, "%s=%s ", kv.key, quoteSetting(kv.value))
+	}
+	cfg, err := pgx.ParseConfig(sb.String())
+	if err != nil {
+		// The error may quote the password.
+		return nil, parseError(err)
 	}
 	// Literals are rendered for standard_conforming_strings = on; a startup
 	// parameter overrides role and database defaults.
 	cfg.RuntimeParams["standard_conforming_strings"] = "on"
 	// Quoting assumes UTF-8: in a client encoding such as SJIS or BIG5 a
 	// quote or backslash byte can be the second byte of a multibyte
-	// character. Pinning it also keeps a DSN, role or database default
+	// character. Pinning it also keeps a role or database default
 	// from changing it.
 	cfg.RuntimeParams["client_encoding"] = "UTF8"
 	return cfg, nil
 }
 
-// parseError describes a DSN parse failure without the DSN, which may
-// contain a password that pgx cannot reliably mask.
+// openDB opens a pool of connections of cfg, each with a password from
+// d.password, which output redacts.
+func (d *Driver) openDB(cfg *pgx.ConnConfig) *sql.DB {
+	return stdlib.OpenDB(*cfg, stdlib.OptionBeforeConnect(func(ctx context.Context, cc *pgx.ConnConfig) error {
+		pw, err := d.password(ctx)
+		if err != nil {
+			return err
+		}
+		secret.Register(pw)
+		cc.Password = pw
+		return nil
+	}))
+}
+
+// quoteSetting quotes a value of a libpq keyword/value connection string.
+func quoteSetting(s string) string {
+	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(s) + "'"
+}
+
+// parseError describes a connection settings failure without the
+// settings, which contain the password.
 func parseError(err error) error {
-	const prefix = "parse postgres dsn: invalid connection string"
+	const prefix = "postgres connection settings"
 	var pce *pgconn.ParseConfigError
 	if !errors.As(err, &pce) {
-		return errors.New(prefix)
+		return errors.New(prefix + ": invalid")
 	}
-	// Error renders "cannot parse `<dsn>`: <msg>[ (<cause>)]"; with the DSN
-	// blanked only the static message and the cause remain.
+	// Error renders "cannot parse `<settings>`: <msg>[ (<cause>)]"; with
+	// the settings blanked only the static message remains.
 	bare := *pce
 	bare.ConnString = ""
 	msg := strings.TrimPrefix(bare.Error(), "cannot parse ``: ")
-	cause := errors.Unwrap(pce)
-	if cause != nil {
+	if cause := errors.Unwrap(pce); cause != nil {
 		msg = strings.TrimSuffix(msg, " ("+cause.Error()+")")
-	}
-	// URL errors quote the whole URL; only their inner error is safe.
-	// Other causes (keyword/value parsing) may quote parts of the input.
-	if urlErr := (*url.Error)(nil); errors.As(cause, &urlErr) {
-		msg += ": " + urlErr.Err.Error()
 	}
 	return fmt.Errorf("%s: %s", prefix, msg)
 }
@@ -197,7 +223,7 @@ func (d *Driver) conn(ctx context.Context, database string) (*sql.DB, error) {
 	}
 	cfg := d.cfg.Copy()
 	cfg.Database = database
-	c := stdlib.OpenDB(*cfg)
+	c := d.openDB(cfg)
 	c.SetMaxOpenConns(1)
 	if err := c.PingContext(ctx); err != nil {
 		_ = c.Close()

@@ -27,14 +27,13 @@ import (
 
 // Config is a loaded configuration.
 type Config struct {
-	Desired *model.Desired
-	Engine  model.Engine
-	DSN     string
+	Desired    *model.Desired
+	Connection model.Connection
 }
 
 var rootSchema = &hcl.BodySchema{
 	Blocks: []hcl.BlockHeaderSchema{
-		{Type: "connection"},
+		{Type: "connection", LabelNames: []string{"engine"}},
 		{Type: "database", LabelNames: []string{"name"}},
 		{Type: "role", LabelNames: []string{"name"}},
 		{Type: "user", LabelNames: []string{"name"}},
@@ -42,11 +41,6 @@ var rootSchema = &hcl.BodySchema{
 		{Type: "grant"},
 		{Type: "ignore"},
 	},
-}
-
-type connectionBlock struct {
-	Engine string `hcl:"engine"`
-	DSN    string `hcl:"dsn"`
 }
 
 type databaseBlock struct {
@@ -127,6 +121,10 @@ func Load(dir string, fns map[string]function.Function) (*Config, error) {
 	if diags.HasErrors() {
 		return nil, diagError(parser, diags)
 	}
+	// Like tfstate paths, a relative CA file is in the configuration directory.
+	if f := cfg.Connection.TLSCAFile; f != "" && !filepath.IsAbs(f) {
+		cfg.Connection.TLSCAFile = filepath.Join(dir, f)
+	}
 	return cfg, nil
 }
 
@@ -158,7 +156,7 @@ func hclFiles(dir string) ([]string, error) {
 
 // diagError renders the error diagnostics. The leading "Error: " of the
 // first one is dropped because the CLI prefixes errors with it already.
-// Source snippets show the values of password and dsn masked (see
+// Source snippets show the values of password masked (see
 // maskSecrets).
 func diagError(p *hclparse.Parser, diags hcl.Diagnostics) error {
 	diags = hideSecretKeys(dropCascades(errorsOnly(diags)))
@@ -325,7 +323,7 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 	}
 	base := &hcl.EvalContext{Functions: fns}
 
-	var conn *connectionBlock
+	var conn model.Connection
 	var connBlock *hcl.Block
 	byType := map[string][]*hcl.Block{}
 	for _, b := range content.Blocks {
@@ -335,29 +333,21 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 					fmt.Sprintf("Only one connection block is allowed; the first one is at %s.", loc(connBlock.DefRange))))
 				continue
 			}
-			connBlock, conn = b, &connectionBlock{}
-			diags = append(diags, gohcl.DecodeBody(b.Body, base, conn)...)
+			var d hcl.Diagnostics
+			connBlock = b
+			conn, d = decodeConnection(b, base)
+			diags = append(diags, d...)
 			continue
 		}
 		byType[b.Type] = append(byType[b.Type], b)
 	}
-	if conn == nil {
-		return nil, append(diags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Missing connection block", Detail: `A connection block with "engine" and "dsn" is required.`})
+	if connBlock == nil {
+		return nil, append(diags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Missing connection block", Detail: `A connection "postgres" or connection "mysql" block is required.`})
 	}
 	if diags.HasErrors() {
 		return nil, diags
 	}
-	connAttrs, _ := connBlock.Body.JustAttributes()
-	engine := model.Engine(conn.Engine)
-	if engine != model.EngineMySQL && engine != model.EnginePostgres {
-		return nil, append(diags, errAt(attrRange(connAttrs, "engine", connBlock.DefRange), "Unsupported engine",
-			fmt.Sprintf("engine must be %q or %q, got %q.", model.EngineMySQL, model.EnginePostgres, conn.Engine)))
-	}
-	if strings.TrimSpace(conn.DSN) == "" {
-		// The drivers would silently fall back to a default server.
-		return nil, append(diags, errAt(attrRange(connAttrs, "dsn", connBlock.DefRange), "Empty dsn",
-			"connection.dsn must not be empty (an env() or secret lookup may have returned an empty value)."))
-	}
+	engine := conn.Engine
 
 	// Pass 1: resolve names so blocks can reference each other.
 	vars := map[string]map[string]cty.Value{}
@@ -456,7 +446,7 @@ func decode(body hcl.Body, fns map[string]function.Function) (*Config, hcl.Diagn
 	if diags.HasErrors() {
 		return nil, diags
 	}
-	return &Config{Engine: engine, DSN: conn.DSN, Desired: dec.desired()}, diags
+	return &Config{Connection: conn, Desired: dec.desired()}, diags
 }
 
 func resolveName(b *hcl.Block, ctx *hcl.EvalContext, engine model.Engine) (resource, hcl.Diagnostics) {

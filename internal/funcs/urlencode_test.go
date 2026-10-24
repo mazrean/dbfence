@@ -48,7 +48,7 @@ func TestURLEncode(t *testing.T) {
 	}
 }
 
-func TestURLEncodePostgresDSNRoundTrip(t *testing.T) {
+func TestURLEncodePostgresURLRoundTrip(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
@@ -65,11 +65,11 @@ func TestURLEncodePostgresDSNRoundTrip(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := envRegistry(t, map[string]string{"USER": tt.user, "PW": tt.password})
-			dsn, err := eval(t, r, `format("postgres://%s:%s@db.internal:5432/app?sslmode=disable", urlencode(env("USER")), urlencode(env("PW")))`)
+			u, err := eval(t, r, `format("postgres://%s:%s@db.internal:5432/app?sslmode=disable", urlencode(env("USER")), urlencode(env("PW")))`)
 			if err != nil {
 				t.Fatal(err)
 			}
-			cfg, err := pgconn.ParseConfig(dsn.AsString())
+			cfg, err := pgconn.ParseConfig(u.AsString())
 			if err != nil {
 				t.Fatalf("ParseConfig: %v", err)
 			}

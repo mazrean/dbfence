@@ -35,6 +35,7 @@ internal/funcs/      env / aws_secretsmanager / gcp_secretmanager / tfstate (+ca
 internal/model/      engine-neutral Desired / Current, Role, Database, Schema, Privilege
 internal/driver/     mysql/ and postgres/: Driver (Inspect/Exec) + Dialect (SQL rendering); internal/sqltest SQL lexer for tests
 internal/password/   stored-hash verification (SCRAM, md5, mysql_native, caching_sha2)
+internal/auth/       connection password source: configured password, AWS RDS / GCP Cloud SQL IAM tokens
 internal/diff/       desired vs current -> ordered *plan.Plan via diff.Dialect (no I/O)
 internal/policy/     independent safety check of a finished plan (Verify, no I/O)
 internal/plan/       Statement / Secret fragments, redacted output (no I/O)

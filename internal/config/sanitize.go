@@ -13,17 +13,17 @@ import (
 )
 
 // Diagnostics quote the source lines around an error, and an error can
-// come before the values of password and dsn are known and registered
+// come before the values of password are known and registered
 // (a parse error, or another attribute of the same block). The source
 // shown in diagnostics is masked, and literal values are registered as
 // soon as the files are parsed.
 
 // secretAttrs are the attributes whose values are secret.
-var secretAttrs = map[string]bool{"password": true, "dsn": true}
+var secretAttrs = map[string]bool{"password": true}
 
 // secretAssign finds an assignment to a secret attribute on a line. It
 // works on raw bytes, so it also finds them in files that do not parse.
-var secretAssign = regexp.MustCompile(`(?:^|[^\w-])"?(?:password|dsn)"?[ \t]*=`)
+var secretAssign = regexp.MustCompile(`(?:^|[^\w-])"?password"?[ \t]*=`)
 
 // statementStart matches a line that visibly starts a new statement: an
 // attribute assignment, a block header, or the '}' that closes a block.
@@ -33,7 +33,7 @@ var statementStart = regexp.MustCompile(`^[ \t]*(?:\}|"[^"]*"[ \t]*=(?:[^=]|$)|[
 var heredocStart = regexp.MustCompile(`^<<-?([A-Za-z_][\w-]*)[ \t]*\r?$`)
 
 // maskSecrets returns a copy of src in which the value of every
-// assignment to password or dsn is replaced by '*' byte for byte, so
+// assignment to password is replaced by '*' byte for byte, so
 // that diagnostic ranges keep pointing at the same columns. The value
 // is masked up to the end of its line and, while it has open brackets,
 // heredocs or template interpolations, on the lines that follow: a
@@ -231,7 +231,7 @@ func parses(name string, src []byte) bool {
 }
 
 // registerLiteralSecrets registers the literal parts of every password
-// and dsn attribute of body and its nested blocks. It runs right after
+// attribute of body and its nested blocks. It runs right after
 // parsing, before anything can fail on the values.
 func registerLiteralSecrets(body hcl.Body) {
 	b, ok := body.(*hclsyntax.Body)
@@ -242,19 +242,7 @@ func registerLiteralSecrets(body hcl.Body) {
 		if !secretAttrs[name] {
 			continue
 		}
-		parts := literalParts(a.Expr)
-		if name == "dsn" {
-			for _, t := range templateTexts(a.Expr) {
-				registerPieces(dsnPasswords(t)...)
-			}
-			// Only a whole literal: the rest of the literal text
-			// around a lookup is not secret, and redacting it would
-			// garble messages.
-			if len(parts) != 1 || !isWholeLiteral(a.Expr) {
-				continue
-			}
-		}
-		for _, p := range parts {
+		for _, p := range literalParts(a.Expr) {
 			secret.Register(p)
 		}
 	}
@@ -298,26 +286,6 @@ func registerPieces(ss ...string) {
 	}
 }
 
-// dsnPasswords returns the passwords that the DSN text s holds: that of
-// its userinfo, as in postgres://user:pw@host/db and in MySQL's
-// user:pw@tcp(host)/db, and the values of password parameters, as in
-// ?password=pw and in the keyword form password=pw.
-func dsnPasswords(s string) []string {
-	var out []string
-	if info, ok := userinfo(s); ok {
-		if _, pw, ok := strings.Cut(info, ":"); ok {
-			out = append(out, pw)
-		}
-	}
-	sep := func(r rune) bool { return r == '?' || r == '&' || r == ' ' || r == '\t' || r == '\n' }
-	for f := range strings.FieldsFuncSeq(s, sep) {
-		if k, v, ok := strings.Cut(f, "="); ok && strings.Contains(strings.ToLower(k), "pass") {
-			out = append(out, strings.Trim(v, "'"))
-		}
-	}
-	return out
-}
-
 // stateURLSecrets returns the parts of the state URL text s that the
 // tfstate function does not print (see redactURL in internal/funcs):
 // the whole userinfo, since a token may be passed as the username, the
@@ -344,23 +312,18 @@ func stateURLSecrets(s string) []string {
 	return out
 }
 
-// userinfo returns the text before the '@' that ends the userinfo of a
-// URL or of a MySQL DSN: the last '@' of the authority of a URL, or the
-// last '@' before the last '/' of a DSN without a scheme.
+// userinfo returns the userinfo of the URL s: the text before the last
+// '@' of its authority.
 func userinfo(s string) (string, bool) {
-	if _, rest, ok := strings.Cut(s, "://"); ok {
-		if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-			rest = rest[:i]
-		}
-		s = rest
-	} else if i := strings.LastIndex(s, "/"); i >= 0 {
-		s = s[:i]
+	_, rest, _ := strings.Cut(s, "://")
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
 	}
-	i := strings.LastIndex(s, "@")
+	i := strings.LastIndex(rest, "@")
 	if i < 0 {
 		return "", false
 	}
-	return s[:i], true
+	return rest[:i], true
 }
 
 // lookupFuncs are the functions whose arguments name a value (an
@@ -437,19 +400,6 @@ func literals(e hclsyntax.Expression, joined bool) []string {
 		return out
 	}
 	return nil
-}
-
-// isWholeLiteral reports whether e is a string with no interpolation.
-func isWholeLiteral(e hclsyntax.Expression) bool {
-	switch e := e.(type) {
-	case *hclsyntax.ParenthesesExpr:
-		return isWholeLiteral(e.Expression)
-	case *hclsyntax.LiteralValueExpr:
-		return true
-	case *hclsyntax.TemplateExpr:
-		return e.IsStringLiteral()
-	}
-	return false
 }
 
 func stringValue(v cty.Value) (string, bool) {

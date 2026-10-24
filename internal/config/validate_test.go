@@ -7,8 +7,8 @@ import (
 
 // Both connection blocks end on line 4, so content after them starts on line 5.
 const (
-	pgConn = "connection {\n engine = \"postgres\"\n dsn = \"x\"\n}\n"
-	myConn = "connection {\n engine = \"mysql\"\n dsn = \"x\"\n}\n"
+	pgConn = "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n}\n"
+	myConn = "connection \"mysql\" {\n host = \"h\"\n user = \"u\"\n}\n"
 )
 
 type diagCase struct {
@@ -52,8 +52,8 @@ func TestLoadDiagnostics(t *testing.T) {
 	runDiagCases(t, []diagCase{
 		{
 			name:  "unsupported engine points at engine",
-			src:   "connection {\n dsn = \"x\"\n engine = \"Postgres\"\n}\n",
-			want:  []string{"Unsupported engine", "dbfence.hcl line 3"},
+			src:   "connection \"Postgres\" {\n host = \"h\"\n user = \"u\"\n}\n",
+			want:  []string{"Unsupported engine", "dbfence.hcl line 1"},
 			count: 1,
 		},
 		{

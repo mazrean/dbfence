@@ -67,16 +67,34 @@ func TestLoadReferenceErrors(t *testing.T) {
 			count: 1,
 		},
 		{
-			name:  "empty dsn",
-			src:   "connection {\n engine = \"mysql\"\n dsn = \"\"\n}\n",
-			want:  []string{"Empty dsn", "dbfence.hcl line 3"},
+			name:  "empty host",
+			src:   "connection \"mysql\" {\n host = \"\"\n user = \"u\"\n}\n",
+			want:  []string{"Empty value", "connection.host must not be empty", "dbfence.hcl line 2"},
 			count: 1,
 		},
 		{
-			name:  "blank dsn from env default",
-			src:   "connection {\n engine = \"postgres\"\n dsn = env(\"NOPE\", \" \")\n}\n",
-			want:  []string{"Empty dsn"},
+			name:  "blank user from env default",
+			src:   "connection \"postgres\" {\n host = \"h\"\n user = env(\"NOPE\", \" \")\n}\n",
+			want:  []string{"Empty value", "connection.user must not be empty"},
 			count: 1,
+		},
+		{
+			name:  "empty postgres database",
+			src:   "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n database = \"\"\n}\n",
+			want:  []string{"connection.database must not be empty"},
+			count: 1,
+		},
+		{
+			name:  "missing user",
+			src:   "connection \"postgres\" {\n host = \"h\"\n}\n",
+			want:  []string{`The argument "user" is required`},
+			count: 1,
+		},
+		{
+			name:  "invalid connection settings",
+			src:   "connection \"postgres\" {\n host = \"h\"\n user = \"u\"\n port = 70000\n tls = \"verify-x\"\n connect_timeout = 0\n}\n",
+			want:  []string{"Invalid port", "Invalid tls", "Invalid connect_timeout"},
+			count: 3,
 		},
 	})
 }

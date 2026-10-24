@@ -36,7 +36,7 @@ func (emptyServer) Close() error { return nil }
 
 type emptyServerOpener struct{}
 
-func (emptyServerOpener) Open(context.Context, model.Engine, string) (app.Driver, error) {
+func (emptyServerOpener) Open(context.Context, model.Connection) (app.Driver, error) {
 	return emptyServer{}, nil
 }
 
@@ -45,7 +45,7 @@ func (emptyServerOpener) Open(context.Context, model.Engine, string) (app.Driver
 func TestRunRedactsSecrets(t *testing.T) {
 	t.Parallel()
 	const pw = "cli-sink-secret-pw"
-	dir := writeConfig(t, "connection {\n  engine = \"postgres\"\n  dsn = \"x\"\n}\nuser \""+pw+"\" {\n  password = \""+pw+"\"\n}\n")
+	dir := writeConfig(t, "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\nuser \""+pw+"\" {\n  password = \""+pw+"\"\n}\n")
 	tests := []struct {
 		name  string
 		want  string

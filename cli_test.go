@@ -12,7 +12,7 @@ import (
 
 func TestRun(t *testing.T) {
 	t.Parallel()
-	src := "connection {\n  engine = \"postgres\"\n  dsn = \"postgres://localhost/x\"\n}\nrole \"r\" {}\n"
+	src := "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\nrole \"r\" {}\n"
 	valid := writeConfig(t, src)
 	unknownAttr := writeConfig(t, strings.Replace(src, "role \"r\" {}", "role \"r\" {\n  bogus = true\n}", 1))
 	escAttr := writeConfig(t, strings.Replace(src, "role \"r\" {}", "role \"r\" {\n  bogus = true # \x1b[2K\n}", 1))
@@ -71,7 +71,7 @@ func writeConfig(t *testing.T, src string) string {
 }
 
 func TestRunLoadsEveryHCLFileInTheWorkingDirectory(t *testing.T) {
-	dir := writeConfig(t, "connection {\n  engine = \"postgres\"\n  dsn = \"postgres://localhost/x\"\n}\n")
+	dir := writeConfig(t, "connection \"postgres\" {\n  host = \"h\"\n  user = \"u\"\n}\n")
 	for name, src := range map[string]string{
 		"roles.hcl":     "role \"r\" {}\n",
 		"roles.hcl.bak": "bogus\n",

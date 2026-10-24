@@ -9,7 +9,7 @@ import (
 )
 
 // urlencodeFunc percent-encodes a string so it can be embedded in any URL
-// component, including the userinfo of a DSN. It is url.QueryEscape with
+// component, including the userinfo of a URL. It is url.QueryEscape with
 // spaces as "%20" rather than "+", because "+" is literal outside a query.
 var urlencodeFunc = function.New(&function.Spec{
 	Description: "Percent-encodes a string for use in a URL, including the user and password parts.",

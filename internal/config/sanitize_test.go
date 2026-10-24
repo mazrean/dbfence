@@ -9,7 +9,7 @@ import (
 
 // TestDiagnosticsMaskSecrets checks the error text itself, before the
 // output sink redacts registered secrets: the source snippets must not
-// show literal passwords or DSNs that were never registered.
+// show literal passwords that were never registered.
 func TestDiagnosticsMaskSecrets(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -28,10 +28,10 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			shown:  "password =****",
 		},
 		{
-			name:   "dsn with an error after the literal",
-			src:    "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://u:Hj4tPq8sWe@h/d\" + 1\n}\n",
+			name:   "connection password with an error after the literal",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://u:Hj4tPq8sWe@h/d\" + 1\n}\n",
 			leaked: "Hj4tPq8sWe",
-			shown:  "dsn    =****",
+			shown:  "password =****",
 		},
 		{
 			name:   "valid password, another attribute of the line wrong",
@@ -70,8 +70,8 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			shown:  "****",
 		},
 		{
-			name:   "multi-line dsn format, unknown variable",
-			src:    "connection {\n  engine = \"postgres\"\n  dsn    = format(\n    \"postgres://u:Ee1Lp3sWq9@h/d${nope}\"\n  )\n}\n",
+			name:   "connection multi-line password format, unknown variable",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = format(\n    \"postgres://u:Ee1Lp3sWq9@h/d${nope}\"\n  )\n}\n",
 			leaked: "Ee1Lp3sWq9",
 			shown:  "****",
 		},
@@ -82,14 +82,14 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			shown:  "****",
 		},
 		{
-			name:   "dsn interpolation across lines, parse error",
-			src:    "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://${\n    \"app\"\n  }:Rr9DsnPw7@h/d\" 1\n}\n",
+			name:   "connection password interpolation across lines, parse error",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://${\n    \"app\"\n  }:Rr9DsnPw7@h/d\" 1\n}\n",
 			leaked: "Rr9DsnPw7",
 			shown:  "****",
 		},
 		{
-			name:   "dsn interpolation across lines, unknown variable",
-			src:    "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://${\n    \"app\"\n  }:Rr8DsnPw7@h/${nope}\"\n}\n",
+			name:   "connection password interpolation across lines, unknown variable",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = \"postgres://${\n    \"app\"\n  }:Rr8DsnPw7@h/${nope}\"\n}\n",
 			leaked: "Rr8DsnPw7",
 			shown:  "****",
 		},
@@ -130,8 +130,8 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			shown:  "****",
 		},
 		{
-			name:   "dsn on the line after =",
-			src:    "connection {\n  engine = \"postgres\"\n  dsn    =\n    \"postgres://u:Qq5NextDsnPw9@h/d\"\n}\n",
+			name:   "connection password on the line after =",
+			src:    "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password =\n    \"postgres://u:Qq5NextDsnPw9@h/d\"\n}\n",
 			leaked: "Qq5NextDsnPw9",
 			shown:  "****",
 		},
@@ -182,33 +182,33 @@ func TestMaskSecrets(t *testing.T) {
 		name, in, want string
 	}{
 		{name: "password", in: `  password = "abc"`, want: `  password =******`},
-		{name: "dsn keeps the line break", in: "dsn=\"x\"\r\nengine = 1\n", want: "dsn=***\r\nengine = 1\n"},
+		{name: "password keeps the line break", in: "password=\"x\"\r\nengine = 1\n", want: "password=***\r\nengine = 1\n"},
 		{name: "quoted key", in: `{ "password" = "abc" }`, want: `{ "password" =********`},
 		{name: "first assignment masks the rest of the line", in: `user "a" { password = "x", login = true }`, want: `user "a" { password =********************`},
 		{name: "comparison is not an assignment", in: `x = password == "abc"`, want: `x = password == "abc"`},
-		{name: "other names", in: "password_hash = \"a\"\nmy-dsn = \"b\"\nold_password = \"c\"\n", want: "password_hash = \"a\"\nmy-dsn = \"b\"\nold_password = \"c\"\n"},
+		{name: "other names", in: "password_hash = \"a\"\nmy-password = \"b\"\nold_password = \"c\"\n", want: "password_hash = \"a\"\nmy-password = \"b\"\nold_password = \"c\"\n"},
 		{name: "heredoc", in: "password = <<-EOT\n  secret\n  EOT\nlogin = true\n", want: "password =*******\n********\n  EOT\nlogin = true\n"},
-		{name: "unterminated heredoc", in: "dsn = <<EOT\nsecret\n", want: "dsn =******\n******\n"},
+		{name: "unterminated heredoc", in: "password = <<EOT\nsecret\n", want: "password =******\n******\n"},
 		{name: "multi-byte characters keep their byte length", in: "password = \"é\"", want: "password =*****"},
 		{name: "multi-line call", in: "password = format(\n  \"a\",\n  \")\"\n)\nlogin = true\n", want: "password =********\n******\n*****\n*\nlogin = true\n"},
-		{name: "heredoc inside a call", in: "dsn = trimspace(<<EOT\nsecret\nEOT\n)\nx = 1\n", want: "dsn =****************\n******\nEOT\n*\nx = 1\n"},
+		{name: "heredoc inside a call", in: "password = trimspace(<<EOT\nsecret\nEOT\n)\nx = 1\n", want: "password =****************\n******\nEOT\n*\nx = 1\n"},
 		{name: "brackets of a one-line block", in: "user \"a\" { password = \"x\" }\nlogin = true\n", want: "user \"a\" { password =******\nlogin = true\n"},
 		{name: "brackets in a comment", in: "password = \"x\" # (\nlogin = true\n", want: "password =********\nlogin = true\n"},
 		{name: "unclosed bracket masks the rest", in: "password = format(\nx = 1\n", want: "password =********\n*****\n"},
-		{name: "interpolation across lines", in: "dsn = \"a${\n  b\n}c\"\nx = 1\n", want: "dsn =*****\n***\n***\nx = 1\n"},
+		{name: "interpolation across lines", in: "password = \"a${\n  b\n}c\"\nx = 1\n", want: "password =*****\n***\n***\nx = 1\n"},
 		{name: "template directive across lines", in: "password = \"a%{ if\n  true }b%{ endif }\"\nx = 1\n", want: "password =********\n********************\nx = 1\n"},
 		{name: "escaped interpolation", in: "password = \"a$${\"\nx = 1\n", want: "password =*******\nx = 1\n"},
 		{name: "interpolation in a heredoc", in: "password = <<EOT\na${\nEOT\n}\nEOT\nx = 1\n", want: "password =******\n***\n***\n*\nEOT\nx = 1\n"},
-		{name: "unterminated string inside an interpolation", in: "dsn = \"a${\"b\n}\"\nx = 1\n", want: "dsn =*******\n**\nx = 1\n"},
+		{name: "unterminated string inside an interpolation", in: "password = \"a${\"b\n}\"\nx = 1\n", want: "password =*******\n**\nx = 1\n"},
 		{name: "value on the next line", in: "password =\n  \"abc\"\nx = 1\n", want: "password =\n*******\nx = 1\n"},
-		{name: "blank and comment lines before the value", in: "dsn =\n\n# c\n  \"abc\"\n}\n", want: "dsn =\n\n***\n*******\n}\n"},
+		{name: "blank and comment lines before the value", in: "password =\n\n# c\n  \"abc\"\n}\n", want: "password =\n\n***\n*******\n}\n"},
 		{name: "string broken across lines", in: "password = \"a\nbc\"\nx = 1\n", want: "password =***\n***\nx = 1\n"},
 		{name: "continuation ends at a block header", in: "password = \"a\"\nuser \"b\" {\n", want: "password =****\nuser \"b\" {\n"},
 		{name: "continuation ends at a quoted key", in: "password = \"a\"\n\"login\" = true\n", want: "password =****\n\"login\" = true\n"},
 		{name: "comparison does not end the continuation", in: "password =\n  x == \"abc\"\n}\n", want: "password =\n************\n}\n"},
 		{name: "brackets in a block comment", in: "password = f( /* ) */\n  \"a\")\nx = 1\n", want: "password =***********\n******\nx = 1\n"},
 		{name: "block comment across lines", in: "password = /*\n*/ \"a\"\nx = 1\n", want: "password =***\n******\nx = 1\n"},
-		{name: "next assignment is masked after a continuation", in: "password =\n  \"a\"\ndsn = \"b\"\nx = 1\n", want: "password =\n*****\ndsn =****\nx = 1\n"},
+		{name: "next assignment is masked after a continuation", in: "password =\n  \"a\"\npassword = \"b\"\nx = 1\n", want: "password =\n*****\npassword =****\nx = 1\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -249,24 +249,14 @@ func TestRegisterLiteralSecrets(t *testing.T) {
 			registered: []string{"Gh3jKl5zXc"},
 		},
 		{
-			name:       "dsn literal and its URL password",
-			src:        "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://u:Vb6nMq1wEr@h/d\"\n}\nuser \"app\" { login = \"maybe\" }\n",
-			registered: []string{"postgres://u:Vb6nMq1wEr@h/d", "Vb6nMq1wEr"},
-		},
-		{
-			name:    "text around a lookup in a dsn",
-			src:     "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://dsnuser:${env(\"PW\")}@dsnhost/d\"\n}\nuser \"app\" { login = \"maybe\" }\n",
-			visible: []string{"postgres://dsnuser:", "@dsnhost/d"},
+			name:       "connection password",
+			src:        "connection \"postgres\" {\n  host     = \"h\"\n  user     = \"u\"\n  password = \"Vb6nMq1wEr\"\n}\nuser \"app\" { login = \"maybe\" }\n",
+			registered: []string{"Vb6nMq1wEr"},
 		},
 		{
 			name:       "literals in nested expressions",
 			src:        pgConn + "user \"app\" {\n  password = format(\n    [\"Ff1Gt5yHn7${nope}\"][0], true ? \"Kk2Lm4Np6q\" : \"x\"\n  )\n}\n",
 			registered: []string{"Ff1Gt5yHn7", "Kk2Lm4Np6q"},
-		},
-		{
-			name:       "URL password in a dsn template",
-			src:        "connection {\n  engine = \"postgres\"\n  dsn    = format(\"postgres://u:Ee1Lp3sWq9@h/d${nope}\")\n}\n",
-			registered: []string{"Ee1Lp3sWq9"},
 		},
 		{
 			name:       "password of a tfstate URL on another attribute",
@@ -285,30 +275,6 @@ func TestRegisterLiteralSecrets(t *testing.T) {
 			src:        pgConn + "database \"app\" {\n  name = tfstate(\"https://h/x.tfstate?token=Tk2QueryTok9q&v=Tk4Sig%2F9q\", \"out${nope}\")\n}\n",
 			registered: []string{"Tk2QueryTok9q", "token=Tk2QueryTok9q&v=Tk4Sig%2F9q", "Tk4Sig/9q"},
 			visible:    []string{"https://h/x.tfstate"},
-		},
-		{
-			name:       "dsn password after an interpolation",
-			src:        "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://${\n    \"app\"\n  }:Rr8DsnPw7${\"\"}Tail@h/${nope}\"\n}\n",
-			registered: []string{"Rr8DsnPw7", "Tail"},
-			visible:    []string{"postgres://", "@h/"},
-		},
-		{
-			name:       "MySQL dsn template",
-			src:        "connection {\n  engine = \"mysql\"\n  dsn    = \"${env(\"U\")}:My1DsnPw9@tcp(h:3306)/${nope}\"\n}\n",
-			registered: []string{"My1DsnPw9"},
-			visible:    []string{"@tcp(h:3306)/"},
-		},
-		{
-			name:       "dsn password parameters",
-			src:        "connection {\n  engine = \"postgres\"\n  dsn    = \"postgres://h/d?sslmode=disable&password=Pp1QryPw9&x=${nope}\"\n}\n",
-			registered: []string{"Pp1QryPw9"},
-			visible:    []string{"disable", "postgres://h/d?sslmode=disable&password="},
-		},
-		{
-			name:       "dsn keyword form",
-			src:        "connection {\n  engine = \"postgres\"\n  dsn    = \"host=${nope} user=app password='Kw1DsnPw9'\"\n}\n",
-			registered: []string{"Kw1DsnPw9"},
-			visible:    []string{"host=", " user=app password='"},
 		},
 		{
 			name:    "function arguments name secrets",

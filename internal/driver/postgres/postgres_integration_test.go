@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"slices"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mazrean/dbfence/internal/apply"
+	"github.com/mazrean/dbfence/internal/auth"
 	"github.com/mazrean/dbfence/internal/diff"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/plan"
@@ -36,6 +38,8 @@ type server struct {
 	admin *sql.DB
 	// dsn returns a DSN for user (password "pw") on database "postgres".
 	dsn func(user string) string
+	// conn returns the same as a model.Connection.
+	conn func(user string) model.Connection
 }
 
 func startServer(t *testing.T) *server {
@@ -65,8 +69,19 @@ func startServerTag(t *testing.T, tag string) *server {
 		t.Fatalf("start postgres: %v", err)
 	}
 	hp := res.GetHostPort("5432/tcp")
+	host, port, err := net.SplitHostPort(hp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &server{t: t, dsn: func(user string) string {
 		return "postgres://" + user + ":pw@" + hp + "/postgres?sslmode=disable"
+	}, conn: func(user string) model.Connection {
+		return model.Connection{Engine: model.EnginePostgres, Host: host, Port: portNum, User: user, Password: "pw",
+			Database: "postgres", TLS: model.TLSDisable, ConnectTimeout: 10 * time.Second}
 	}}
 	s.admin, err = sql.Open("pgx", s.dsn("postgres"))
 	if err != nil {
@@ -121,7 +136,7 @@ func (s *server) queryStrings(t *testing.T, q string) []string {
 
 func (s *server) open(t *testing.T, user string) *Driver {
 	t.Helper()
-	d, err := Open(t.Context(), s.dsn(user))
+	d, err := Open(t.Context(), s.conn(user), auth.Static("pw"))
 	if err != nil {
 		t.Fatal(err)
 	}
