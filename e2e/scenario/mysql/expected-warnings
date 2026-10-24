@@ -1,0 +1,5 @@
+# Warnings that the cleanup and stage phases may print (extended regular
+# expressions, one per line). Any other warning fails the run, because a
+# warning means that the server was not changed as declared.
+
+^warning: --target is in effect

@@ -93,3 +93,12 @@ create_worktree() {
 create_worktree $1
 '''
 description = "Create and checkout a new git worktree"
+
+[tasks."e2e:local"]
+description = "Run the end-to-end scenario (e2e/run.sh) against local Docker servers"
+run = [
+  "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o e2e/dbfence .",
+  "docker compose -f e2e/compose.yaml run --build --rm run-postgres",
+  "docker compose -f e2e/compose.yaml run --build --rm run-mysql",
+  "docker compose -f e2e/compose.yaml down -v",
+]

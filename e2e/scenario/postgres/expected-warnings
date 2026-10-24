@@ -1,0 +1,13 @@
+# Warnings that the cleanup and stage phases may print (extended regular
+# expressions, one per line). Any other warning fails the run, because a
+# warning means that the server was not changed as declared.
+
+# RDS and Cloud SQL do not let the admin read pg_authid.
+^warning: cannot read the password verifiers of existing roles?
+^warning: --target is in effect
+
+# Known limitation: on PostgreSQL 16+ the server grants every role that a
+# non-superuser creates to its creator, and --prune keeps roles granted to
+# the connected user. So on RDS and Cloud SQL, --prune does not drop the
+# roles dbfence created; they stay between runs.
+^warning: (role|user) "e2e_[a-z_]+" is granted to the connected user "[^"]+"; not pruned$
