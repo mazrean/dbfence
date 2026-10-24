@@ -80,7 +80,10 @@ func New(fr *funcs.Registry, opener Opener, streams *IO) *App {
 
 // Options are command line options.
 type Options struct {
-	Dir           string
+	Dir string
+	// Targets are resource addresses (user.app, database.app, ...); when
+	// set, only their changes are planned (see plan.Plan.Select).
+	Targets       []string
 	Prune         bool
 	ForcePassword bool
 	ShowSecrets   bool
@@ -93,6 +96,13 @@ var ErrAborted = errors.New("apply cancelled")
 // ErrUnsafePlan is returned when the plan fails the independent safety
 // check (see policy.Verify). It means a bug in dbfence.
 var ErrUnsafePlan = errors.New("internal safety check failed")
+
+// ErrUnsafeTarget is returned when the plan passes the safety check but
+// the part of it that --target selects does not.
+var ErrUnsafeTarget = errors.New("the plan selected by --target fails the safety check")
+
+// targetWarning is printed with every plan computed with --target.
+const targetWarning = "--target is in effect: only the changes of the selected objects, and the creation of the objects they need, are planned, so the server may still differ from the configuration; run plan without --target to see the rest"
 
 // Validate loads the configuration, evaluating every function.
 func (a *App) Validate(_ context.Context, o Options) error {
@@ -224,26 +234,53 @@ func closeQuietly(c io.Closer) { _ = c.Close() }
 type checkedPlan struct {
 	*plan.Plan
 	violations []policy.Violation
+	// selected are the violations of the plan --target selects from a
+	// plan without violations.
+	selected []policy.Violation
+	// targeted is set when Plan is a --target selection.
+	targeted bool
 }
 
-// verdict returns ErrUnsafePlan listing the violations, or nil.
+// verdict returns ErrUnsafePlan or ErrUnsafeTarget listing the
+// violations, or nil.
 func (p *checkedPlan) verdict() error {
-	if len(p.violations) == 0 {
-		return nil
+	switch {
+	case len(p.violations) > 0:
+		msg := "(this is a bug in dbfence; please report it)"
+		if p.targeted {
+			msg = "(this is a bug in dbfence; please report it with the plan printed without --target)"
+		}
+		return fmt.Errorf("%w: %s %s", ErrUnsafePlan, violations(p.violations), msg)
+	case len(p.selected) > 0:
+		return fmt.Errorf("%w: %s; select more objects or run without --target", ErrUnsafeTarget, violations(p.selected))
 	}
-	msgs := make([]string, len(p.violations))
-	for i, v := range p.violations {
+	return nil
+}
+
+func violations(vs []policy.Violation) string {
+	msgs := make([]string, len(vs))
+	for i, v := range vs {
 		msgs[i] = v.String()
 	}
-	return fmt.Errorf("%w: %s (this is a bug in dbfence; please report it)", ErrUnsafePlan, strings.Join(msgs, "; "))
+	return strings.Join(msgs, "; ")
 }
 
 // compute inspects the server, diffs it against the configuration and
 // runs the independent safety check on the plan.
 func (a *App) compute(ctx context.Context, o Options) (*checkedPlan, Driver, error) {
+	if len(o.Targets) > 0 && o.Prune {
+		// Undeclared objects have no address, so nothing could be pruned.
+		return nil, nil, errors.New("--prune cannot be combined with --target")
+	}
 	cfg, err := config.Load(o.Dir, a.funcs.Functions())
 	if err != nil {
 		return nil, nil, err
+	}
+	addrs := make([]model.Address, len(o.Targets))
+	for i, t := range o.Targets {
+		if addrs[i], err = cfg.Address(t); err != nil {
+			return nil, nil, fmt.Errorf("--target: %w", err)
+		}
 	}
 	drv, err := a.opener.Open(ctx, cfg.Connection)
 	if err != nil {
@@ -259,6 +296,15 @@ func (a *App) compute(ctx context.Context, o Options) (*checkedPlan, Driver, err
 		_ = drv.Close()
 		return nil, nil, err
 	}
-	v := policy.Verify(p, cur, cfg.Desired, policy.Options{System: drv, Prune: o.Prune})
-	return &checkedPlan{Plan: p, violations: v}, drv, nil
+	popts := policy.Options{System: drv, Prune: o.Prune}
+	checked := &checkedPlan{Plan: p, violations: policy.Verify(p, cur, cfg.Desired, popts)}
+	if len(addrs) > 0 {
+		// The selected plan is the one executed, so it is checked too.
+		checked.Plan, checked.targeted = p.Select(addrs), true
+		checked.Warnings = append([]string{targetWarning}, checked.Warnings...)
+		if len(checked.violations) == 0 {
+			checked.selected = policy.Verify(checked.Plan, cur, cfg.Desired, popts)
+		}
+	}
+	return checked, drv, nil
 }

@@ -41,14 +41,15 @@ func (d workDir) options() app.Options {
 }
 
 type diffFlags struct {
-	Prune         bool `help:"Drop databases, schemas and roles that are not declared."`
-	ForcePassword bool `help:"Set declared passwords even if they cannot be verified or already match."`
-	ShowSecrets   bool `help:"Turn off all redaction: print passwords in SQL instead of '<redacted>', and known secrets in every message on stdout and stderr."`
+	Target        []string `sep:"none" placeholder:"ADDRESS" help:"Plan only the changes of this declared block (role.<label>, user.<label>, database.<label> or schema.<label>) and the creation of the objects they need. Repeatable."`
+	Prune         bool     `help:"Drop databases, schemas and roles that are not declared."`
+	ForcePassword bool     `help:"Set declared passwords even if they cannot be verified or already match."`
+	ShowSecrets   bool     `help:"Turn off all redaction: print passwords in SQL instead of '<redacted>', and known secrets in every message on stdout and stderr."`
 }
 
 func (f diffFlags) options(dir workDir) app.Options {
 	o := dir.options()
-	o.Prune, o.ForcePassword, o.ShowSecrets = f.Prune, f.ForcePassword, f.ShowSecrets
+	o.Prune, o.ForcePassword, o.ShowSecrets, o.Targets = f.Prune, f.ForcePassword, f.ShowSecrets, f.Target
 	return o
 }
 

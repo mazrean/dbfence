@@ -436,3 +436,13 @@ func SortRoleIDs(ids []RoleID) []RoleID {
 	slices.SortFunc(ids, CompareRoleIDs)
 	return ids
 }
+
+// Address is the declared role, database or schema that a resource
+// address such as user.app names (plan --target). Role is set for role
+// and user blocks, Database for database and schema blocks, and Schema
+// for schema blocks.
+type Address struct {
+	Role     RoleID
+	Database string
+	Schema   string
+}

@@ -38,7 +38,7 @@ internal/password/   stored-hash verification (SCRAM, md5, mysql_native, caching
 internal/auth/       connection password source: configured password, AWS RDS / GCP Cloud SQL IAM tokens
 internal/diff/       desired vs current -> ordered *plan.Plan via diff.Dialect (no I/O)
 internal/policy/     independent safety check of a finished plan (Verify, no I/O)
-internal/plan/       Statement / Secret fragments, redacted output (no I/O)
+internal/plan/       Statement / Secret fragments, --target selection, redacted output (no I/O)
 internal/secret/     secret registry + redacting, control-escaping output Writer
 internal/apply/      sequential execution, stop at first error
 internal/di/         kessoku injectors

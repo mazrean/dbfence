@@ -34,6 +34,10 @@ func TestRun(t *testing.T) {
 		{name: "validate unknown attribute renders the diagnostic unindented", args: []string{"-C", unknownAttr, "validate"}, wantCode: exitError, wantOut: "", wantErrOut: "dbfence: error: Unsupported argument\n\n  on " + filepath.Join(unknownAttr, "dbfence.hcl") + " line 6, in role \"r\":\n   6:   bogus = true\n\nAn argument named \"bogus\" is not expected here.\n"},
 		{name: "error escapes control characters but keeps lines", args: []string{"-C", escAttr, "validate"}, wantCode: exitError, wantOut: "", wantErrOut: "   6:   bogus = true # \\x1b[2K\n"},
 		{name: "validate missing directory", args: []string{"--chdir", filepath.Join(valid, "none"), "validate"}, wantCode: exitError, wantOut: "", wantErrOut: "read configuration directory (set -C/--chdir or DBFENCE_CHDIR): open "},
+		{name: "target with prune", args: []string{"-C", valid, "plan", "--target", "role.r", "--prune"}, wantCode: exitError, wantOut: "", wantErrOut: "dbfence: error: --prune cannot be combined with --target\n"},
+		{name: "target is not split at commas", args: []string{"-C", valid, "apply", "--target=role.r,role.s"}, wantCode: exitError, wantOut: "", wantErrOut: `dbfence: error: --target: "role.r,role.s" does not name a declared block`},
+		{name: "repeated target names an undeclared block", args: []string{"-C", valid, "plan", "--target", "role.r", "--target", "database.r"}, wantCode: exitError, wantOut: "", wantErrOut: `dbfence: error: --target: "database.r" does not name a declared block`},
+		{name: "validate takes no target", args: []string{"-C", valid, "validate", "--target", "role.r"}, wantCode: exitError, wantOut: "", wantErrOut: "unknown flag --target"},
 		{name: "validate directory without *.hcl", args: []string{"validate", "-C", t.TempDir()}, wantCode: exitError, wantOut: "", wantErrOut: "no *.hcl files in "},
 	}
 	for _, tt := range tests {
