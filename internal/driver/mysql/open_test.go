@@ -5,52 +5,37 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	gomysql "github.com/go-sql-driver/mysql"
+	"github.com/mazrean/dbfence/internal/model"
 )
 
-func TestParseDSN(t *testing.T) {
+func TestNewConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		dsn         string
-		wantErr     string
-		wantTimeout time.Duration
+		wantAddr string
+		wantTLS  string
+		conn     model.Connection
 	}{
-		{dsn: "root:pw@tcp(127.0.0.1:3306)/", wantTimeout: defaultTimeout},
-		{dsn: "root:pw@tcp(127.0.0.1:3306)/?timeout=3s", wantTimeout: 3 * time.Second},
-		{dsn: "mysql://root:pw@127.0.0.1:3306/db", wantErr: "user:password@tcp(host:3306)/"},
-		{dsn: "root:pw@127.0.0.1:3306/db", wantErr: "user:password@tcp(host:3306)/"},
-		{dsn: "root:p/w@tcp(127.0.0.1:3306)/", wantTimeout: defaultTimeout},
-		// The driver quotes parts of the DSN in its errors.
-		{dsn: "admin:pwS3cret/", wantErr: "invalid DSN"},
-		{dsn: "admin:pwS3/cret@tcp(db:3306)", wantErr: "invalid DSN"},
-		{dsn: "admin:S3/cr%zzpw@tcp(db:3306)", wantErr: "invalid DSN"},
-		{dsn: "admin:pwS3/cr?tls=pw@tcp(db:3306)", wantErr: "invalid DSN"},
-		// These parse, with part of the password as the network.
-		{dsn: "admin:pwS3(et)/x@tcp(db:3306)", wantErr: "the network must be"},
-		{dsn: "admin:pwS3(et)/x@tcp(db:3306)?timeout=1s", wantErr: "the network must be"},
-		{dsn: "root:pw@udp(127.0.0.1:3306)/", wantErr: "the network must be"},
-		{dsn: "root:pw@tcp6([::1]:3306)/", wantTimeout: defaultTimeout},
-		{dsn: "root:pw@unix(/tmp/mysql.sock)/", wantTimeout: defaultTimeout},
-		{dsn: "/", wantTimeout: defaultTimeout},
-		// One statement per query, and no client files for the server.
-		{dsn: "root:pw@tcp(127.0.0.1:3306)/?multiStatements=true", wantTimeout: defaultTimeout},
-		{dsn: "root:pw@tcp(127.0.0.1:3306)/?allowAllFiles=true&multiStatements=true&timeout=2s", wantTimeout: 2 * time.Second},
+		{conn: model.Connection{Host: "db", Port: 3306, TLS: model.TLSDisable}, wantAddr: "db:3306", wantTLS: "false"},
+		{conn: model.Connection{Host: "::1", Port: 3307, TLS: model.TLSPrefer}, wantAddr: "[::1]:3307", wantTLS: "preferred"},
+		{conn: model.Connection{Host: "db", Port: 3306, TLS: model.TLSRequire}, wantAddr: "db:3306", wantTLS: "skip-verify"},
+		{conn: model.Connection{Host: "db", Port: 3306, TLS: model.TLSVerifyFull}, wantAddr: "db:3306", wantTLS: "true"},
 	}
 	for _, tt := range tests {
-		cfg, err := parseDSN(tt.dsn)
+		tt.conn.User, tt.conn.Password, tt.conn.Database, tt.conn.ConnectTimeout = "u", "p/w@x", "app", 3*time.Second
+		cfg := newConfig(tt.conn)
 		switch {
-		case tt.wantErr != "":
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("parseDSN(%q) error = %v, want %q", tt.dsn, err, tt.wantErr)
-			}
-			if err != nil && strings.Contains(err.Error(), "pw") {
-				t.Errorf("parseDSN(%q) error leaks the password: %v", tt.dsn, err)
-			}
-		case err != nil:
-			t.Errorf("parseDSN(%q): %v", tt.dsn, err)
-		case cfg.Timeout != tt.wantTimeout:
-			t.Errorf("parseDSN(%q) timeout = %v, want %v", tt.dsn, cfg.Timeout, tt.wantTimeout)
+		case cfg.Net != "tcp" || cfg.Addr != tt.wantAddr || cfg.TLSConfig != tt.wantTLS:
+			t.Errorf("newConfig(%+v) net = %q, addr = %q, tls = %q, want tcp, %q, %q", tt.conn, cfg.Net, cfg.Addr, cfg.TLSConfig, tt.wantAddr, tt.wantTLS)
+		case cfg.User != "u" || cfg.Passwd != "p/w@x" || cfg.DBName != "app" || cfg.Timeout != 3*time.Second:
+			t.Errorf("newConfig(%+v) = %+v", tt.conn, cfg)
 		case cfg.MultiStatements || cfg.AllowAllFiles:
-			t.Errorf("parseDSN(%q) multiStatements = %v, allowAllFiles = %v, want both off", tt.dsn, cfg.MultiStatements, cfg.AllowAllFiles)
+			t.Errorf("newConfig(%+v) multiStatements = %v, allowAllFiles = %v, want both off", tt.conn, cfg.MultiStatements, cfg.AllowAllFiles)
+		}
+		// The driver accepts the configuration.
+		if _, err := gomysql.NewConnector(cfg); err != nil {
+			t.Errorf("NewConnector(newConfig(%+v)): %v", tt.conn, err)
 		}
 	}
 }
@@ -83,27 +68,12 @@ func TestOpenTimesOutWithoutHandshake(t *testing.T) {
 		}
 	}()
 	start := time.Now()
-	_, err = Open(t.Context(), "root:pw@tcp("+ln.Addr().String()+")/?timeout=300ms")
+	_, err = Open(t.Context(), model.Connection{Host: "127.0.0.1", Port: ln.Addr().(*net.TCPAddr).Port, User: "root", Password: "pw",
+		TLS: model.TLSDisable, ConnectTimeout: 300 * time.Millisecond})
 	if err == nil || !strings.Contains(err.Error(), "timed out after 300ms") {
 		t.Errorf("Open() error = %v, want a timeout", err)
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Errorf("Open() took %v", d)
-	}
-}
-
-// TestOpenKeepsPasswordOutOfErrors checks that a DSN misparsed at a '/'
-// in the password does not reach the dial, whose error names the network.
-func TestOpenKeepsPasswordOutOfErrors(t *testing.T) {
-	t.Parallel()
-	tests := []string{
-		"admin:S3cr(et)/pw@tcp(127.0.0.1:1)?timeout=1s",
-		"admin:S3cr(et)/pw@tcp(127.0.0.1:1)",
-	}
-	for _, dsn := range tests {
-		_, err := Open(t.Context(), dsn)
-		if err == nil || strings.Contains(err.Error(), "S3cr") {
-			t.Errorf("Open(%q) error = %v, want an error without the password", dsn, err)
-		}
 	}
 }

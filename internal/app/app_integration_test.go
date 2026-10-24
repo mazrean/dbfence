@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,20 +39,20 @@ func TestMain(m *testing.M) {
 }
 
 type harness struct {
-	t      *testing.T
-	engine model.Engine
-	dsn    string
-	db     *sql.DB
-	dir    string
+	t   *testing.T
+	db  *sql.DB
+	dir string
+	// conn is the connection dbfence uses.
+	conn model.Connection
 }
 
 type container struct {
-	dsn        func(hostPort string) string
-	repository string
-	tag        string
-	port       string
-	sqlDriver  string
-	env        []string
+	user, password string
+	repository     string
+	tag            string
+	port           string
+	sqlDriver      string
+	env            []string
 }
 
 var (
@@ -59,18 +61,14 @@ var (
 		env:       []string{"POSTGRES_PASSWORD=postgres"},
 		port:      "5432/tcp",
 		sqlDriver: "pgx",
-		dsn: func(hp string) string {
-			return "postgres://postgres:postgres@" + hp + "/postgres?sslmode=disable"
-		},
+		user:      "postgres", password: "postgres",
 	}
 	mysqlContainer = container{
 		repository: "mysql", tag: "8.4",
 		env:       []string{"MYSQL_ROOT_PASSWORD=root"},
 		port:      "3306/tcp",
 		sqlDriver: "mysql",
-		dsn: func(hp string) string {
-			return "root:root@tcp(" + hp + ")/"
-		},
+		user:      "root", password: "root",
 	}
 )
 
@@ -95,8 +93,20 @@ func newHarness(t *testing.T, engine model.Engine, c container) *harness {
 		t.Fatalf("start %s:%s: %v", c.repository, c.tag, err)
 	}
 
-	dsn := c.dsn(res.GetHostPort(c.port))
-	db, err := sql.Open(c.sqlDriver, dsn)
+	host, port, err := net.SplitHostPort(res.GetHostPort(c.port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{t: t, dir: t.TempDir(), conn: model.Connection{Engine: engine, Host: host, Port: portNum,
+		User: c.user, Password: c.password, TLS: model.TLSDisable, ConnectTimeout: 10 * time.Second}}
+	if engine == model.EnginePostgres {
+		h.conn.Database = "postgres"
+	}
+	db, err := sql.Open(c.sqlDriver, h.dsn(c.user, c.password))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +115,17 @@ func newHarness(t *testing.T, engine model.Engine, c container) *harness {
 		stdout, stderr, _ := res.Logs(context.WithoutCancel(t.Context()))
 		t.Fatalf("%s did not become ready: %v\nstdout:\n%s\nstderr:\n%s", c.repository, err, stdout, stderr)
 	}
-	return &harness{t: t, engine: engine, dsn: dsn, db: db, dir: t.TempDir()}
+	h.db = db
+	return h
+}
+
+// dsn returns a DSN for user on the server and database of h.conn.
+func (h *harness) dsn(user, password string) string {
+	hp := net.JoinHostPort(h.conn.Host, strconv.Itoa(h.conn.Port))
+	if h.conn.Engine == model.EnginePostgres {
+		return "postgres://" + user + ":" + password + "@" + hp + "/" + h.conn.Database + "?sslmode=disable"
+	}
+	return user + ":" + password + "@tcp(" + hp + ")/" + h.conn.Database
 }
 
 func (h *harness) query(q string, args ...any) []string {
@@ -135,7 +155,13 @@ func (h *harness) exec(q string) {
 
 func (h *harness) write(body string) {
 	h.t.Helper()
-	src := fmt.Sprintf("connection {\n  engine = %q\n  dsn = env(\"DBFENCE_IT_DSN\")\n}\n%s", h.engine, body)
+	c := h.conn
+	src := fmt.Sprintf("connection {\n  engine = %q\n  host = %q\n  port = %d\n  user = %q\n  password = env(\"DBFENCE_IT_PASSWORD\")\n  tls = \"disable\"\n",
+		c.Engine, c.Host, c.Port, c.User)
+	if c.Database != "" {
+		src += fmt.Sprintf("  database = %q\n", c.Database)
+	}
+	src += "}\n" + body
 	if err := os.WriteFile(filepath.Join(h.dir, "dbfence.hcl"), []byte(src), 0o600); err != nil {
 		h.t.Fatal(err)
 	}
@@ -144,8 +170,8 @@ func (h *harness) write(body string) {
 func (h *harness) app() (*app.App, *bytes.Buffer) {
 	out := &bytes.Buffer{}
 	env := func(k string) (string, bool) {
-		if k == "DBFENCE_IT_DSN" {
-			return h.dsn, true
+		if k == "DBFENCE_IT_PASSWORD" {
+			return h.conn.Password, true
 		}
 		return os.LookupEnv(k)
 	}
@@ -369,11 +395,11 @@ func TestMySQLRetainedPassword(t *testing.T) {
 }
 
 // TestMySQLOneStatementPerExec checks that Driver.Exec sends exactly one
-// statement even when the DSN asks for multiStatements.
+// statement.
 func TestMySQLOneStatementPerExec(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, model.EngineMySQL, mysqlContainer)
-	d, err := mysql.Open(t.Context(), h.dsn+"?multiStatements=true&allowAllFiles=true")
+	d, err := mysql.Open(t.Context(), h.conn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,8 +489,8 @@ grant {
 }
 
 // TestMySQLConnectedAccount runs dbfence as an account that gets its
-// privileges from a default role, connected to a database named in the
-// DSN: --prune keeps both, and SET DEFAULT ROLE keeps the role active.
+// privileges from a default role, connected to the database of the
+// connection block: --prune keeps both, and SET DEFAULT ROLE keeps the role active.
 func TestMySQLConnectedAccount(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, model.EngineMySQL, mysqlContainer)
@@ -478,7 +504,7 @@ func TestMySQLConnectedAccount(t *testing.T) {
 	} {
 		h.exec(q)
 	}
-	h.dsn = strings.Replace(h.dsn, "root:root@", "dbf_dba:dbapw@", 1) + "dbf_conn"
+	h.conn.User, h.conn.Password, h.conn.Database = "dbf_dba", "dbapw", "dbf_conn"
 	h.write(`
 user "dba" {
   name      = "dbf_dba"
@@ -501,7 +527,7 @@ user "dba" {
 	h.apply(app.Options{Prune: true})
 	h.assertConverged(app.Options{Prune: true})
 
-	dba, err := sql.Open("mysql", h.dsn)
+	dba, err := sql.Open("mysql", h.dsn(h.conn.User, h.conn.Password))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +559,7 @@ func TestPostgresServerSideHashing(t *testing.T) {
 	}
 	login := func() {
 		t.Helper()
-		u, err := sql.Open("pgx", strings.Replace(h.dsn, "postgres:postgres@", "dbf_it_hash:hashpw@", 1))
+		u, err := sql.Open("pgx", h.dsn("dbf_it_hash", "hashpw"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -604,7 +630,7 @@ ignore {
 		t.Fatalf("mysql.db rows = %q, want the pattern verbatim", got)
 	}
 
-	u, err := sql.Open("mysql", strings.Replace(h.dsn, "root:root@", "dbf_pat:patpw@", 1))
+	u, err := sql.Open("mysql", h.dsn("dbf_pat", "patpw"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +692,7 @@ func TestMySQLWithoutSystemTableAccess(t *testing.T) {
 			}, tt.grants...) {
 				h.exec(q)
 			}
-			h.dsn = strings.Replace(h.dsn, "root:root@", "dbf_limited:limited@", 1)
+			h.conn.User, h.conn.Password = "dbf_limited", "limited"
 			h.write(mysqlConfig("pw1"))
 
 			_, out := h.plan(app.Options{})
@@ -687,7 +713,7 @@ func TestMySQLWithoutSystemTableAccess(t *testing.T) {
 			if got := h.query("SELECT Db FROM mysql.db WHERE User = 'dbf_it_app' AND Select_priv = 'Y' AND Insert_priv = 'Y'"); len(got) != 1 {
 				t.Errorf("privileges of dbf_it_app = %v", got)
 			}
-			appDB, err := sql.Open("mysql", strings.Replace(h.dsn, "dbf_limited:limited@", "dbf_it_app:pw1@", 1))
+			appDB, err := sql.Open("mysql", h.dsn("dbf_it_app", "pw1"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -705,7 +731,7 @@ func TestMySQLWithoutSystemTableAccess(t *testing.T) {
 func TestMySQLErrorsDoNotLeakSecrets(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, model.EngineMySQL, mysqlContainer)
-	drv, err := mysql.Open(t.Context(), h.dsn)
+	drv, err := mysql.Open(t.Context(), h.conn)
 	if err != nil {
 		t.Fatal(err)
 	}

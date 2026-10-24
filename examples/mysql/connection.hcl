@@ -4,14 +4,13 @@
 connection {
   engine = "mysql"
 
-  # A go-sql-driver/mysql DSN (the mysql:// URL form is not supported).
   # Connect as root of examples/compose.yaml so dbfence can read mysql.user,
   # mysql.db, mysql.role_edges and mysql.default_roles.
-  dsn = format(
-    "root:%s@tcp(127.0.0.1:%s)/",
-    secretenv("DBFENCE_MYSQL_ROOT_PASSWORD", "dbfence-root"),
-    env("DBFENCE_MYSQL_PORT", "13306"),
-  )
+  host     = "127.0.0.1"
+  port     = env("DBFENCE_MYSQL_PORT", "13306")
+  user     = "root"
+  password = secretenv("DBFENCE_MYSQL_ROOT_PASSWORD", "dbfence-root")
+  tls      = "disable"
 }
 
 # Accounts managed elsewhere: neither reported nor pruned. A pattern without

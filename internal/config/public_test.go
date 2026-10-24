@@ -64,7 +64,7 @@ func TestLoadPublicGrantErrors(t *testing.T) {
 		{
 			name:  "MySQL rejects PUBLIC",
 			src:   myConn + "database \"app\" {}\ngrant {\n role = \"PUBLIC\"\n database = \"app\"\n privileges = [\"SELECT\"]\n}\n",
-			want:  []string{"Unsupported grantee", "only supported for postgres", `"PUBLIC@<host>"`, "dbfence.hcl line 7"},
+			want:  []string{"Unsupported grantee", "only supported for postgres", `"PUBLIC@<host>"`, "dbfence.hcl line 8"},
 			count: 1,
 		},
 		{
@@ -77,7 +77,7 @@ func TestLoadPublicGrantErrors(t *testing.T) {
 		{
 			name:  "grant option for PUBLIC",
 			src:   pgDB + "grant {\n role = \"PUBLIC\"\n database = \"app\"\n privileges = [\"CONNECT\"]\n with_grant_option = true\n}\n",
-			want:  []string{"Invalid grant option", "dbfence.hcl line 10"},
+			want:  []string{"Invalid grant option", "dbfence.hcl line 11"},
 			count: 1,
 		},
 		{
@@ -89,7 +89,7 @@ func TestLoadPublicGrantErrors(t *testing.T) {
 		{
 			name:  "empty privileges combined with PUBLIC grants",
 			src:   pgDB + "grant {\n role = \"PUBLIC\"\n database = \"app\"\n privileges = [\"CONNECT\"]\n}\ngrant {\n role = \"public\"\n database = \"app\"\n privileges = []\n}\n",
-			want:  []string{"Conflicting PUBLIC grants", "dbfence.hcl line 14", "dbfence.hcl:6,1"},
+			want:  []string{"Conflicting PUBLIC grants", "dbfence.hcl line 15", "dbfence.hcl:7,1"},
 			count: 1,
 		},
 		{

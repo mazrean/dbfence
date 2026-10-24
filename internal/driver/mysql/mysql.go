@@ -7,9 +7,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	gomysql "github.com/go-sql-driver/mysql"
@@ -17,7 +18,6 @@ import (
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
 	"github.com/mazrean/dbfence/internal/plan"
-	"github.com/mazrean/dbfence/internal/secret"
 )
 
 // Driver is a MySQL driver. All statements run on the configured
@@ -48,17 +48,14 @@ type grantRef struct {
 	proxy    bool
 }
 
-// Open connects to dsn (go-sql-driver/mysql format).
-func Open(ctx context.Context, dsn string) (*Driver, error) {
-	cfg, err := parseDSN(dsn)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := gomysql.NewConnector(cfg)
+// Open connects to the server of conn.
+func Open(ctx context.Context, conn model.Connection) (*Driver, error) {
+	cfg := newConfig(conn)
+	connector, err := gomysql.NewConnector(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mysql connector: %w", err)
 	}
-	db := sql.OpenDB(conn)
+	db := sql.OpenDB(connector)
 	// A single connection keeps session state such as sql_mode stable.
 	db.SetMaxOpenConns(1)
 	// cfg.Timeout only bounds the dial; a server that accepts the
@@ -101,34 +98,24 @@ func Open(ctx context.Context, dsn string) (*Driver, error) {
 	return d, nil
 }
 
-// defaultTimeout bounds connecting when the DSN sets no timeout.
-const defaultTimeout = 10 * time.Second
+// tlsConfigs maps TLS modes to go-sql-driver/mysql tls values.
+var tlsConfigs = map[model.TLSMode]string{
+	model.TLSDisable:    "false",
+	model.TLSPrefer:     "preferred",
+	model.TLSRequire:    "skip-verify",
+	model.TLSVerifyFull: "true",
+}
 
-// parseDSN parses a go-sql-driver/mysql DSN and applies defaults.
-func parseDSN(dsn string) (*gomysql.Config, error) {
-	const hint = "expected a go-sql-driver/mysql DSN such as user:password@tcp(host:3306)/; URLs are not supported"
-	if strings.HasPrefix(strings.ToLower(dsn), "mysql://") {
-		return nil, errors.New("parse mysql dsn: " + hint)
-	}
-	cfg, err := gomysql.ParseDSN(dsn)
-	if err != nil {
-		// The driver's errors quote parts of the DSN, which can be parts
-		// of the password, so they are not passed on.
-		return nil, errors.New("parse mysql dsn: invalid DSN; " + hint + "; a password containing '/' needs the '/' before the database name")
-	}
-	// Output redacts the password wherever it appears, unless it equals
-	// the user or database name, which output shows by design.
-	secret.Register(cfg.Passwd)
-	secret.RegisterPublic(cfg.User)
-	secret.RegisterPublic(cfg.DBName)
-	// A '/' in the password can also leave a DSN that parses, with part
-	// of the password as the network, which dial errors would quote.
-	if !slices.Contains([]string{"tcp", "tcp4", "tcp6", "unix"}, cfg.Net) {
-		return nil, errors.New("parse mysql dsn: invalid DSN: the network must be tcp, tcp4, tcp6 or unix; " + hint + "; a password containing '/' needs the '/' before the database name")
-	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = defaultTimeout
-	}
+// newConfig builds the go-sql-driver/mysql configuration of conn.
+func newConfig(conn model.Connection) *gomysql.Config {
+	cfg := gomysql.NewConfig()
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(conn.Host, strconv.Itoa(conn.Port))
+	cfg.User = conn.User
+	cfg.Passwd = conn.Password
+	cfg.DBName = conn.Database
+	cfg.TLSConfig = tlsConfigs[conn.TLS]
+	cfg.Timeout = conn.ConnectTimeout
 	// Each Exec sends exactly one statement: without multiStatements the
 	// server rejects a query holding a second one, so a quoting mistake
 	// cannot chain another statement. allowAllFiles would let a server
@@ -136,10 +123,10 @@ func parseDSN(dsn string) (*gomysql.Config, error) {
 	// registered for it either.
 	cfg.MultiStatements = false
 	cfg.AllowAllFiles = false
-	// ParseDSN copies the driver's default logger, which writes to
+	// NewConfig copies the driver's default logger, which writes to
 	// os.Stderr directly (see SetLogOutput).
 	cfg.Logger = *logger.Load()
-	return cfg, nil
+	return cfg
 }
 
 // unsafeCharsets are client character sets with multibyte characters
@@ -149,7 +136,7 @@ var unsafeCharsets = []string{"big5", "cp932", "gb18030", "gbk", "sjis"}
 
 func checkCharset(charset string) error {
 	if slices.Contains(unsafeCharsets, strings.ToLower(charset)) {
-		return fmt.Errorf("connection character set %s is not supported because it breaks string escaping; use charset=utf8mb4 in the DSN", charset)
+		return fmt.Errorf("connection character set %s is not supported because it breaks string escaping", charset)
 	}
 	return nil
 }
@@ -182,7 +169,7 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 	if err := d.db.QueryRowContext(ctx, "SELECT CURRENT_USER(), DATABASE()").Scan(&user, &database); err != nil {
 		return nil, fmt.Errorf("current user: %w", err)
 	}
-	// The database named in the DSN is never pruned.
+	// The database of the connection is never pruned.
 	cur.CurrentDatabase = d.declaredName(database.String, desired)
 	if name, host, ok := strings.CutLast(user, "@"); ok {
 		// Host names are case-insensitive; the server reports them in lower case.

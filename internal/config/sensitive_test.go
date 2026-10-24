@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/mazrean/dbfence/internal/model"
 )
 
 // TestLoadSensitiveValues checks that values marked sensitive by the
@@ -12,8 +14,12 @@ func TestLoadSensitiveValues(t *testing.T) {
 	t.Parallel()
 	cfg, err := load(t, `
 connection {
-  engine = "postgres"
-  dsn    = "${secretenv("DSN")}?sslmode=disable"
+  engine   = "postgres"
+  host     = "localhost"
+  user     = secretenv("PW")
+  password = secretenv("PW")
+  port     = secretenv("PORT", "6543")
+  tls      = secretenv("TLS", "disable")
 }
 role "owner" {
   name = lower(secretenv("PW"))
@@ -36,9 +42,11 @@ grant {
 		t.Fatal(err)
 	}
 	d := cfg.Desired
-	if cfg.DSN != "postgres://localhost/postgres?sslmode=disable" || d.Roles[0].ID.Name != "secret" || *d.Roles[1].Password != "secret" ||
+	c := cfg.Connection
+	if c.User != "secret" || c.Password != "secret" || c.Port != 6543 || c.TLS != model.TLSDisable ||
+		d.Roles[0].ID.Name != "secret" || *d.Roles[1].Password != "secret" ||
 		*d.Roles[1].ConnectionLimit != 2 || d.Databases[0].Owner != "secret" || len(d.Privileges) != 2 {
-		t.Errorf("decoded %+v / %+v", cfg.DSN, d)
+		t.Errorf("decoded %+v / %+v", c, d)
 	}
 
 	_, err = load(t, pgConn+"user \"app\" {\n  connection_limit = tonumber(secretenv(\"PW\"))\n}\n")

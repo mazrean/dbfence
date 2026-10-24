@@ -16,7 +16,7 @@ func TestLoadRejectsControlCharacters(t *testing.T) {
 		{
 			name:  "C0 in role name",
 			src:   pgConn + "role \"r\" {\n name = \"a\\u0001b\"\n}\n",
-			want:  []string{"Invalid name", "role name " + msg, "dbfence.hcl line 6"},
+			want:  []string{"Invalid name", "role name " + msg, "dbfence.hcl line 7"},
 			count: 1,
 		},
 		{

@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/secret"
 )
 
 func load(t *testing.T, src string) (*Config, error) {
@@ -17,7 +19,7 @@ func load(t *testing.T, src string) (*Config, error) {
 	if err := os.WriteFile(filepath.Join(dir, "dbfence.hcl"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env := map[string]string{"DSN": "postgres://localhost/postgres", "PW": "secret"}
+	env := map[string]string{"HOST": "db.internal", "PW": "secret", "CONNPW": "Cn1ConnPw9"}
 	r := funcs.NewRegistry(t.Context(), funcs.WithEnv(func(k string) (string, bool) { v, ok := env[k]; return v, ok }))
 	return Load(dir, r.Functions())
 }
@@ -26,8 +28,11 @@ func TestLoadPostgres(t *testing.T) {
 	t.Parallel()
 	cfg, err := load(t, `
 connection {
-  engine = "postgres"
-  dsn    = env("DSN")
+  engine   = "postgres"
+  host     = env("HOST")
+  port     = "6543"
+  user     = "admin"
+  password = env("PW")
 }
 role "owner" {}
 user "app" {
@@ -78,8 +83,10 @@ ignore {
 		},
 		Ignore: model.Ignore{Roles: []string{"datadog"}, Schemas: []string{"vendor", `app\.audit`}},
 	}
-	if cfg.DSN != "postgres://localhost/postgres" {
-		t.Errorf("DSN = %q", cfg.DSN)
+	wantConn := model.Connection{Engine: model.EnginePostgres, Host: "db.internal", Port: 6543, User: "admin", Password: "secret",
+		Database: "postgres", TLS: model.TLSPrefer, ConnectTimeout: 10 * time.Second}
+	if diff := cmp.Diff(wantConn, cfg.Connection); diff != "" {
+		t.Errorf("Connection mismatch (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff(want, cfg.Desired); diff != "" {
 		t.Errorf("Desired mismatch (-want +got):\n%s", diff)
@@ -90,8 +97,12 @@ func TestLoadMySQL(t *testing.T) {
 	t.Parallel()
 	cfg, err := load(t, `
 connection {
-  engine = "mysql"
-  dsn    = "root@tcp(localhost)/"
+  engine          = "mysql"
+  host            = "localhost"
+  user            = "root"
+  database        = "app"
+  tls             = "verify-full"
+  connect_timeout = 3
 }
 role "reader" {}
 user "app_local" {
@@ -128,19 +139,24 @@ grant {
 	if diff := cmp.Diff(want, cfg.Desired); diff != "" {
 		t.Errorf("Desired mismatch (-want +got):\n%s", diff)
 	}
+	wantConn := model.Connection{Engine: model.EngineMySQL, Host: "localhost", Port: 3306, User: "root", Database: "app",
+		TLS: model.TLSVerifyFull, ConnectTimeout: 3 * time.Second}
+	if diff := cmp.Diff(wantConn, cfg.Connection); diff != "" {
+		t.Errorf("Connection mismatch (-want +got):\n%s", diff)
+	}
 }
 
 func TestLoadErrors(t *testing.T) {
 	t.Parallel()
-	const pg = "connection {\n engine = \"postgres\"\n dsn = \"x\"\n}\n"
-	const my = "connection {\n engine = \"mysql\"\n dsn = \"x\"\n}\n"
+	const pg = "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n}\n"
+	const my = "connection {\n engine = \"mysql\"\n host = \"h\"\n user = \"u\"\n}\n"
 	tests := []struct {
 		name, src, want string
 	}{
 		{"missing connection", `role "a" {}`, "Missing connection block"},
-		{"bad engine", "connection {\n engine = \"sqlite\"\n dsn = \"x\"\n}", "Unsupported engine"},
+		{"bad engine", "connection {\n engine = \"sqlite\"\n host = \"h\"\n user = \"u\"\n}", "Unsupported engine"},
 		{"duplicate connection", pg + pg, "Duplicate connection block"},
-		{"unset env", "connection {\n engine = \"postgres\"\n dsn = env(\"NOPE\")\n}", `"NOPE" is not set`},
+		{"unset env", "connection {\n engine = \"postgres\"\n host = env(\"NOPE\")\n user = \"u\"\n}", `"NOPE" is not set`},
 		{"env default", pg + `role "a" { password = env("NOPE", 1, 2) }`, "at most one default"},
 		{"pg only attr on mysql", my + `role "a" { superuser = true }`, `"superuser" is only supported for postgres`},
 		{"mysql only attr on pg", pg + `database "a" { charset = "utf8" }`, `"charset" is only supported for mysql`},
@@ -175,7 +191,7 @@ func TestLoadDirectory(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	files := map[string]string{
-		"a.hcl": "connection {\n engine = \"postgres\"\n dsn = \"x\"\n}",
+		"a.hcl": "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n}",
 		"b.hcl": `role "r" {}`,
 		"c.txt": `garbage`,
 	}
@@ -241,7 +257,7 @@ func TestExpandPrivilegesErrors(t *testing.T) {
 
 func TestLoadDirectoryEntries(t *testing.T) {
 	t.Parallel()
-	conn := "connection {\n engine = \"postgres\"\n dsn = \"x\"\n}"
+	conn := "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n}"
 	tests := []struct {
 		setup func(t *testing.T, dir string)
 		name  string
@@ -305,12 +321,12 @@ func TestLoadMissingDirectory(t *testing.T) {
 // the first diagnostic (the CLI adds it) and no cascaded diagnostics.
 func TestLoadDiagnosticOutput(t *testing.T) {
 	t.Parallel()
-	const pg = "connection {\n engine = \"postgres\"\n dsn = \"x\"\n}\n"
+	const pg = "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n}\n"
 	tests := []struct {
 		name, src, prefix string
 		count             int
 	}{
-		{"unset env", "connection {\n engine = \"postgres\"\n dsn = env(\"NOPE\")\n}", "Invalid function argument", 1},
+		{"unset env", "connection {\n engine = \"postgres\"\n host = env(\"NOPE\")\n user = \"u\"\n}", "Invalid function argument", 1},
 		{"unknown reference", pg + `database "d" { owner = role.nope.name }`, "Unsupported attribute", 1},
 		{
 			"two unknown references",
@@ -353,7 +369,8 @@ func TestLoadResolvesTFStateRelativeToConfig(t *testing.T) {
 	state := `{"version": 4, "serial": 1, "lineage": "x", "outputs": {"db_host": {"value": "db.internal", "type": "string"}}, "resources": []}`
 	cfgSrc := `connection {
   engine = "postgres"
-  dsn    = "postgres://u@${tfstate("terraform.tfstate", "output.db_host")}/x"
+  host   = tfstate("terraform.tfstate", "output.db_host")
+  user   = "u"
 }
 `
 	if err := os.WriteFile(filepath.Join(dir, "terraform.tfstate"), []byte(state), 0o600); err != nil {
@@ -366,7 +383,51 @@ func TestLoadResolvesTFStateRelativeToConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "postgres://u@db.internal/x"; cfg.DSN != want {
-		t.Errorf("DSN = %q, want %q", cfg.DSN, want)
+	if want := "db.internal"; cfg.Connection.Host != want {
+		t.Errorf("host = %q, want %q", cfg.Connection.Host, want)
+	}
+}
+
+// TestLoadRegistersConnectionSecrets checks that the connection password
+// is redacted in output, also when env() returned it, while a user or
+// database name equal to it stays visible.
+func TestLoadRegistersConnectionSecrets(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, src, hidden, shown string
+	}{
+		{
+			name:   "password from env",
+			src:    "connection {\n engine = \"mysql\"\n host = \"h\"\n user = \"u\"\n password = env(\"CONNPW\")\n}\n",
+			hidden: "Cn1ConnPw9",
+		},
+		{
+			name:  "user equal to the password",
+			src:   "connection {\n engine = \"mysql\"\n host = \"h\"\n user = \"cfguser7\"\n password = \"cfguser7\"\n}\n",
+			shown: "cfguser7",
+		},
+		{
+			name:  "database equal to the password",
+			src:   "connection {\n engine = \"postgres\"\n host = \"h\"\n user = \"u\"\n password = \"cfgdb7x\"\n database = \"cfgdb7x\"\n}\n",
+			shown: "cfgdb7x",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := load(t, tt.src); err != nil {
+				t.Fatal(err)
+			}
+			if tt.hidden != "" {
+				if got := secret.Default().Redact(tt.hidden); got != secret.Placeholder {
+					t.Errorf("Redact(%q) = %q, want the password registered", tt.hidden, got)
+				}
+			}
+			if tt.shown != "" {
+				if got := secret.Default().Redact(tt.shown); got != tt.shown {
+					t.Errorf("Redact(%q) = %q, want it shown: it is a name of the connection", tt.shown, got)
+				}
+			}
+		})
 	}
 }

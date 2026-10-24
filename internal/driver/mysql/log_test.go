@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/secret"
 )
 
@@ -59,7 +60,7 @@ func openFake(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if d, err := Open(ctx, "u:Pw9xYz12@tcp("+ln.Addr().String()+")/?timeout=2s"); err == nil {
+	if d, err := Open(ctx, model.Connection{Host: "127.0.0.1", Port: ln.Addr().(*net.TCPAddr).Port, User: "u", Password: "Pw9xYz12", TLS: model.TLSDisable, ConnectTimeout: 2 * time.Second}); err == nil {
 		_ = d.Close()
 		t.Fatal("Open succeeded against a fake server")
 	}

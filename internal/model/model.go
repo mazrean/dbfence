@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Engine identifies a database engine.
@@ -18,6 +19,39 @@ const (
 	EngineMySQL    Engine = "mysql"
 	EnginePostgres Engine = "postgres"
 )
+
+// TLSMode is how a connection uses TLS.
+type TLSMode string
+
+const (
+	// TLSDisable never uses TLS.
+	TLSDisable TLSMode = "disable"
+	// TLSPrefer uses TLS when the server supports it, without verifying
+	// the server certificate.
+	TLSPrefer TLSMode = "prefer"
+	// TLSRequire always uses TLS, without verifying the server certificate.
+	TLSRequire TLSMode = "require"
+	// TLSVerifyFull always uses TLS and verifies the server certificate
+	// and host name.
+	TLSVerifyFull TLSMode = "verify-full"
+)
+
+// TLSModes lists the valid TLS modes.
+var TLSModes = []TLSMode{TLSDisable, TLSPrefer, TLSRequire, TLSVerifyFull}
+
+// Connection is the server dbfence connects to and how it authenticates.
+type Connection struct {
+	Engine   Engine
+	Host     string
+	User     string
+	Password string
+	// Database is the database to connect to; empty connects to none
+	// (MySQL only).
+	Database       string
+	TLS            TLSMode
+	Port           int
+	ConnectTimeout time.Duration
+}
 
 // RoleID identifies a role. Host is empty for PostgreSQL.
 type RoleID struct {

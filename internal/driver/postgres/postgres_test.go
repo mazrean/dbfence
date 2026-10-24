@@ -3,99 +3,78 @@ package postgres
 import (
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/password"
 	"github.com/mazrean/dbfence/internal/plan"
 )
 
-func TestOpenParseErrorHidesPassword(t *testing.T) {
+func TestParseErrorHidesSettings(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name   string
-		dsn    string
-		secret string
-		want   string
-	}{
-		{
-			name:   "spaces around equals",
-			dsn:    "host=127.0.0.1 user=admin password = S3cret port=abc",
-			secret: "S3cret",
-		},
-		{
-			name:   "quoted password with escaped quote",
-			dsn:    `host=127.0.0.1 password='S3c\'ret x' port=abc`,
-			secret: "ret x",
-			want:   "invalid port",
-		},
-		{
-			name:   "keyword parse error quoting the input",
-			dsn:    "host=127.0.0.1 password S3cret",
-			secret: "S3cret",
-			want:   "failed to parse as keyword/value",
-		},
-		{
-			name:   "upper case keyword",
-			dsn:    "host=127.0.0.1 PASSWORD=S3cret port=abc",
-			secret: "S3cret",
-		},
-		{
-			name:   "unescaped at sign in URL",
-			dsn:    "postgres://admin:S3c@ret@h:bad/db",
-			secret: "ret",
-			want:   "invalid port",
-		},
-		{
-			name:   "URL with invalid port",
-			dsn:    "postgres://admin:S3cret@h:99999999/db",
-			secret: "S3cret",
-			want:   "invalid port",
-		},
+	_, err := pgx.ParseConfig("host='127.0.0.1' password='S3c\\'ret x' port='abc'")
+	if err == nil {
+		t.Fatal("ParseConfig succeeded")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := Open(t.Context(), tt.dsn)
-			if err == nil {
-				t.Fatal("Open succeeded")
-			}
-			msg := err.Error()
-			if strings.Contains(msg, tt.secret) || strings.Contains(msg, tt.dsn) {
-				t.Errorf("error leaks the password: %s", msg)
-			}
-			if !strings.HasPrefix(msg, "parse postgres dsn: invalid connection string") || !strings.Contains(msg, tt.want) {
-				t.Errorf("error = %q, want it to mention %q", msg, tt.want)
-			}
-		})
+	msg := parseError(err).Error()
+	if strings.Contains(msg, "ret x") {
+		t.Errorf("error leaks the password: %s", msg)
+	}
+	if !strings.HasPrefix(msg, "postgres connection settings: ") || !strings.Contains(msg, "invalid port") {
+		t.Errorf("error = %q, want it to mention the invalid port", msg)
 	}
 }
 
-func TestParseConfigDefaults(t *testing.T) {
+func testConnection() model.Connection {
+	return model.Connection{Engine: model.EnginePostgres, Host: "db", Port: 5433, User: "admin", Database: "app",
+		TLS: model.TLSDisable, ConnectTimeout: 3 * time.Second}
+}
+
+func TestParseConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		dsn         string
-		wantTimeout time.Duration
+		name     string
+		password string
+		tls      model.TLSMode
+		wantTLS  bool
+		fallback bool
 	}{
-		{"default timeout", "postgres://u@h/db?options=-c%20standard_conforming_strings%3Doff", defaultConnectTimeout},
-		{"explicit timeout", "postgres://u@h/db?connect_timeout=3", 3 * time.Second},
-		{"keyword form", "host=h user=u", defaultConnectTimeout},
-		{"client encoding overridden", "postgres://u@h/db?client_encoding=SQL_ASCII", defaultConnectTimeout},
-		{"client encoding in keyword form", "host=h user=u client_encoding=LATIN1", defaultConnectTimeout},
+		{name: "disable", password: "pw", tls: model.TLSDisable},
+		{name: "prefer falls back to plain", password: "pw", tls: model.TLSPrefer, wantTLS: true, fallback: true},
+		{name: "require", password: "pw", tls: model.TLSRequire, wantTLS: true},
+		{name: "verify-full", password: "pw", tls: model.TLSVerifyFull, wantTLS: true},
+		{name: "quotes, backslashes and spaces", password: `a'b\c d@e=f`, tls: model.TLSDisable},
+		{name: "no password", tls: model.TLSDisable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cfg, err := parseConfig(tt.dsn)
+			conn := testConnection()
+			conn.Password, conn.TLS = tt.password, tt.tls
+			cfg, err := parseConfig(conn)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.ConnectTimeout != tt.wantTimeout {
-				t.Errorf("ConnectTimeout = %v, want %v", cfg.ConnectTimeout, tt.wantTimeout)
+			if cfg.Host != "db" || cfg.Port != 5433 || cfg.User != "admin" || cfg.Password != tt.password || cfg.Database != "app" {
+				t.Errorf("config = %s@%s:%d/%s password %q", cfg.User, cfg.Host, cfg.Port, cfg.Database, cfg.Password)
+			}
+			if cfg.ConnectTimeout != 3*time.Second {
+				t.Errorf("ConnectTimeout = %v, want 3s", cfg.ConnectTimeout)
+			}
+			if got := cfg.TLSConfig != nil; got != tt.wantTLS {
+				t.Errorf("TLS = %v, want %v", got, tt.wantTLS)
+			}
+			if got := len(cfg.Fallbacks) > 0; got != tt.fallback {
+				t.Errorf("fallbacks = %v, want %v", got, tt.fallback)
+			}
+			if tt.tls == model.TLSVerifyFull && (cfg.TLSConfig.InsecureSkipVerify || cfg.TLSConfig.ServerName != "db") {
+				t.Errorf("verify-full TLS config skips verification")
 			}
 			if got := cfg.Copy().RuntimeParams["standard_conforming_strings"]; got != "on" {
 				t.Errorf("standard_conforming_strings = %q, want on (also on per-database copies)", got)
@@ -104,6 +83,33 @@ func TestParseConfigDefaults(t *testing.T) {
 				t.Errorf("client_encoding = %q, want UTF8 (also on per-database copies)", got)
 			}
 		})
+	}
+}
+
+// TestParseConfigIgnoresEnvironment checks that PG* environment variables
+// and the password file do not fill in settings the configuration leaves
+// out.
+func TestParseConfigIgnoresEnvironment(t *testing.T) {
+	passfile := filepath.Join(t.TempDir(), "pgpass")
+	if err := os.WriteFile(passfile, []byte("*:*:*:*:from-passfile\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{
+		"PGPASSWORD": "from-env", "PGPASSFILE": passfile, "PGSSLMODE": "require", "PGCONNECT_TIMEOUT": "99",
+		"PGHOST": "envhost", "PGDATABASE": "envdb", "PGOPTIONS": "-c standard_conforming_strings=off",
+	} {
+		t.Setenv(k, v)
+	}
+	cfg, err := parseConfig(testConnection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Password != "" || cfg.TLSConfig != nil || cfg.ConnectTimeout != 3*time.Second || cfg.Host != "db" || cfg.Database != "app" {
+		t.Errorf("config took settings from the environment: password %q, TLS %v, timeout %v, %s/%s",
+			cfg.Password, cfg.TLSConfig != nil, cfg.ConnectTimeout, cfg.Host, cfg.Database)
+	}
+	if got := cfg.RuntimeParams["standard_conforming_strings"]; got != "on" {
+		t.Errorf("standard_conforming_strings = %q, want on", got)
 	}
 }
 
@@ -400,7 +406,9 @@ func TestOpenTimeoutReportedOnce(t *testing.T) {
 			t.Cleanup(func() { _ = c.Close() })
 		}
 	}()
-	_, err = Open(t.Context(), "postgres://u:pw@"+ln.Addr().String()+"/postgres?sslmode=prefer&connect_timeout=1")
+	conn := testConnection()
+	conn.Host, conn.Port, conn.TLS, conn.ConnectTimeout = "127.0.0.1", ln.Addr().(*net.TCPAddr).Port, model.TLSPrefer, time.Second
+	_, err = Open(t.Context(), conn)
 	if err == nil {
 		t.Fatal("Open() succeeded")
 	}
