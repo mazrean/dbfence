@@ -156,7 +156,7 @@ func (h *harness) app() (*app.App, *bytes.Buffer) {
 func (h *harness) plan(o app.Options) (int, string) {
 	h.t.Helper()
 	a, out := h.app()
-	o.Path = filepath.Join(h.dir, "dbfence.hcl")
+	o.Dir = h.dir
 	p, err := a.Plan(context.WithoutCancel(h.t.Context()), o)
 	if err != nil {
 		h.t.Fatalf("plan: %v\n%s", err, out)
@@ -167,7 +167,7 @@ func (h *harness) plan(o app.Options) (int, string) {
 func (h *harness) apply(o app.Options) string {
 	h.t.Helper()
 	a, out := h.app()
-	o.Path = filepath.Join(h.dir, "dbfence.hcl")
+	o.Dir = h.dir
 	o.AutoApprove = true
 	if err := a.Apply(h.t.Context(), o); err != nil {
 		h.t.Fatalf("apply: %v\n%s", err, out)
@@ -625,7 +625,7 @@ ignore {
 
 	h.exec("SET GLOBAL partial_revokes = ON")
 	a, out := h.app()
-	_, err = a.Plan(context.WithoutCancel(t.Context()), app.Options{Path: filepath.Join(h.dir, "dbfence.hcl")})
+	_, err = a.Plan(context.WithoutCancel(t.Context()), app.Options{Dir: h.dir})
 	if err == nil || !strings.Contains(err.Error(), "needs partial_revokes = OFF") {
 		t.Errorf("plan with partial_revokes ON: err = %v\n%s", err, out)
 	}

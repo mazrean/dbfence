@@ -79,7 +79,7 @@ func New(fr *funcs.Registry, opener Opener, streams *IO) *App {
 
 // Options are command line options.
 type Options struct {
-	Path          string
+	Dir           string
 	Prune         bool
 	ForcePassword bool
 	ShowSecrets   bool
@@ -95,7 +95,7 @@ var ErrUnsafePlan = errors.New("internal safety check failed")
 
 // Validate loads the configuration, evaluating every function.
 func (a *App) Validate(_ context.Context, o Options) error {
-	cfg, err := config.Load(o.Path, a.funcs.Functions())
+	cfg, err := config.Load(o.Dir, a.funcs.Functions())
 	if err != nil {
 		return err
 	}
@@ -240,7 +240,7 @@ func (p *checkedPlan) verdict() error {
 // compute inspects the server, diffs it against the configuration and
 // runs the independent safety check on the plan.
 func (a *App) compute(ctx context.Context, o Options) (*checkedPlan, Driver, error) {
-	cfg, err := config.Load(o.Path, a.funcs.Functions())
+	cfg, err := config.Load(o.Dir, a.funcs.Functions())
 	if err != nil {
 		return nil, nil, err
 	}

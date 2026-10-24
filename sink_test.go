@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -47,19 +45,15 @@ func (emptyServerOpener) Open(context.Context, model.Engine, string) (app.Driver
 func TestRunRedactsSecrets(t *testing.T) {
 	t.Parallel()
 	const pw = "cli-sink-secret-pw"
-	path := filepath.Join(t.TempDir(), "dbfence.hcl")
-	src := "connection {\n  engine = \"postgres\"\n  dsn = \"x\"\n}\nuser \"" + pw + "\" {\n  password = \"" + pw + "\"\n}\n"
-	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	dir := writeConfig(t, "connection {\n  engine = \"postgres\"\n  dsn = \"x\"\n}\nuser \""+pw+"\" {\n  password = \""+pw+"\"\n}\n")
 	tests := []struct {
-		name    string
-		want    string
-		args    []string
-		leaks   bool
+		name  string
+		want  string
+		args  []string
+		leaks bool
 	}{
-		{name: "plan redacts", args: []string{"plan", "-f", path}, want: `CREATE ROLE "<redacted>" WITH LOGIN PASSWORD '<redacted>'`},
-		{name: "show secrets bypasses the sink", args: []string{"plan", "--show-secrets", "-f", path}, want: `CREATE ROLE "` + pw + `" WITH LOGIN PASSWORD '` + pw + `'`, leaks: true},
+		{name: "plan redacts", args: []string{"-C", dir, "plan"}, want: `CREATE ROLE "<redacted>" WITH LOGIN PASSWORD '<redacted>'`},
+		{name: "show secrets bypasses the sink", args: []string{"-C", dir, "plan", "--show-secrets"}, want: `CREATE ROLE "` + pw + `" WITH LOGIN PASSWORD '` + pw + `'`, leaks: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

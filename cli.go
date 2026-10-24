@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 
 	"github.com/alecthomas/kong"
 	"github.com/mazrean/dbfence/internal/app"
@@ -23,29 +21,23 @@ const (
 var errChanges = errors.New("changes present")
 
 type cli struct {
+	Chdir    workDir          `short:"C" default:"." env:"DBFENCE_CHDIR" placeholder:"DIR" help:"Directory whose *.hcl files are the configuration."`
 	Validate validateCmd      `cmd:"" help:"Load and validate the configuration."`
 	Plan     planCmd          `cmd:"" help:"Show the SQL that apply would execute (dry run)."`
 	Apply    applyCmd         `cmd:"" help:"Execute the plan."`
 	Version  kong.VersionFlag `help:"Print the version and exit."`
 }
 
-const defaultFile = "dbfence.hcl"
+// workDir is the configuration directory: like Terraform, every *.hcl
+// file directly in it is loaded. An empty -C or DBFENCE_CHDIR means the
+// working directory.
+type workDir string
 
-type configFlags struct {
-	File string `short:"f" default:"dbfence.hcl" env:"DBFENCE_FILE" help:"Configuration file or directory of *.hcl files."`
-}
-
-// path returns the configuration path. An empty -f or DBFENCE_FILE falls
-// back to the default, and a missing path is reported with a hint.
-func (f configFlags) path() (string, error) {
-	p := f.File
-	if p == "" {
-		p = defaultFile
+func (d workDir) options() app.Options {
+	if d == "" {
+		d = "."
 	}
-	if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("configuration %q not found (set -f/--file or DBFENCE_FILE): %w", p, fs.ErrNotExist)
-	}
-	return p, nil
+	return app.Options{Dir: string(d)}
 }
 
 type diffFlags struct {
@@ -54,26 +46,19 @@ type diffFlags struct {
 	ShowSecrets   bool `help:"Turn off all redaction: print passwords in SQL instead of '<redacted>', and known secrets in every message on stdout and stderr."`
 }
 
-func (f diffFlags) options(file configFlags) (app.Options, error) {
-	p, err := file.path()
-	if err != nil {
-		return app.Options{}, err
-	}
-	return app.Options{Path: p, Prune: f.Prune, ForcePassword: f.ForcePassword, ShowSecrets: f.ShowSecrets}, nil
+func (f diffFlags) options(dir workDir) app.Options {
+	o := dir.options()
+	o.Prune, o.ForcePassword, o.ShowSecrets = f.Prune, f.ForcePassword, f.ShowSecrets
+	return o
 }
 
 type planCmd struct {
-	configFlags
 	diffFlags
 	DetailedExitcode bool `help:"Exit with 2 when there are changes. Warnings alone (unmanaged objects without --prune, passwords not compared) exit with 0."`
 }
 
-func (c *planCmd) Run(ctx context.Context, a *app.App) error {
-	o, err := c.options(c.configFlags)
-	if err != nil {
-		return err
-	}
-	p, err := a.Plan(ctx, o)
+func (c *planCmd) Run(ctx context.Context, a *app.App, dir workDir) error {
+	p, err := a.Plan(ctx, c.options(dir))
 	if err != nil {
 		return err
 	}
@@ -84,30 +69,20 @@ func (c *planCmd) Run(ctx context.Context, a *app.App) error {
 }
 
 type applyCmd struct {
-	configFlags
 	diffFlags
 	AutoApprove bool `help:"Skip the confirmation prompt."`
 }
 
-func (c *applyCmd) Run(ctx context.Context, a *app.App) error {
-	o, err := c.options(c.configFlags)
-	if err != nil {
-		return err
-	}
+func (c *applyCmd) Run(ctx context.Context, a *app.App, dir workDir) error {
+	o := c.options(dir)
 	o.AutoApprove = c.AutoApprove
 	return a.Apply(ctx, o)
 }
 
-type validateCmd struct {
-	configFlags
-}
+type validateCmd struct{}
 
-func (c *validateCmd) Run(ctx context.Context, a *app.App) error {
-	p, err := c.path()
-	if err != nil {
-		return err
-	}
-	return a.Validate(ctx, app.Options{Path: p})
+func (c *validateCmd) Run(ctx context.Context, a *app.App, dir workDir) error {
+	return a.Validate(ctx, dir.options())
 }
 
 // run parses args and executes the selected command. All output goes to
@@ -151,6 +126,7 @@ func run(ctx context.Context, args []string, a *app.App, stdout, stderr *secret.
 	show := c.Plan.ShowSecrets || c.Apply.ShowSecrets
 	stdout.ShowSecrets(show)
 	stderr.ShowSecrets(show)
+	kctx.Bind(c.Chdir)
 	switch err := kctx.Run(); {
 	case err == nil:
 		return exitOK

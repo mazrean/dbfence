@@ -13,13 +13,13 @@ import (
 
 func load(t *testing.T, src string) (*Config, error) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "dbfence.hcl")
-	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "dbfence.hcl"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	env := map[string]string{"DSN": "postgres://localhost/postgres", "PW": "secret"}
 	r := funcs.NewRegistry(t.Context(), funcs.WithEnv(func(k string) (string, bool) { v, ok := env[k]; return v, ok }))
-	return Load(path, r.Functions())
+	return Load(dir, r.Functions())
 }
 
 func TestLoadPostgres(t *testing.T) {
@@ -293,10 +293,10 @@ func TestLoadDirectoryEntries(t *testing.T) {
 	}
 }
 
-func TestLoadMissingFile(t *testing.T) {
+func TestLoadMissingDirectory(t *testing.T) {
 	t.Parallel()
-	_, err := Load(filepath.Join(t.TempDir(), "dbfence.hcl"), nil)
-	if err == nil || !strings.Contains(err.Error(), "not found (use -f/--file or DBFENCE_FILE)") {
+	_, err := Load(filepath.Join(t.TempDir(), "none"), nil)
+	if err == nil || !strings.Contains(err.Error(), "read configuration directory (set -C/--chdir or DBFENCE_CHDIR)") {
 		t.Errorf("Load(missing) error = %v", err)
 	}
 }
@@ -362,23 +362,11 @@ func TestLoadResolvesTFStateRelativeToConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "dbfence.hcl"), []byte(cfgSrc), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tests := []struct {
-		name string
-		path string
-	}{
-		{"file", filepath.Join(dir, "dbfence.hcl")},
-		{"directory", dir},
+	cfg, err := Load(dir, funcs.NewRegistry(t.Context()).Functions())
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			cfg, err := Load(tt.path, funcs.NewRegistry(t.Context()).Functions())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if want := "postgres://u@db.internal/x"; cfg.DSN != want {
-				t.Errorf("DSN = %q, want %q", cfg.DSN, want)
-			}
-		})
+	if want := "postgres://u@db.internal/x"; cfg.DSN != want {
+		t.Errorf("DSN = %q, want %q", cfg.DSN, want)
 	}
 }

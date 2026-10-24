@@ -89,7 +89,8 @@ func FuzzLoad(f *testing.F) {
 	}
 	// Inputs run one at a time in each fuzzing process, so they share
 	// one file.
-	path := filepath.Join(f.TempDir(), "dbfence.hcl")
+	dir := f.TempDir()
+	path := filepath.Join(dir, "dbfence.hcl")
 	f.Fuzz(func(t *testing.T, src string) {
 		// The parser is not what is under test here; skip inputs it
 		// would spend all the time on.
@@ -99,7 +100,7 @@ func FuzzLoad(f *testing.F) {
 		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := Load(path, map[string]function.Function{})
+		cfg, err := Load(dir, map[string]function.Function{})
 		if err != nil {
 			return
 		}

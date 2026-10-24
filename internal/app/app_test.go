@@ -52,21 +52,21 @@ func (o fakeOpener) Open(context.Context, model.Engine, string) (app.Driver, err
 
 func newApp(t *testing.T, stdin string) (*app.App, *fakeDriver, *strings.Builder, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "dbfence.hcl")
+	dir := t.TempDir()
 	src := "connection {\n  engine = \"postgres\"\n  dsn = \"x\"\n}\nuser \"app\" {\n  password = \"hunter2\"\n}\n"
-	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "dbfence.hcl"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	d := &fakeDriver{}
 	out := &strings.Builder{}
 	a := app.New(funcs.NewRegistry(t.Context()), fakeOpener{d}, &app.IO{In: strings.NewReader(stdin), Out: out, Err: out})
-	return a, d, out, path
+	return a, d, out, dir
 }
 
 func TestPlanDoesNotExecute(t *testing.T) {
 	t.Parallel()
-	a, d, out, path := newApp(t, "")
-	p, err := a.Plan(t.Context(), app.Options{Path: path})
+	a, d, out, dir := newApp(t, "")
+	p, err := a.Plan(t.Context(), app.Options{Dir: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +97,8 @@ func TestApplyConfirmation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			a, d, out, path := newApp(t, tt.stdin)
-			err := a.Apply(t.Context(), app.Options{Path: path})
+			a, d, out, dir := newApp(t, tt.stdin)
+			err := a.Apply(t.Context(), app.Options{Dir: dir})
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
@@ -117,13 +117,13 @@ func TestApplyConfirmation(t *testing.T) {
 
 func TestApplyPromptInterrupted(t *testing.T) {
 	t.Parallel()
-	_, d, out, path := newApp(t, "")
+	_, d, out, dir := newApp(t, "")
 	r, w := io.Pipe()
 	t.Cleanup(func() { _ = w.Close() })
 	a := app.New(funcs.NewRegistry(t.Context()), fakeOpener{d}, &app.IO{In: r, Out: out, Err: out})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- a.Apply(ctx, app.Options{Path: path}) }()
+	go func() { done <- a.Apply(ctx, app.Options{Dir: dir}) }()
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	select {
@@ -141,11 +141,11 @@ func TestApplyPromptInterrupted(t *testing.T) {
 
 func TestPlanWritesWarningsToStderr(t *testing.T) {
 	t.Parallel()
-	_, d, _, path := newApp(t, "")
+	_, d, _, dir := newApp(t, "")
 	d.extra = []model.RoleState{{ID: model.RoleID{Name: "legacy"}}}
 	var out, errOut strings.Builder
 	a := app.New(funcs.NewRegistry(t.Context()), fakeOpener{d}, &app.IO{In: strings.NewReader(""), Out: &out, Err: &errOut})
-	if _, err := a.Plan(t.Context(), app.Options{Path: path}); err != nil {
+	if _, err := a.Plan(t.Context(), app.Options{Dir: dir}); err != nil {
 		t.Fatal(err)
 	}
 	const warn = `unmanaged role "legacy"`
@@ -184,13 +184,13 @@ func TestUnsafePlanIsRefused(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			for _, cmd := range []string{"plan", "apply"} {
-				a, d, out, path := newApp(t, "yes\n")
+				a, d, out, dir := newApp(t, "yes\n")
 				d.unsafe = []plan.Statement{tt.unsafe}
 				var err error
 				if cmd == "plan" {
-					_, err = a.Plan(t.Context(), app.Options{Path: path})
+					_, err = a.Plan(t.Context(), app.Options{Dir: dir})
 				} else {
-					err = a.Apply(t.Context(), app.Options{Path: path})
+					err = a.Apply(t.Context(), app.Options{Dir: dir})
 				}
 				if !errors.Is(err, app.ErrUnsafePlan) {
 					t.Fatalf("%s: err = %v, want ErrUnsafePlan", cmd, err)

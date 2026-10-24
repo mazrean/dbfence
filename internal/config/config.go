@@ -4,7 +4,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"maps"
 	"math"
 	"os"
@@ -97,18 +96,14 @@ type ignoreBlock struct {
 	Schemas   *[]string `hcl:"schemas"`
 }
 
-// Load parses path (a file or a directory of *.hcl files).
-func Load(path string, fns map[string]function.Function) (*Config, error) {
-	files, err := hclFiles(path)
+// Load parses every *.hcl file directly in dir, like Terraform.
+func Load(dir string, fns map[string]function.Function) (*Config, error) {
+	files, err := hclFiles(dir)
 	if err != nil {
 		return nil, err
 	}
 	// Relative tfstate paths resolve against the configuration directory.
-	base := path
-	if st, err := os.Stat(path); err == nil && !st.IsDir() {
-		base = filepath.Dir(path)
-	}
-	fns = funcs.ResolvePathsFrom(fns, base)
+	fns = funcs.ResolvePathsFrom(fns, dir)
 	// Engine names are printed by design, even when a password equals one.
 	secret.RegisterPublic(string(model.EnginePostgres))
 	secret.RegisterPublic(string(model.EngineMySQL))
@@ -135,29 +130,19 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 	return cfg, nil
 }
 
-func hclFiles(path string) ([]string, error) {
-	st, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("configuration file %s not found (use -f/--file or DBFENCE_FILE): %w", path, err)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read configuration %s: %w", path, err)
-	}
-	if !st.IsDir() {
-		return []string{path}, nil
-	}
+func hclFiles(dir string) ([]string, error) {
 	// os.ReadDir instead of filepath.Glob: the directory name must not be
 	// interpreted as a pattern.
-	entries, err := os.ReadDir(path)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("read configuration directory %s: %w", path, err)
+		return nil, fmt.Errorf("read configuration directory (set -C/--chdir or DBFENCE_CHDIR): %w", err)
 	}
 	var files []string
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".hcl") {
 			continue
 		}
-		f := filepath.Join(path, e.Name())
+		f := filepath.Join(dir, e.Name())
 		// Stat follows symlinks, so a link to a file still counts.
 		if fi, err := os.Stat(f); err != nil || !fi.Mode().IsRegular() {
 			continue
@@ -165,7 +150,7 @@ func hclFiles(path string) ([]string, error) {
 		files = append(files, f)
 	}
 	if len(files) == 0 {
-		return nil, fmt.Errorf("no *.hcl files in %s", path)
+		return nil, fmt.Errorf("no *.hcl files in %s (set -C/--chdir or DBFENCE_CHDIR)", dir)
 	}
 	slices.Sort(files)
 	return files, nil
