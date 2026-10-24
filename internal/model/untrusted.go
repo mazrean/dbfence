@@ -165,6 +165,7 @@ func (c *Current) DropUntrusted(engine Engine) (Untrusted, error) {
 		return o.Type == ObjectSchema && schema(o.Database, o.Schema)
 	}
 
+	c.entangle(engine, role, database, schema)
 	c.Roles = slices.DeleteFunc(c.Roles, func(r RoleState) bool { return role(r.ID) })
 	for i := range c.Roles {
 		r := &c.Roles[i]
@@ -195,4 +196,46 @@ func (c *Current) DropUntrusted(engine Engine) (Untrusted, error) {
 		c.Warnings = append(c.Warnings, fmt.Sprintf("schema %s in database %s: %s, so %s", showName(key[1]), showName(key[0]), why[key], manual))
 	}
 	return u, nil
+}
+
+// entangle records in c.Entangled the databases and schemas with names
+// dbfence manages whose drop would also drop what it does not: those
+// owned by or granting privileges to a role, and databases containing a
+// schema, that role, database and schema report as untrusted (grants
+// only on PostgreSQL: MySQL keeps the grants of a dropped database). It
+// runs before DropUntrusted removes them from c.
+func (c *Current) entangle(engine Engine, role func(RoleID) bool, database func(string) bool, schema func(db, name string) bool) {
+	dbObj := func(name string) Object { return Object{Type: ObjectDatabase, Database: name} }
+	ownedBy := func(owner string) bool { return owner != "" && role(RoleID{Name: owner}) }
+	for _, d := range c.Databases {
+		if !database(d.Name) && ownedBy(d.Owner) {
+			c.Entangle(dbObj(d.Name), fmt.Sprintf("it is owned by role %s, which dbfence does not manage", showName(d.Owner)))
+		}
+	}
+	for _, s := range slices.Concat(c.Schemas, c.OtherSchemas) {
+		switch {
+		case database(s.Database):
+		case schema(s.Database, s.Name):
+			c.Entangle(dbObj(s.Database), fmt.Sprintf("it contains schema %s, which dbfence does not manage", showName(s.Name)))
+		case ownedBy(s.Owner):
+			why := fmt.Sprintf("is owned by role %s, which dbfence does not manage", showName(s.Owner))
+			c.Entangle(Object{Type: ObjectSchema, Database: s.Database, Schema: s.Name}, "it "+why)
+			c.Entangle(dbObj(s.Database), fmt.Sprintf("its schema %s %s", showName(s.Name), why))
+		}
+	}
+	if engine != EnginePostgres {
+		return
+	}
+	for _, p := range c.Privileges {
+		o := p.Object
+		if (o.Type != ObjectDatabase && o.Type != ObjectSchema) || o.Database == "" || database(o.Database) ||
+			(o.Type == ObjectSchema && schema(o.Database, o.Schema)) || !role(p.Grantee) {
+			continue
+		}
+		why := fmt.Sprintf("grants %s to role %s, which dbfence does not manage", p.Name, showRole(engine, p.Grantee))
+		c.Entangle(o, "it "+why)
+		if o.Type == ObjectSchema {
+			c.Entangle(dbObj(o.Database), fmt.Sprintf("its schema %s %s", showName(o.Schema), why))
+		}
+	}
 }

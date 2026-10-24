@@ -104,3 +104,60 @@ func TestIntegrationPruneKeepsRolesReachingUnmanaged(t *testing.T) {
 		t.Errorf("prune does not drop plain:\n%s\nwarnings:\n%s", got, warns)
 	}
 }
+
+// TestIntegrationPruneKeepsContainersOfUnmanaged checks against a real
+// server that --prune keeps the undeclared databases and schemas whose
+// drop would drop what dbfence does not manage, read without a prunable
+// role: a database owned by an unmanaged role, one holding a schema with
+// an unmanaged name, one holding a table of an unmanaged role (seen in
+// pg_shdepend), a schema owned by and one granting to an unmanaged role.
+func TestIntegrationPruneKeepsContainersOfUnmanaged(t *testing.T) {
+	t.Parallel()
+	s := startServer(t)
+	bad := `"bad` + "\x01" + `"`
+	s.exec(t,
+		"CREATE ROLE "+bad,
+		"CREATE DATABASE app", "CREATE DATABASE owned OWNER "+bad,
+		"CREATE DATABASE named", "CREATE DATABASE tabled", "CREATE DATABASE plaindb",
+	)
+	s.exec(t, `\c named`, `CREATE SCHEMA "evil`+"\x01"+`"`)
+	s.exec(t, `\c tabled`, "CREATE TABLE public.t (id int)", "ALTER TABLE public.t OWNER TO "+bad)
+	s.exec(t, `\c app`,
+		"CREATE SCHEMA old AUTHORIZATION "+bad,
+		"CREATE SCHEMA granted", "GRANT USAGE ON SCHEMA granted TO "+bad,
+		"CREATE SCHEMA plain",
+	)
+	d := s.open(t, "postgres")
+	desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app"}}}
+	cur, err := d.Inspect(t.Context(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := compute(t, desired, cur, d, diff.Options{Prune: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sqlOf(p.Statements())
+	warns := strings.Join(p.Warnings, "\n")
+	for _, stmt := range []string{`DROP DATABASE "owned"`, `DROP DATABASE "named"`, `DROP DATABASE "tabled"`, `DROP SCHEMA "old"`, `DROP SCHEMA "granted"`} {
+		if strings.Contains(got, stmt) {
+			t.Errorf("plan contains %s:\n%s\nwarnings:\n%s", stmt, got, warns)
+		}
+	}
+	for _, stmt := range []string{`DROP DATABASE "plaindb"`, `DROP SCHEMA "plain"`} {
+		if !strings.Contains(got, stmt) {
+			t.Errorf("plan does not contain %s:\n%s\nwarnings:\n%s", stmt, got, warns)
+		}
+	}
+	for _, w := range []string{
+		`database "owned": it is owned by role "bad\x01"`,
+		`database "named": it contains schema "evil\x01"`,
+		`database "tabled": role "bad\x01", which dbfence does not manage, owns objects or holds privileges in it`,
+		`schema "old" in database "app": it is owned by role "bad\x01"`,
+		`schema "granted" in database "app": it grants USAGE to role "bad\x01"`,
+	} {
+		if !strings.Contains(warns, w) {
+			t.Errorf("warnings do not contain %q:\n%s", w, warns)
+		}
+	}
+}

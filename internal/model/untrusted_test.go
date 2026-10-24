@@ -102,6 +102,7 @@ func TestDropUntrusted(t *testing.T) {
 			{Grantee: model.PublicRole, Object: db("app"), Name: "TEMPORARY"},
 		},
 		InspectedDatabases: []string{"app"},
+		Entangled:          map[model.Object]string{db("app"): `it is owned by role "evil\n", which dbfence does not manage`},
 	}
 	warnings := cur.Warnings
 	cur.Warnings = nil
@@ -157,6 +158,108 @@ func TestDropUntrustedCurrentUser(t *testing.T) {
 	cur := &model.Current{CurrentUser: model.RoleID{Name: "me\x1b"}}
 	if _, err := cur.DropUntrusted(model.EnginePostgres); !errors.Is(err, model.ErrUntrustedCurrentUser) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestDropUntrustedEntangled(t *testing.T) {
+	t.Parallel()
+	bad := "bad\x01"
+	db := func(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
+	sch := func(d, name string) model.Object { return model.Object{Type: model.ObjectSchema, Database: d, Schema: name} }
+	tests := []struct {
+		want   map[model.Object]string
+		name   string
+		engine model.Engine
+		cur    model.Current
+	}{
+		{
+			name:   "trusted owners and grantees",
+			engine: model.EnginePostgres,
+			cur: model.Current{
+				Databases:    []model.Database{{Name: "d", Owner: "o"}},
+				Schemas:      []model.Schema{{Database: "d", Name: "s", Owner: "o"}},
+				OtherSchemas: []model.Schema{{Database: "e", Name: "t", Owner: "o"}},
+				Privileges:   []model.Privilege{{Grantee: model.RoleID{Name: "o"}, Object: db("d"), Name: "CONNECT"}},
+			},
+		},
+		{
+			name:   "database owned by an untrusted role",
+			engine: model.EnginePostgres,
+			cur:    model.Current{Databases: []model.Database{{Name: "d", Owner: bad}}},
+			want:   map[model.Object]string{db("d"): `it is owned by role "bad\x01", which dbfence does not manage`},
+		},
+		{
+			name:   "database containing a schema with an untrusted name",
+			engine: model.EnginePostgres,
+			cur:    model.Current{OtherSchemas: []model.Schema{{Database: "d", Name: "s\x01", Owner: "o"}}},
+			want:   map[model.Object]string{db("d"): `it contains schema "s\x01", which dbfence does not manage`},
+		},
+		{
+			name:   "schema owned by an untrusted role",
+			engine: model.EnginePostgres,
+			cur: model.Current{
+				Schemas:      []model.Schema{{Database: "d", Name: "s", Owner: bad}},
+				OtherSchemas: []model.Schema{{Database: "e", Name: "t", Owner: bad}},
+			},
+			want: map[model.Object]string{
+				sch("d", "s"): `it is owned by role "bad\x01", which dbfence does not manage`,
+				db("d"):       `its schema "s" is owned by role "bad\x01", which dbfence does not manage`,
+				sch("e", "t"): `it is owned by role "bad\x01", which dbfence does not manage`,
+				db("e"):       `its schema "t" is owned by role "bad\x01", which dbfence does not manage`,
+			},
+		},
+		{
+			name:   "privileges granted to an untrusted role",
+			engine: model.EnginePostgres,
+			cur: model.Current{Privileges: []model.Privilege{
+				{Grantee: model.RoleID{Name: bad}, Object: db("d"), Name: "CONNECT"},
+				{Grantee: model.RoleID{Name: bad}, Object: sch("e", "s"), Name: "USAGE"},
+			}},
+			want: map[model.Object]string{
+				db("d"):       `it grants CONNECT to role "bad\x01", which dbfence does not manage`,
+				sch("e", "s"): `it grants USAGE to role "bad\x01", which dbfence does not manage`,
+				db("e"):       `its schema "s" grants USAGE to role "bad\x01", which dbfence does not manage`,
+			},
+		},
+		{
+			name:   "first reason is kept",
+			engine: model.EnginePostgres,
+			cur: model.Current{
+				Databases:  []model.Database{{Name: "d", Owner: bad}},
+				Privileges: []model.Privilege{{Grantee: model.RoleID{Name: bad}, Object: db("d"), Name: "CONNECT"}},
+			},
+			want: map[model.Object]string{db("d"): `it is owned by role "bad\x01", which dbfence does not manage`},
+		},
+		{
+			name:   "untrusted databases and schemas are dropped, not entangled",
+			engine: model.EnginePostgres,
+			cur: model.Current{
+				Databases:  []model.Database{{Name: "d\x01", Owner: bad}},
+				Schemas:    []model.Schema{{Database: "d\x01", Name: "s", Owner: bad}},
+				Privileges: []model.Privilege{{Grantee: model.RoleID{Name: bad}, Object: sch("e", "s\x01"), Name: "USAGE"}},
+			},
+		},
+		{
+			name:   "MySQL keeps the grants of a dropped database",
+			engine: model.EngineMySQL,
+			cur: model.Current{Privileges: []model.Privilege{
+				{Grantee: model.RoleID{Name: bad, Host: "%"}, Object: db("d"), Name: "SELECT"},
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cur := tt.cur
+			if _, err := cur.DropUntrusted(tt.engine); err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tt.want, cur.Entangled, cmp.Comparer(func(a, b map[model.Object]string) bool {
+				return len(a) == len(b) && (len(a) == 0 || cmp.Equal(a, b))
+			})); diff != "" {
+				t.Errorf("Entangled (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

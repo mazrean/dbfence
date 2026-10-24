@@ -571,3 +571,66 @@ func TestComputePruneOtherSchemaOwners(t *testing.T) {
 		})
 	}
 }
+
+// TestComputePruneEntangled checks that --prune keeps the databases and
+// schemas model.Current.Entangled names, with a warning, and drops the
+// others.
+func TestComputePruneEntangled(t *testing.T) {
+	t.Parallel()
+	db := func(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
+	sch := func(d, name string) model.Object { return model.Object{Type: model.ObjectSchema, Database: d, Schema: name} }
+	tests := []struct {
+		entangled map[model.Object]string
+		name      string
+		want      []string
+		wantWarns []string
+	}{
+		{
+			name: "nothing entangled",
+			want: []string{`app: DROP SCHEMA "old"`, `DROP DATABASE "old"`},
+		},
+		{
+			name:      "database",
+			entangled: map[model.Object]string{db("old"): "it is owned by role X"},
+			want:      []string{`app: DROP SCHEMA "old"`},
+			wantWarns: []string{`database "old": it is owned by role X, so it is not pruned; handle it manually`},
+		},
+		{
+			name:      "schema",
+			entangled: map[model.Object]string{sch("app", "old"): "it grants USAGE to role X"},
+			want:      []string{`DROP DATABASE "old"`},
+			wantWarns: []string{`schema "old" in database "app": it grants USAGE to role X, so it is not pruned; handle it manually`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app", Owner: "admin"}}}
+			current := &model.Current{
+				CurrentUser:        pgID("admin"),
+				CurrentDatabase:    "postgres",
+				Roles:              []model.RoleState{{ID: pgID("admin"), Login: true, Superuser: true}},
+				Databases:          []model.Database{{Name: "app", Owner: "admin"}, {Name: "old", Owner: "admin"}, {Name: "postgres", Owner: "admin"}},
+				Schemas:            []model.Schema{{Database: "app", Name: "old", Owner: "admin"}},
+				InspectedDatabases: []string{"app"},
+				Entangled:          tt.entangled,
+			}
+			p, err := compute(t, desired, current, postgres.Dialect{}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			var warns []string
+			for _, w := range p.Warnings {
+				if strings.Contains(w, "it is not pruned") {
+					warns = append(warns, w)
+				}
+			}
+			if d := cmp.Diff(tt.wantWarns, warns, cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
+			}
+		})
+	}
+}

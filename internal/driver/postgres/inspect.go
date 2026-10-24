@@ -153,19 +153,16 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 		cur.InspectedDatabases = append(cur.InspectedDatabases, db.Name)
 	}
 	// Pruning a role runs REASSIGN OWNED and DROP OWNED in the other
-	// databases too, so their schemas are read when a role may be pruned
-	// or ignored schemas may be there.
-	ignoreRoles := compileIgnore(desired.Ignore.Roles)
-	if len(desired.Ignore.Schemas) > 0 || slices.ContainsFunc(cur.Roles, func(r model.RoleState) bool { return st.prunable(r.ID.Name, ignoreRoles) }) {
-		for _, db := range otherSchemaDatabases(desired, cur, st.connectable) {
-			ok, err := d.inspectSchemaOwners(ctx, cur, st, db)
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
-				cur.Warnings = append(cur.Warnings, fmt.Sprintf("cannot connect to database %q: owners of and privileges on its schemas are not known, so --prune does not run REASSIGN OWNED and DROP OWNED there", db))
-				delete(st.connectable, db)
-			}
+	// databases too, and pruning one of them drops its schemas, so their
+	// schemas are read.
+	for _, db := range otherSchemaDatabases(desired, cur, st.connectable) {
+		ok, err := d.inspectSchemaOwners(ctx, cur, st, db)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			cur.Warnings = append(cur.Warnings, fmt.Sprintf("cannot connect to database %q: owners of and privileges on its schemas are not known, so --prune does not run REASSIGN OWNED and DROP OWNED there", db))
+			delete(st.connectable, db)
 		}
 	}
 	st.otherOwners = map[model.Object]string{}
@@ -443,6 +440,11 @@ func (d *Driver) unreachableDependencyWarnings(ctx context.Context, cur *model.C
 			var role, db string
 			if err := rows.Scan(&role, &db); err != nil {
 				return err
+			}
+			if unmanagedRole(role) && !unmanagedName(model.NameDatabase, db) {
+				cur.Entangle(model.Object{Type: model.ObjectDatabase, Database: db},
+					fmt.Sprintf("role %q, which dbfence does not manage, owns objects or holds privileges in it", role))
+				return nil
 			}
 			var why string
 			switch {

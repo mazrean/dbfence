@@ -511,6 +511,10 @@ func (df *differ) databases() []string {
 			df.warn("unmanaged database %q (use --prune to drop it)", c.Name)
 			continue
 		}
+		if why := df.current.Entangled[model.Object{Type: model.ObjectDatabase, Database: c.Name}]; why != "" {
+			df.warn("database %q: %s, so it is not pruned; handle it manually", c.Name, why)
+			continue
+		}
 		dropped = append(dropped, c.Name)
 		df.add(phaseDropDatabase, plan.ActionDrop, fmt.Sprintf("database %q", c.Name), df.d.DropDatabase(c.Name))
 	}
@@ -554,6 +558,10 @@ func (df *differ) schemas() {
 		}
 		if !df.opts.Prune {
 			df.warn("unmanaged schema %q in database %q (use --prune to drop it)", c.Name, c.Database)
+			continue
+		}
+		if why := df.current.Entangled[model.Object{Type: model.ObjectSchema, Database: c.Database, Schema: c.Name}]; why != "" {
+			df.warn("schema %q in database %q: %s, so it is not pruned; handle it manually", c.Name, c.Database, why)
 			continue
 		}
 		df.add(phaseDropSchema, plan.ActionDrop, fmt.Sprintf("schema %q in database %q", c.Name, c.Database), df.d.DropSchema(c))

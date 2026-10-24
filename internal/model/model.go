@@ -298,10 +298,29 @@ type Current struct {
 	// CurrentDatabase is the database dbfence is connected to
 	// (PostgreSQL only). It is never pruned.
 	CurrentDatabase string
+	// Entangled maps databases and schemas (an Object of type database,
+	// or schema) whose drop would also drop or change what dbfence does
+	// not manage (model.CheckName), such as objects owned by or
+	// privileges granted to such roles, or schemas with such names, to
+	// why. DropUntrusted and the driver fill it; --prune keeps them and
+	// policy.Verify refuses their drop.
+	Entangled map[Object]string
 	// Warnings are inspection notes that diff adds to the plan.
 	Warnings []string
 	// Unreadable lists what could not be inspected.
 	Unreadable Unreadable
+}
+
+// Entangle records in c.Entangled that dropping obj (a database or a
+// schema) would also drop or change what dbfence does not manage. The
+// first reason recorded for obj is kept.
+func (c *Current) Entangle(obj Object, why string) {
+	if c.Entangled == nil {
+		c.Entangled = map[Object]string{}
+	}
+	if _, ok := c.Entangled[obj]; !ok {
+		c.Entangled[obj] = why
+	}
 }
 
 // NormalizePrivilege upper-cases and collapses whitespace.

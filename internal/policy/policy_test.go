@@ -178,6 +178,26 @@ func TestVerify(t *testing.T) {
 		{name: "ignored database", stmts: []plan.Statement{dropDatabase("legacy_db")}, want: []string{`ignored database "legacy_db"`}},
 		{name: "declared database", stmts: []plan.Statement{dropDatabase("app")}, want: []string{`declared database "app"`}},
 		{name: "missing database", stmts: []plan.Statement{dropDatabase("nowhere")}, want: []string{"does not exist"}},
+		{
+			name: "database entangled with unmanaged objects",
+			current: func() *model.Current {
+				c := pgCurrent()
+				c.Entangle(model.Object{Type: model.ObjectDatabase, Database: "stray_db"}, `it is owned by role "bad\x01", which dbfence does not manage`)
+				return c
+			}(),
+			stmts: []plan.Statement{dropDatabase("stray_db")},
+			want:  []string{`drops database "stray_db", although it is owned by role "bad\x01"`},
+		},
+		{
+			name: "schema entangled with unmanaged objects",
+			current: func() *model.Current {
+				c := pgCurrent()
+				c.Entangle(model.Object{Type: model.ObjectSchema, Database: "app", Schema: "old"}, `it grants USAGE to role "bad\x01", which dbfence does not manage`)
+				return c
+			}(),
+			stmts: []plan.Statement{dropSchema("app", "old")},
+			want:  []string{`drops schema "old" in database "app", although it grants USAGE to role "bad\x01"`},
+		},
 		{name: "built-in schema", stmts: []plan.Statement{dropSchema("app", "public")}, want: []string{`built-in schema "public"`}},
 		{name: "ignored schema", stmts: []plan.Statement{dropSchema("app", "legacy_s")}, want: []string{`ignored schema "legacy_s"`}},
 		{name: "declared schema", stmts: []plan.Statement{dropSchema("app", "core")}, want: []string{`declared schema "core"`}},

@@ -299,6 +299,9 @@ func (c *checker) dropDatabase(name string) []string {
 	add(c.ignore.database(name), "drops the ignored database %q")
 	add(c.declaredDatabase(name), "drops the declared database %q")
 	add(!c.existingDatabase(name), "drops database %q, which does not exist")
+	if why := c.cur.Entangled[model.Object{Type: model.ObjectDatabase, Database: name}]; why != "" {
+		out = append(out, fmt.Sprintf("drops database %q, although %s", name, why))
+	}
 	return out
 }
 
@@ -314,6 +317,9 @@ func (c *checker) dropSchema(database, name string) []string {
 	add(c.declaredSchema(database, name), "drops the declared schema %q in database %q")
 	add(!slices.ContainsFunc(c.cur.Schemas, func(s model.Schema) bool { return s.Database == database && s.Name == name }),
 		"drops schema %q in database %q, which does not exist")
+	if why := c.cur.Entangled[model.Object{Type: model.ObjectSchema, Database: database, Schema: name}]; why != "" {
+		out = append(out, fmt.Sprintf("drops schema %q in database %q, although %s", name, database, why))
+	}
 	return out
 }
 
