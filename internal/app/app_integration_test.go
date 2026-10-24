@@ -22,13 +22,19 @@ import (
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
 	"github.com/mazrean/dbfence/internal/plan"
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
+	"github.com/ory/dockertest/v4"
 )
 
 // Integration tests start disposable MySQL and PostgreSQL servers with
 // dockertest. They are skipped with -short, and when Docker is
 // unavailable outside CI.
+
+// TestMain removes the containers even when a test hangs or the run is
+// interrupted, and labels them so that a later run removes what a killed
+// run left behind.
+func TestMain(m *testing.M) {
+	dockertest.TestMain(context.Background(), m)
+}
 
 type harness struct {
 	t      *testing.T
@@ -73,27 +79,21 @@ func newHarness(t *testing.T, engine model.Engine, c container) *harness {
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	pool, err := dockertest.NewPool("")
-	if err == nil {
-		err = pool.Client.Ping()
-	}
+	pool, err := dockertest.NewPool(t.Context(), "", dockertest.WithMaxWait(3*time.Minute))
 	if err != nil {
 		if os.Getenv("CI") != "" {
 			t.Fatalf("docker is required in CI: %v", err)
 		}
 		t.Skipf("docker is unavailable: %v", err)
 	}
-	pool.MaxWait = 3 * time.Minute
-	res, err := pool.RunWithOptions(&dockertest.RunOptions{Repository: c.repository, Tag: c.tag, Env: c.env},
-		func(hc *docker.HostConfig) {
-			hc.AutoRemove = true
-			hc.RestartPolicy = docker.RestartPolicy{Name: "no"}
-		})
+	t.Cleanup(func() { _ = pool.Close(context.WithoutCancel(t.Context())) })
+	// Tests change server-wide state, so each one gets its own server
+	// instead of one reused per image.
+	res, err := pool.Run(t.Context(), c.repository,
+		dockertest.WithTag(c.tag), dockertest.WithEnv(c.env), dockertest.WithoutReuse())
 	if err != nil {
 		t.Fatalf("start %s:%s: %v", c.repository, c.tag, err)
 	}
-	t.Cleanup(func() { _ = pool.Purge(res) })
-	_ = res.Expire(600)
 
 	dsn := c.dsn(res.GetHostPort(c.port))
 	db, err := sql.Open(c.sqlDriver, dsn)
@@ -101,8 +101,9 @@ func newHarness(t *testing.T, engine model.Engine, c container) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := pool.Retry(func() error { return db.PingContext(t.Context()) }); err != nil {
-		t.Fatalf("%s did not become ready: %v", c.repository, err)
+	if err := pool.Retry(t.Context(), 0, func() error { return db.PingContext(t.Context()) }); err != nil {
+		stdout, stderr, _ := res.Logs(context.WithoutCancel(t.Context()))
+		t.Fatalf("%s did not become ready: %v\nstdout:\n%s\nstderr:\n%s", c.repository, err, stdout, stderr)
 	}
 	return &harness{t: t, engine: engine, dsn: dsn, db: db, dir: t.TempDir()}
 }

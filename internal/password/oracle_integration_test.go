@@ -1,6 +1,7 @@
 package password_test
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -11,9 +12,15 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/mazrean/dbfence/internal/password"
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
+	"github.com/ory/dockertest/v4"
 )
+
+// TestMain removes the containers even when a test hangs or the run is
+// interrupted, and labels them so that a later run removes what a killed
+// run left behind.
+func TestMain(m *testing.M) {
+	dockertest.TestMain(context.Background(), m)
+}
 
 // The oracle tests let real servers hash a corpus of passwords and check
 // that the matchers accept exactly those passwords. Generating and
@@ -51,45 +58,47 @@ func corpus(n int) []string {
 	return out
 }
 
-func startServer(t *testing.T, opts *dockertest.RunOptions, port, sqlDriver string, dsn func(hostPort string) string) *sql.DB {
+// server is a container to start: its image, environment, and command.
+type server struct {
+	repository, tag string
+	env, cmd        []string
+}
+
+func startServer(t *testing.T, srv server, port, sqlDriver string, dsn func(hostPort string) string) *sql.DB {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("integration test")
 	}
-	pool, err := dockertest.NewPool("")
-	if err == nil {
-		err = pool.Client.Ping()
-	}
+	pool, err := dockertest.NewPool(t.Context(), "", dockertest.WithMaxWait(3*time.Minute))
 	if err != nil {
 		if os.Getenv("CI") != "" {
 			t.Fatalf("docker is required in CI: %v", err)
 		}
 		t.Skipf("docker is unavailable: %v", err)
 	}
-	pool.MaxWait = 3 * time.Minute
-	res, err := pool.RunWithOptions(opts, func(hc *docker.HostConfig) {
-		hc.AutoRemove = true
-		hc.RestartPolicy = docker.RestartPolicy{Name: "no"}
-	})
+	t.Cleanup(func() { _ = pool.Close(context.WithoutCancel(t.Context())) })
+	// Tests change server-wide state, so each one gets its own server
+	// instead of one reused per image.
+	res, err := pool.Run(t.Context(), srv.repository,
+		dockertest.WithTag(srv.tag), dockertest.WithEnv(srv.env), dockertest.WithCmd(srv.cmd), dockertest.WithoutReuse())
 	if err != nil {
-		t.Fatalf("start %s:%s: %v", opts.Repository, opts.Tag, err)
+		t.Fatalf("start %s:%s: %v", srv.repository, srv.tag, err)
 	}
-	t.Cleanup(func() { _ = pool.Purge(res) })
-	_ = res.Expire(600)
 	db, err := sql.Open(sqlDriver, dsn(res.GetHostPort(port)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := pool.Retry(func() error { return db.PingContext(t.Context()) }); err != nil {
-		t.Fatalf("%s did not become ready: %v", opts.Repository, err)
+	if err := pool.Retry(t.Context(), 0, func() error { return db.PingContext(t.Context()) }); err != nil {
+		stdout, stderr, _ := res.Logs(context.WithoutCancel(t.Context()))
+		t.Fatalf("%s did not become ready: %v\nstdout:\n%s\nstderr:\n%s", srv.repository, err, stdout, stderr)
 	}
 	return db
 }
 
 func TestPostgresOracle(t *testing.T) {
 	t.Parallel()
-	db := startServer(t, &dockertest.RunOptions{Repository: "postgres", Tag: "17", Env: []string{"POSTGRES_PASSWORD=postgres"}},
+	db := startServer(t, server{repository: "postgres", tag: "17", env: []string{"POSTGRES_PASSWORD=postgres"}},
 		"5432/tcp", "pgx", func(hp string) string { return "postgres://postgres:postgres@" + hp + "/postgres?sslmode=disable" })
 	db.SetMaxOpenConns(1) // keep SET password_encryption on one session
 	for _, enc := range []string{"scram-sha-256", "md5"} {
@@ -123,9 +132,9 @@ func TestPostgresOracle(t *testing.T) {
 
 func TestMySQLOracle(t *testing.T) {
 	t.Parallel()
-	db := startServer(t, &dockertest.RunOptions{
-		Repository: "mysql", Tag: "8.4", Env: []string{"MYSQL_ROOT_PASSWORD=root"},
-		Cmd: []string{"--mysql-native-password=ON"},
+	db := startServer(t, server{
+		repository: "mysql", tag: "8.4", env: []string{"MYSQL_ROOT_PASSWORD=root"},
+		cmd: []string{"--mysql-native-password=ON"},
 	}, "3306/tcp", "mysql", func(hp string) string { return "root:root@tcp(" + hp + ")/?charset=utf8mb4&interpolateParams=true" })
 	for _, plugin := range []string{password.PluginCachingSHA2, password.PluginSHA256, password.PluginNative} {
 		for i, pw := range corpus(150) {
