@@ -101,6 +101,11 @@ user "app" {                                           # user: LOGIN
   connection_limit = 20                                # PostgreSQL only
 }
 
+user "batch" {
+  aws_iam {}                                           # logs in with an RDS IAM token
+  member_of = [role.readonly.id]
+}
+
 role "readonly" {}
 
 database "app" {
@@ -160,11 +165,12 @@ Every SQL statement is sent on its own, so the server rejects a query that holds
   - `name` overrides the label. Use it, with an identifier-safe label, for names with upper case, spaces or quotes, because only such labels can be referenced (`user.<label>.name`).
   - `password`, `login` and `member_of` work on both engines.
   - PostgreSQL only: `superuser`, `createdb`, `createrole`, `inherit`, `replication`, `bypassrls` and `connection_limit` (-1 or more).
-  - MySQL only: `host` (default `"%"`, lower-cased, must not be empty or contain `@`) and `auth_plugin` (letters, digits and `_`). On MySQL a non-login role is a locked account. `auth_plugin` works without a password for passwordless plugins; a login account with neither gets a warning.
+  - MySQL only: `host` (default `"%"`, lower-cased, must not be empty or contain `@`) and `auth_plugin` (letters, digits and `_`; `AWSAuthenticationPlugin` is set with its authentication string `AS 'RDS'`). On MySQL a non-login role is a locked account. `auth_plugin` works without a password for passwordless plugins; a login account with neither gets a warning.
   - Attributes you leave out are not managed, except `login`: it is always managed, and defaults to `false` for `role` (NOLOGIN / ACCOUNT LOCK) and `true` for `user`. Declaring an existing login account as a `role` without `login = true` disables its login.
   - `name` and `host` accept only literals and functions, not references to other blocks.
   - Names are checked against the engine limits: 63 bytes on PostgreSQL; 32 characters for MySQL users, 64 for databases and 255 for hosts. PostgreSQL role names `public` (in any case), `none` and `pg_*` are reserved.
   - `password = ""` is an error on PostgreSQL. Omit `password` to leave it unmanaged.
+  - `aws_iam {}`: the role logs in with an [Amazon RDS IAM authentication token](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.DBAccounts.html) instead of a password, like `connection { aws_iam {} }`. On PostgreSQL it is a member of `rds_iam` (granted, and never revoked by `member_of`, which need not list it; plan fails when the server has no `rds_iam` role); on MySQL it is `IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'`, with a warning when the plugin is not active. It cannot be combined with `password` or `auth_plugin`, and needs login (`user`, or `login = true`). Without `aws_iam`, IAM authentication is left unmanaged: an existing `rds_iam` membership is revoked only by a `member_of` that omits it. Cloud SQL IAM users cannot be created with SQL; create them with `gcloud sql users create --type=cloud_iam_user` (or Terraform) and declare them to manage their grants.
 - **`member_of`**: a list of role ids, or objects `{ role = <id>, admin = bool, inherit = bool, set = bool }`; both can be mixed.
   - When `member_of` is set, it must be complete: memberships that aren't listed are revoked. Cycles, duplicates and self-membership are errors.
   - Options written in an object are managed; omitted ones (and the string form) are left alone.

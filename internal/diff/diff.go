@@ -76,6 +76,13 @@ type RoleKeeper interface {
 	KeepRole(id model.RoleID, databases []string) string
 }
 
+// IAMMembership is implemented by dialects on which a role logs in with
+// IAM authentication by being a member of a provider role (PostgreSQL on
+// Amazon RDS: rds_iam). IAMRoles returns those roles for method.
+type IAMMembership interface {
+	IAMRoles(method model.AuthMethod) []model.RoleID
+}
+
 // PublicDefaulter is implemented by dialects whose new objects grant
 // privileges to PUBLIC (PostgreSQL). DefaultPublicPrivileges returns the
 // privileges PUBLIC holds on obj right after the plan creates it: obj is
@@ -134,6 +141,7 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 			return nil, err
 		}
 	}
+	df.addIAMMemberships()
 	df.warnUnreadable()
 	df.roles()
 	dropped := df.databases()
@@ -231,6 +239,11 @@ func (df *differ) checkReferences() error {
 		for _, m := range r.MemberOf {
 			check(df.roleResource(r.ID)+" member_of", m)
 		}
+		for _, m := range df.iamRoles(r) {
+			if !known(m) {
+				missing = append(missing, fmt.Sprintf("%s %s needs role %q, which does not exist: is IAM database authentication available on this server?", df.roleResource(r.ID), r.IAM, m))
+			}
+		}
 	}
 	for _, db := range df.desired.Databases {
 		check(fmt.Sprintf("database %q owner", db.Name), model.RoleID{Name: db.Owner})
@@ -242,6 +255,49 @@ func (df *differ) checkReferences() error {
 		return fmt.Errorf("invalid references:\n  %s", strings.Join(missing, "\n  "))
 	}
 	return nil
+}
+
+// iamRoles lists the roles r must be a member of to log in with IAM.
+func (df *differ) iamRoles(r model.Role) []model.RoleID {
+	m, ok := df.d.(IAMMembership)
+	if !ok || r.IAM == "" {
+		return nil
+	}
+	return m.IAMRoles(r.IAM)
+}
+
+// addIAMMemberships adds the memberships that IAM authentication needs
+// to the desired roles. A role that does not manage member_of keeps its
+// current memberships, so that only the missing ones are granted.
+func (df *differ) addIAMMemberships() {
+	var roles []model.Role
+	for i, r := range df.desired.Roles {
+		need := df.iamRoles(r)
+		if len(need) == 0 {
+			continue
+		}
+		if roles == nil {
+			roles = slices.Clone(df.desired.Roles)
+		}
+		if r.MemberOf == nil {
+			cur, _ := df.currentRole(r.ID)
+			r.MemberOf = slices.Clone(cur.MemberOf)
+		} else {
+			r.MemberOf = slices.Clone(r.MemberOf)
+		}
+		for _, m := range need {
+			if !slices.Contains(r.MemberOf, m) {
+				r.MemberOf = append(r.MemberOf, m)
+			}
+		}
+		model.SortRoleIDs(r.MemberOf)
+		roles[i] = r
+	}
+	if roles != nil {
+		d := *df.desired
+		d.Roles = roles
+		df.desired = &d
+	}
 }
 
 // warnUnreadable explains how missing read access changes the plan.

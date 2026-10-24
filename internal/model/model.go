@@ -171,6 +171,10 @@ type Role struct {
 	ID RoleID
 	// AuthPlugin is MySQL only.
 	AuthPlugin string
+	// IAM is AuthAWSIAM when the role logs in with an Amazon RDS IAM
+	// authentication token instead of a password, and empty when IAM
+	// authentication is not managed.
+	IAM AuthMethod
 	// MemberOptions holds the managed options of memberships in MemberOf.
 	// A membership without an entry has no managed options.
 	MemberOptions map[RoleID]MembershipOptions

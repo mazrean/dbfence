@@ -250,6 +250,21 @@ func TestIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("aws_iam users are members of rds_iam", func(t *testing.T) {
+		// Stands in for the role Amazon RDS provides.
+		s.exec(t, "CREATE ROLE rds_iam", "CREATE ROLE iamgroup")
+		login := true
+		d := s.open(t, "postgres")
+		desired := &model.Desired{Engine: model.EnginePostgres, Roles: []model.Role{{ID: pg("iamuser"), Login: &login, IAM: model.AuthAWSIAM}}}
+		converge(t, d, desired, diff.Options{})
+		s.exec(t, "GRANT iamgroup TO iamuser")
+		desired.Roles[0].MemberOf = []model.RoleID{}
+		converge(t, d, desired, diff.Options{})
+		if got := s.queryStrings(t, "SELECT b.rolname FROM pg_auth_members m JOIN pg_roles a ON a.oid = m.member JOIN pg_roles b ON b.oid = m.roleid WHERE a.rolname = 'iamuser'"); len(got) != 1 || got[0] != "rds_iam" {
+			t.Errorf("memberships of iamuser = %q, want only rds_iam", got)
+		}
+	})
+
 	t.Run("databases that refuse connections", func(t *testing.T) {
 		s.exec(t,
 			"CREATE DATABASE noconn", "ALTER DATABASE noconn ALLOW_CONNECTIONS false",
