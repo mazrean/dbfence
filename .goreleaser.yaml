@@ -3,7 +3,12 @@ version: 2
 
 before:
   hooks:
-    - go mod tidy
+    # NOTE: never `go mod tidy` here. The binary's version comes from
+    # runtime/debug.ReadBuildInfo() VCS stamping (see version.go), which the
+    # Go toolchain only performs when the working tree is clean at the tagged
+    # commit.
+    - go mod download
+    - go mod verify
 
 builds:
   - id: dbfence
@@ -11,6 +16,13 @@ builds:
     binary: dbfence
     env:
       - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # The version comes from the build info stamped by the Go toolchain
+    # (see version.go), so no -X ldflag is needed.
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - linux
       - darwin
@@ -18,18 +30,20 @@ builds:
     goarch:
       - amd64
       - arm64
-    # The version comes from the build info stamped by the Go toolchain
-    # (see version.go), so no -X ldflag is needed.
-    ldflags:
-      - -s -w
 
 archives:
-  - formats: [tar.gz]
+  - id: dbfence
+    ids:
+      - dbfence
+    formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
       - goos: windows
         formats: [zip]
+    files:
+      - README.md
+      - LICENSE
 
 checksum:
   name_template: checksums.txt
@@ -42,11 +56,54 @@ changelog:
       - "^test:"
       - "^chore:"
 
+# Homebrew (cask, not the deprecated `brews`) in github.com/mazrean/homebrew-tap.
 homebrew_casks:
   - name: dbfence
+    binaries:
+      - dbfence
+    ids:
+      - dbfence
+    directory: Casks
     repository:
       owner: mazrean
       name: homebrew-tap
     homepage: https://github.com/mazrean/dbfence
     description: Declarative management of databases, roles, schemas and privileges for MySQL and PostgreSQL.
     license: MIT
+    commit_msg_template: "chore: brew cask update for {{ .ProjectName }} version {{ .Tag }}"
+    hooks:
+      post:
+        # The released binaries are not notarized; strip the quarantine bit so
+        # macOS Gatekeeper does not refuse to run them.
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/dbfence"]
+          end
+
+# Linux packages: deb (apt), rpm (yum/dnf) and apk (Alpine).
+nfpms:
+  - id: dbfence
+    package_name: dbfence
+    ids:
+      - dbfence
+    formats:
+      - deb
+      - rpm
+      - apk
+    vendor: mazrean
+    homepage: https://github.com/mazrean/dbfence
+    maintainer: mazrean <mazrean@users.noreply.github.com>
+    description: Declarative management of databases, roles, schemas and privileges for MySQL and PostgreSQL.
+    license: MIT
+    bindir: /usr/bin
+    file_name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    contents:
+      - src: LICENSE
+        dst: /usr/share/licenses/dbfence/LICENSE
+        file_info:
+          mode: 0644
+      - src: README.md
+        dst: /usr/share/doc/dbfence/README.md
+        file_info:
+          mode: 0644
