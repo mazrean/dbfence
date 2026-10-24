@@ -45,7 +45,8 @@ run = [
 [tasks.lint]
 description = "Run the project linter for every released GOOS/GOARCH"
 # Lint sees only the files built for its GOOS/GOARCH, so it runs once per
-# target in .goreleaser.yaml, with its CGO_ENABLED=0. The linter is built
+# target in .goreleaser.yaml, with its CGO_ENABLED=0, and once for the host
+# with cgo. The linter is built
 # once for the host (go tool -n, without GOOS set) and that binary loads the
 # packages for each target.
 run = '''
@@ -58,6 +59,15 @@ for goos in linux darwin windows; do
     CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch "$lint" ./... || status=1
   done
 done
+# go install and go build use cgo when a C compiler is present, which adds
+# files constrained to cgo builds; lint the host build with cgo too.
+if command -v "$(go env CC)" >/dev/null 2>&1; then
+  echo "lint: host with cgo" >&2
+  CGO_ENABLED=1 "$lint" ./... || status=1
+else
+  echo "lint: no C compiler, cgo build not checked" >&2
+  status=1
+fi
 exit $status
 '''
 
