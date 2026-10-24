@@ -116,8 +116,11 @@ func parseDSN(dsn string) (*gomysql.Config, error) {
 		// of the password, so they are not passed on.
 		return nil, errors.New("parse mysql dsn: invalid DSN; " + hint + "; a password containing '/' needs the '/' before the database name")
 	}
-	// Output redacts the password wherever it appears.
+	// Output redacts the password wherever it appears, unless it equals
+	// the user or database name, which output shows by design.
 	secret.Register(cfg.Passwd)
+	secret.RegisterPublic(cfg.User)
+	secret.RegisterPublic(cfg.DBName)
 	// A '/' in the password can also leave a DSN that parses, with part
 	// of the password as the network, which dial errors would quote.
 	if !slices.Contains([]string{"tcp", "tcp4", "tcp6", "unix"}, cfg.Net) {

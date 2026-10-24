@@ -109,6 +109,9 @@ func Load(path string, fns map[string]function.Function) (*Config, error) {
 		base = filepath.Dir(path)
 	}
 	fns = funcs.ResolvePathsFrom(fns, base)
+	// Engine names are printed by design, even when a password equals one.
+	secret.RegisterPublic(string(model.EnginePostgres))
+	secret.RegisterPublic(string(model.EngineMySQL))
 	parser := hclparse.NewParser()
 	var bodies []*hcl.File
 	var diags hcl.Diagnostics

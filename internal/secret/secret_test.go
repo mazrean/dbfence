@@ -242,3 +242,26 @@ func TestWriterMultiLineSecrets(t *testing.T) {
 		})
 	}
 }
+
+func TestPublicValuesAreNotRedacted(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, secret, public, printed, want string
+	}{
+		{name: "secret equal to a public value", secret: "postgres", public: "postgres", printed: `GRANTED BY "postgres"`, want: `GRANTED BY "postgres"`},
+		{name: "case is ignored", secret: "Root", public: "root", printed: "user Root", want: "user Root"},
+		{name: "other secrets stay redacted", secret: "Xy7pass9", public: "postgres", printed: "pw Xy7pass9 on postgres", want: "pw <redacted> on postgres"},
+		{name: "a secret containing a public value stays redacted", secret: "postgres1", public: "postgres", printed: "pw postgres1", want: "pw <redacted>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reg := NewRegistry()
+			reg.Add(tt.secret)
+			reg.AddPublic(tt.public)
+			if got := reg.Redact(tt.printed); got != tt.want {
+				t.Errorf("Redact(%q) = %q, want %q", tt.printed, got, tt.want)
+			}
+		})
+	}
+}

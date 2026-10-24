@@ -142,8 +142,11 @@ func parseConfig(dsn string) (*pgx.ConnConfig, error) {
 	if err != nil {
 		return nil, parseError(err)
 	}
-	// Output redacts the password wherever it appears.
+	// Output redacts the password wherever it appears, unless it equals
+	// the user or database name, which output shows by design.
 	secret.Register(cfg.Password)
+	secret.RegisterPublic(cfg.User)
+	secret.RegisterPublic(cfg.Database)
 	if cfg.ConnectTimeout == 0 {
 		cfg.ConnectTimeout = defaultConnectTimeout
 	}

@@ -29,15 +29,16 @@ const Placeholder = "<redacted>"
 // Registry is a set of secret values, each kept in every form in which
 // it may be printed. It is safe for concurrent use.
 type Registry struct {
-	set    map[string]struct{}
-	sorted []string   // set, longest first; nil when stale
-	lines  [][]string // forms that span lines, split into their lines
-	mu     sync.Mutex
+	secrets map[string][]string // secret -> its forms
+	public  map[string]struct{} // lower-cased values printed by design
+	sorted  []string            // forms, longest first; nil when stale
+	lines   [][]string          // forms that span lines, split into their lines
+	mu      sync.Mutex
 }
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
-	return &Registry{set: map[string]struct{}{}}
+	return &Registry{secrets: map[string][]string{}, public: map[string]struct{}{}}
 }
 
 var defaultRegistry = NewRegistry()
@@ -49,20 +50,40 @@ func Default() *Registry { return defaultRegistry }
 // Register adds s to the default Registry.
 func Register(s string) { defaultRegistry.Add(s) }
 
+// RegisterPublic adds s to the public values of the default Registry.
+func RegisterPublic(s string) { defaultRegistry.AddPublic(s) }
+
 // Add registers s. Values shorter than MinLength are ignored.
 func (r *Registry) Add(s string) {
 	if len(s) < MinLength {
 		return
 	}
+	r.mu.Lock()
+	_, ok := r.secrets[s]
+	r.mu.Unlock()
+	if ok {
+		return
+	}
 	vs := Variants(s)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, v := range vs {
-		if _, ok := r.set[v]; !ok {
-			r.set[v] = struct{}{}
-			r.sorted = nil
-		}
+	r.secrets[s] = vs
+	r.sorted = nil
+}
+
+// AddPublic records s as a value dbfence prints by design: an engine
+// name, or the user and database of the connection. A secret equal to a
+// public value (ignoring case), such as the password of the default
+// postgres:postgres account, is not redacted: it is shown as that name
+// anyway, and redacting it would hide every occurrence of the name.
+func (r *Registry) AddPublic(s string) {
+	if s == "" {
+		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.public[strings.ToLower(s)] = struct{}{}
+	r.sorted = nil
 }
 
 // Variants returns the forms of s that are redacted: s itself and its
@@ -140,10 +161,19 @@ func unquote(q string) string {
 func (r *Registry) snapshot() ([]string, [][]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.sorted == nil && len(r.set) > 0 {
-		r.sorted = make([]string, 0, len(r.set))
+	if r.sorted == nil && len(r.secrets) > 0 {
+		set := map[string]struct{}{}
+		for s, forms := range r.secrets {
+			if _, ok := r.public[strings.ToLower(s)]; ok {
+				continue
+			}
+			for _, f := range forms {
+				set[f] = struct{}{}
+			}
+		}
+		r.sorted = make([]string, 0, len(set))
 		r.lines = nil
-		for v := range r.set {
+		for v := range set {
 			r.sorted = append(r.sorted, v)
 			if strings.Contains(v, "\n") && strings.Trim(v, "\n") == v {
 				r.lines = append(r.lines, strings.Split(v, "\n"))
