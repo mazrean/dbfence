@@ -108,6 +108,9 @@ func Variants(s string) []string {
 		add(unquote(strconv.Quote(b)))
 		add(strings.ReplaceAll(b, "'", "''"))
 		add(strings.ReplaceAll(strings.ReplaceAll(b, `\`, `\\`), "'", "''"))
+		// Quoted identifiers: PostgreSQL doubles '"', MySQL doubles '`'.
+		add(strings.ReplaceAll(b, `"`, `""`))
+		add(strings.ReplaceAll(b, "`", "``"))
 	}
 	return out
 }

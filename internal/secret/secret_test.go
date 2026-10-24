@@ -174,6 +174,8 @@ func TestWriterRedactsEscapedForms(t *testing.T) {
 		{name: "SQL literal with control and quote", secret: "Mn'bv\x01Cx5z", printed: "'Mn''bv\x01Cx5z'", leaked: "Cx5z"},
 		{name: "multi-line with control before newline", secret: "Lk8jHg\x01\nFd3sAa", printed: "Lk8jHg\x01\nFd3sAa", leaked: "Lk8jHg"},
 		{name: "multi-line with control after newline", secret: "Po9iUy\n\x02Tr4eWq", printed: "Po9iUy\n\x02Tr4eWq", leaked: "Tr4eWq"},
+		{name: "PostgreSQL quoted identifier", secret: `Rt5y"Ui8oP`, printed: `"Rt5y""Ui8oP"`, leaked: "Ui8oP"},
+		{name: "MySQL quoted identifier", secret: "Gh6j`Kl9mN", printed: "`Gh6j``Kl9mN`", leaked: "Kl9mN"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
