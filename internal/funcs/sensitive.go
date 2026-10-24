@@ -70,6 +70,11 @@ func guard(fn function.Function) function.Function {
 			if err != nil {
 				return cty.NilVal, sanitize(err, marks)
 			}
+			if _, ok := marks[Sensitive]; ok {
+				// A value computed from a secret, such as a field that
+				// jsondecode takes out of it, is a secret of its own.
+				registerStrings(v)
+			}
 			return markDeep(v, marks), nil
 		},
 	})

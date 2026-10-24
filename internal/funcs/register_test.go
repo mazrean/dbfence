@@ -27,6 +27,8 @@ func TestSecretSourcesRegisterResults(t *testing.T) {
 		{name: "aws_secretsmanager json_key", expr: `aws_secretsmanager("id", "password")`, registered: []string{"reg-aws-password"}},
 		{name: "aws_secretsmanager whole document", expr: `aws_secretsmanager("id2")`, registered: []string{`{"password": "reg-aws-doc"}`}},
 		{name: "gcp_secretmanager", expr: `gcp_secretmanager("projects/p/secrets/reg-gcp")`, registered: []string{"payload:projects/p/secrets/reg-gcp/versions/latest"}},
+		{name: "field taken out of a secret", expr: `jsondecode(aws_secretsmanager("id3")).password`, registered: []string{"reg-aws-derived"}},
+		{name: "value computed from a secret", expr: `upper(secretenv("PW"))`, registered: []string{"REG-SECRETENV-VALUE"}},
 		{name: "tfstate nested strings", expr: `tfstate("terraform.tfstate", "output.x")`, registered: []string{"reg-tf-inner", "reg-tf-list"}, plain: []string{"12345"}},
 	}
 	for _, tt := range tests {
@@ -36,6 +38,9 @@ func TestSecretSourcesRegisterResults(t *testing.T) {
 			aws := `{"password": "reg-aws-password"}`
 			if tt.name == "aws_secretsmanager whole document" {
 				aws = `{"password": "reg-aws-doc"}`
+			}
+			if tt.name == "field taken out of a secret" {
+				aws = `{"password": "reg-aws-derived"}`
 			}
 			r := NewRegistry(t.Context(),
 				WithEnv(func(k string) (string, bool) { v, ok := env[k]; return v, ok }),
