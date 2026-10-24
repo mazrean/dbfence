@@ -28,6 +28,13 @@ import (
 // dockertest. They are skipped with -short, and when Docker is
 // unavailable outside CI.
 
+// TestMain removes the containers even when a test hangs or the run is
+// interrupted, and labels them so that a later run removes what a killed
+// run left behind.
+func TestMain(m *testing.M) {
+	dockertest.TestMain(context.Background(), m)
+}
+
 type harness struct {
 	t      *testing.T
 	engine model.Engine
@@ -94,7 +101,8 @@ func newHarness(t *testing.T, engine model.Engine, c container) *harness {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	if err := pool.Retry(t.Context(), 0, func() error { return db.PingContext(t.Context()) }); err != nil {
-		t.Fatalf("%s did not become ready: %v", c.repository, err)
+		stdout, stderr, _ := res.Logs(context.WithoutCancel(t.Context()))
+		t.Fatalf("%s did not become ready: %v\nstdout:\n%s\nstderr:\n%s", c.repository, err, stdout, stderr)
 	}
 	return &harness{t: t, engine: engine, dsn: dsn, db: db, dir: t.TempDir()}
 }

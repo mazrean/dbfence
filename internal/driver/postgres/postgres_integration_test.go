@@ -21,6 +21,13 @@ import (
 // The integration tests run against a disposable postgres:17 server. They
 // are skipped with -short, and when Docker is unavailable outside CI.
 
+// TestMain removes the containers even when a test hangs or the run is
+// interrupted, and labels them so that a later run removes what a killed
+// run left behind.
+func TestMain(m *testing.M) {
+	dockertest.TestMain(context.Background(), m)
+}
+
 type server struct {
 	t     *testing.T
 	admin *sql.DB
@@ -64,7 +71,8 @@ func startServerTag(t *testing.T, tag string) *server {
 	}
 	t.Cleanup(func() { _ = s.admin.Close() })
 	if err := pool.Retry(t.Context(), 0, func() error { return s.admin.PingContext(t.Context()) }); err != nil {
-		t.Fatalf("postgres did not become ready: %v", err)
+		stdout, stderr, _ := res.Logs(context.WithoutCancel(t.Context()))
+		t.Fatalf("postgres did not become ready: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
 	return s
 }

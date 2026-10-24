@@ -15,6 +15,13 @@ import (
 	"github.com/ory/dockertest/v4"
 )
 
+// TestMain removes the containers even when a test hangs or the run is
+// interrupted, and labels them so that a later run removes what a killed
+// run left behind.
+func TestMain(m *testing.M) {
+	dockertest.TestMain(context.Background(), m)
+}
+
 // The oracle tests let real servers hash a corpus of passwords and check
 // that the matchers accept exactly those passwords. Generating and
 // matching verifiers share code (SASLprep, SHA256Crypt), so tests that
@@ -82,7 +89,8 @@ func startServer(t *testing.T, srv server, port, sqlDriver string, dsn func(host
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	if err := pool.Retry(t.Context(), 0, func() error { return db.PingContext(t.Context()) }); err != nil {
-		t.Fatalf("%s did not become ready: %v", srv.repository, err)
+		stdout, stderr, _ := res.Logs(context.WithoutCancel(t.Context()))
+		t.Fatalf("%s did not become ready: %v\nstdout:\n%s\nstderr:\n%s", srv.repository, err, stdout, stderr)
 	}
 	return db
 }
