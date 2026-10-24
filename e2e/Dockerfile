@@ -7,6 +7,9 @@ FROM alpine:3.22
 RUN apk add --no-cache bash ca-certificates
 
 # The CA bundle of Amazon RDS, for tls = "verify-full" on the aws targets.
+# The directory is made first: ADD would create it with the file's mode,
+# which the non-root user cannot enter.
+RUN mkdir -m 755 /etc/dbfence-e2e
 ADD --chmod=644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/dbfence-e2e/rds-global-bundle.pem
 ENV DBFENCE_E2E_TLS_CA_FILE=/etc/dbfence-e2e/rds-global-bundle.pem
 
