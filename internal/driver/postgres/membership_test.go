@@ -218,6 +218,7 @@ func TestMembershipPermissions(t *testing.T) {
 		role     string
 		want     string
 		wantWarn string
+		cloudSQL string
 		members  []memberEntry
 		version  int
 		revoke   bool
@@ -249,11 +250,28 @@ func TestMembershipPermissions(t *testing.T) {
 			want:    `REVOKE "mine" FROM "newr" GRANTED BY "adm"`,
 		},
 		{name: "revoke with CREATEROLE before 16", version: 150000, role: "ext2", revoke: true, want: `REVOKE "ext2" FROM "newr"`},
+		{
+			// Cloud SQL records the grants of its admin users as
+			// cloudsqladmin's, and a plain REVOKE by them removes those.
+			name: "revoke a grant of cloudsqladmin as a Cloud SQL admin user", version: 170000, role: "ext2", revoke: true, cloudSQL: "cloudsqladmin",
+			members: []memberEntry{{role: "ext2", member: "newr", grantor: "cloudsqladmin"}},
+			want:    `REVOKE "ext2" FROM "newr"`,
+		},
+		{
+			name: "revoke a grant of cloudsqladmin elsewhere", version: 170000, role: "mine", revoke: true,
+			members:  []memberEntry{{role: "mine", member: "newr", grantor: "cloudsqladmin"}},
+			wantWarn: `membership of "newr" in "mine" granted by "cloudsqladmin" differs from the configuration, but "adm" may not revoke it (it needs superuser, since another role granted it); not changed`,
+		},
+		{
+			name: "revoke another grantor's grant as a Cloud SQL admin user", version: 170000, role: "mine", revoke: true, cloudSQL: "cloudsqladmin",
+			members:  []memberEntry{{role: "mine", member: "newr", grantor: "postgres"}},
+			wantWarn: `membership of "newr" in "mine" granted by "postgres" differs from the configuration, but "adm" may not revoke it (it needs superuser, since another role granted it); not changed`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			d := &Driver{st: &state{user: "adm", version: tt.version, createRole: true, roles: roles, members: tt.members, desired: &model.Desired{}}}
+			d := &Driver{st: &state{user: "adm", version: tt.version, createRole: true, cloudSQLGrantor: tt.cloudSQL, roles: roles, members: tt.members, desired: &model.Desired{}}}
 			var stmts []plan.Statement
 			var warns []string
 			if tt.revoke {

@@ -881,11 +881,17 @@ func (st *state) revokeMembership(member, role string) ([]plan.Statement, []stri
 			warns = append(warns, unmanagedGrantorWarning(fmt.Sprintf("membership of %q in %q differs from the configuration", member, role)))
 			continue
 		}
-		if !st.canManageMembership(role, e.grantor) {
-			warns = append(warns, st.membershipDenied("revoke", member, role, e.grantor))
+		grantor := e.grantor
+		switch {
+		case st.version >= pg16 && grantor != "" && grantor == st.cloudSQLGrantor:
+			// Cloud SQL revokes as cloudsqladmin, the grantor of
+			// what its admin users grant, without GRANTED BY.
+			grantor = ""
+		case !st.canManageMembership(role, grantor):
+			warns = append(warns, st.membershipDenied("revoke", member, role, grantor))
 			continue
 		}
-		stmt := revokeMembership(member, role, false, e.grantor, len(dependents) > 0).WithDependents(roleIDs(dependents))
+		stmt := revokeMembership(member, role, false, grantor, len(dependents) > 0).WithDependents(roleIDs(dependents))
 		if len(dependents) > 0 {
 			stmt = stmt.WithNote(cascadeNote("memberships in "+strconv.Quote(role), member, dependents))
 		}
