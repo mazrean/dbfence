@@ -16,7 +16,7 @@ require (
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/mazrean/kessoku v1.2.0
-	github.com/ory/dockertest/v3 v3.12.0
+	github.com/ory/dockertest/v4 v4.0.1
 	github.com/ory/dockertest/v4 v4.0.1
 	github.com/sivchari/kumo v0.32.0
 	github.com/zclconf/go-cty v1.19.0
