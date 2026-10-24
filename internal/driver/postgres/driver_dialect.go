@@ -390,6 +390,17 @@ func (st *state) grantedBy(grantor string) (string, bool) {
 	}
 }
 
+// membershipGrantedBy is grantedBy for a grant of a membership. Cloud
+// SQL records the membership grants of its admin users as
+// cloudsqladmin's, and a GRANT or REVOKE by them without GRANTED BY
+// changes those, as checked on Cloud SQL for PostgreSQL 17.
+func (st *state) membershipGrantedBy(grantor string) (string, bool) {
+	if grantor != "" && grantor == st.cloudSQLGrantor {
+		return "", true
+	}
+	return st.grantedBy(grantor)
+}
+
 // unmanagedGrantorWarning explains a change to a grant skipped because
 // its grantor is a role dbfence does not manage: changing the grant would
 // have to name the grantor. The grantor is not shown; Inspect warns about
@@ -527,7 +538,7 @@ func (st *state) alterMembership(member, role string, want model.MembershipOptio
 			warns = append(warns, unmanagedGrantorWarning(fmt.Sprintf("options of the membership of %q in %q differ from the configuration", member, role)))
 			continue
 		}
-		by, ok := st.grantedBy(e.grantor)
+		by, ok := st.membershipGrantedBy(e.grantor)
 		if !ok {
 			warns = append(warns, fmt.Sprintf("options of the membership of %q in %q granted by %q differ from the configuration, but %q may not change them", member, role, e.grantor, st.user))
 			continue
@@ -882,12 +893,11 @@ func (st *state) revokeMembership(member, role string) ([]plan.Statement, []stri
 			continue
 		}
 		grantor := e.grantor
-		switch {
-		case st.version >= pg16 && grantor != "" && grantor == st.cloudSQLGrantor:
-			// Cloud SQL revokes as cloudsqladmin, the grantor of
-			// what its admin users grant, without GRANTED BY.
+		if by, ok := st.membershipGrantedBy(grantor); ok && by == "" && grantor != "" {
+			// A Cloud SQL admin user revokes cloudsqladmin's grant
+			// without GRANTED BY.
 			grantor = ""
-		case !st.canManageMembership(role, grantor):
+		} else if !st.canManageMembership(role, grantor) {
 			warns = append(warns, st.membershipDenied("revoke", member, role, grantor))
 			continue
 		}

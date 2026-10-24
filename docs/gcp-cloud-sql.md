@@ -71,7 +71,7 @@ grant {
 }
 ```
 
-- dbfence never creates a `gcp_iam` role and never changes its authentication; its other attributes, memberships and grants are managed as declared, except the options of memberships on PostgreSQL (see [What to expect on Cloud SQL](#what-to-expect-on-cloud-sql)). Plan fails when it does not exist; when the roles cannot be listed it is not created, with a warning.
+- dbfence never creates a `gcp_iam` role and never changes its authentication; its other attributes, memberships and grants are managed as declared. Plan fails when it does not exist; when the roles cannot be listed it is not created, with a warning.
 - On PostgreSQL, the memberships Cloud SQL gives these roles (`cloudsqliamuser`, `cloudsqliamserviceaccount`, `cloudsqliamgroup`) are kept: `member_of` neither grants nor revokes them.
 
 To let dbfence itself connect with IAM on PostgreSQL, declare its user while connected as `postgres`, apply, then switch the connection to `gcp_iam`:
@@ -92,6 +92,5 @@ user "dbfence" {
 - On PostgreSQL the admin user is not a member of the roles it creates: it may alter, grant and drop them, but not act as them. Plan warns about the changes that need that, and they fail at `apply` unless you first run the `GRANT` the warning names (`GRANT <role> TO <admin user> WITH SET TRUE, INHERIT TRUE`):
   - an `owner` other than the admin user (`must be able to SET ROLE`); or leave `owner` out, so that the admin user owns databases and schemas;
   - `--prune` of a role that still owns objects or holds privileges (`permission denied to reassign objects`). A role that holds nothing is dropped despite the warning.
-- On PostgreSQL, Cloud SQL records the memberships the admin user grants as granted by `cloudsqladmin`. dbfence revokes them, but does not change their `admin`, `inherit` or `set` options later: such a change is skipped with a warning (`it needs superuser`). Revoke the membership and let dbfence grant it again with the new options.
 - Other changes the connected user may not make are skipped with a warning; see [Required privileges](privileges.md).
 - Cloud SQL's own roles and databases (`cloudsql*`, `cloudsqladmin`) are never reported or pruned. See [Safety](safety.md#built-in-objects).
