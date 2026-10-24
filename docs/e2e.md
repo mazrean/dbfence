@@ -14,7 +14,7 @@ build ──► aws-image (ECR) ──► aws  [postgres, mysql]: ecspresso run 
 3. `aws` runs `ecspresso run --config e2e/aws/ecspresso.yml` once per engine. The task and service definitions read the ARNs, subnets, endpoints and so on from the Terraform outputs in the state ([tfstate plugin](https://github.com/kayac/ecspresso#plugins)). ecspresso registers a task definition revision, starts the task with the network configuration of the local service definition (there is no ECS service), streams its CloudWatch Logs and fails when the container exits non-zero.
 4. `gcp` starts the Cloud SQL instance of the engine (`gcloud sql instances patch --activation-policy ALWAYS`, which returns once it runs), deploys the Cloud Run job `dbfence-e2e-<engine>` with the new image, runs it with `gcloud run jobs execute --wait` and prints the execution's logs. Finally it stops the instance again (`--activation-policy NEVER`), also when the run failed or was cancelled, so the instances cost only storage between runs.
 
-The workflow runs on pushes to `main` that touch Go code or `e2e/`, weekly, and on demand. Runs against the same server are serialized (`concurrency`), because the scenario uses fixed names.
+The workflow runs on pushes to `main` that touch Go code or `e2e/`, on demand (`workflow_dispatch`), and on a pull request when the `e2e` label is added to it (add it again to run once more after new commits). Runs against the same server are serialized (`concurrency`), because the scenario uses fixed names.
 
 ### The scenario
 
@@ -49,7 +49,7 @@ This runs the same image against `postgres:17` (with a non-superuser admin, like
 
 Use the [`integrations/github`](https://registry.terraform.io/providers/integrations/github/latest/docs) provider to create two environments in `mazrean/dbfence` and their variables:
 
-- `github_repository_environment` `e2e-aws` and `e2e-gcp`. Restrict deployments to the `main` branch (`deployment_branch_policy`), since the cloud credentials trust these environments.
+- `github_repository_environment` `e2e-aws` and `e2e-gcp`, without a `deployment_branch_policy`: runs on labeled pull requests use the environments from the pull request's branch, so restricting them to `main` would block those runs. The cloud credentials trust these environments, so what guards them is who may run the workflow: adding a label needs triage access to the repository, and pull requests from forks get no OIDC token (their runs fail at authentication). Add `reviewers` to the environments if every run should need an approval.
 - `github_actions_environment_variable` for every row below. Create the variable after its environment (`depends_on`, or reference `github_repository_environment.*.environment`).
 
 No GitHub secrets are needed: the workflow authenticates with OIDC (no long-lived keys), and the database passwords stay in Secrets Manager / Secret Manager, which the tasks read themselves. The variables hold only names, ARNs and addresses. On AWS, what the ECS task needs is not copied into variables at all: ecspresso reads it from the Terraform state.
@@ -192,10 +192,6 @@ Enable the APIs `run`, `sqladmin`, `secretmanager`, `artifactregistry`, `iamcred
 resource "github_repository_environment" "e2e_aws" {
   repository  = "dbfence"
   environment = "e2e-aws"
-  deployment_branch_policy {
-    protected_branches     = true
-    custom_branch_policies = false
-  }
 }
 
 locals {
