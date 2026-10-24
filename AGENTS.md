@@ -9,7 +9,7 @@ MySQL / PostgreSQL servers — databases, users/roles, memberships, grants, Post
 - Test: `mise run test` (= `go test -short ./...`; single package: `go test -short ./internal/<pkg>/...`)
 - Test incl. Docker integration: `mise run test:integration` (= `go test ./...`)
 - Test (CI): `mise run test:ci` (`-race -coverprofile=coverage.out -covermode=atomic`; Docker required when `CI` is set)
-- Lint: `mise run lint` (= `go vet -vettool=$(go tool -n lint) ./...` once per released GOOS/GOARCH with `CGO_ENABLED=0`, and for the host with cgo; `go tool lint ./...` checks the host build alone but needs ~9 GB); lint failures block commits
+- Lint: `mise run lint` (= `go vet -vettool=$(go tool -n lint) ./...`; `go tool lint ./...` does the same but needs ~9 GB); it checks the host build, and `TestNoBuildConstrainedFiles` forbids build-constrained files so that every target compiles the same files; lint failures block commits
 - Fuzz: `mise run test:fuzz` (each `Fuzz*` target for 30s; seed corpora run in `mise run test`)
 - Generate (kessoku DI): `mise run generate` (= `go generate ./...`)
 - Release: `mise run release:check` / `release:build` (snapshot) / `release:publish`
