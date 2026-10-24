@@ -14,12 +14,24 @@ import (
 	"github.com/mazrean/dbfence/internal/driver/postgres"
 	"github.com/mazrean/dbfence/internal/funcs"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/plan"
 )
 
 type fakeDriver struct {
 	postgres.Dialect
+	// unsafe, when set, replaces the statements CreateRole plans.
+	unsafe   []plan.Statement
 	executed []string
 	extra    []model.RoleState
+}
+
+// CreateRole implements diff.Dialect, planning unsafe when set, to stand
+// in for a bug in the diff logic.
+func (f *fakeDriver) CreateRole(r model.Role) []plan.Statement {
+	if f.unsafe != nil {
+		return f.unsafe
+	}
+	return f.Dialect.CreateRole(r)
 }
 
 func (f *fakeDriver) Inspect(context.Context, *model.Desired) (*model.Current, error) {
@@ -27,8 +39,8 @@ func (f *fakeDriver) Inspect(context.Context, *model.Desired) (*model.Current, e
 	return &model.Current{CurrentUser: model.RoleID{Name: "postgres"}, Roles: roles}, nil
 }
 
-func (f *fakeDriver) Exec(_ context.Context, _, q string) error {
-	f.executed = append(f.executed, q)
+func (f *fakeDriver) Exec(_ context.Context, s plan.Statement) error {
+	f.executed = append(f.executed, s.SQL())
 	return nil
 }
 
@@ -145,5 +157,53 @@ func TestPlanWritesWarningsToStderr(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "-- Plan: 1 to create, 0 to change, 0 to drop (1 statement).") {
 		t.Errorf("stdout has no summary: %q", out.String())
+	}
+}
+
+func TestUnsafePlanIsRefused(t *testing.T) {
+	t.Parallel()
+	postgresUser := model.RoleID{Name: "postgres"}
+	tests := []struct {
+		name   string
+		want   string
+		unsafe plan.Statement
+	}{
+		{
+			name:   "drop of the connected user",
+			unsafe: plan.New("", plan.KindDropRole, plan.RoleTarget(postgresUser), plan.Keyword("DROP ROLE postgres")),
+			want:   `drops the connected user "postgres"`,
+		},
+		{
+			name: "login disabled on the connected user",
+			unsafe: plan.New("", plan.KindAlterRole, plan.RoleTarget(postgresUser), plan.Keyword("ALTER ROLE postgres NOLOGIN")).
+				WithRoleChange(plan.RoleChange{DisablesLogin: true}),
+			want: `disables login of the connected user "postgres"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, cmd := range []string{"plan", "apply"} {
+				a, d, out, path := newApp(t, "yes\n")
+				d.unsafe = []plan.Statement{tt.unsafe}
+				var err error
+				if cmd == "plan" {
+					_, err = a.Plan(t.Context(), app.Options{Path: path})
+				} else {
+					err = a.Apply(t.Context(), app.Options{Path: path})
+				}
+				if !errors.Is(err, app.ErrUnsafePlan) {
+					t.Fatalf("%s: err = %v, want ErrUnsafePlan", cmd, err)
+				}
+				msg := err.Error()
+				if !strings.HasPrefix(msg, "internal safety check failed: ") || !strings.Contains(msg, tt.want) ||
+					!strings.HasSuffix(msg, "(this is a bug in dbfence; please report it)") {
+					t.Errorf("%s: err = %q", cmd, msg)
+				}
+				if strings.Contains(out.String(), "Apply these changes?") || len(d.executed) != 0 {
+					t.Errorf("%s: prompted or executed %v; output:\n%s", cmd, d.executed, out)
+				}
+			}
+		})
 	}
 }

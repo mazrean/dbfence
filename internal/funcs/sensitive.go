@@ -3,6 +3,7 @@ package funcs
 import (
 	"errors"
 
+	"github.com/mazrean/dbfence/internal/secret"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
 )
@@ -17,7 +18,9 @@ type sensitiveMark struct{}
 
 func (sensitiveMark) GoString() string { return "funcs.Sensitive" }
 
-// markSensitive wraps fn so that its results carry Sensitive.
+// markSensitive wraps fn so that its results, and every value nested in
+// them, carry Sensitive. Every string in a result is registered with
+// secret.Register, so that output redacts it.
 func markSensitive(fn function.Function) function.Function {
 	return function.New(&function.Spec{
 		Description: fn.Description(),
@@ -29,7 +32,8 @@ func markSensitive(fn function.Function) function.Function {
 			if err != nil {
 				return cty.NilVal, err
 			}
-			return v.Mark(Sensitive), nil
+			registerStrings(v)
+			return markDeep(v, cty.NewValueMarks(Sensitive)), nil
 		},
 	})
 }
@@ -66,9 +70,33 @@ func guard(fn function.Function) function.Function {
 			if err != nil {
 				return cty.NilVal, sanitize(err, marks)
 			}
-			return v.WithMarks(marks), nil
+			if _, ok := marks[Sensitive]; ok {
+				// A value computed from a secret, such as a field that
+				// jsondecode takes out of it, is a secret of its own.
+				registerStrings(v)
+			}
+			return markDeep(v, marks), nil
 		},
 	})
+}
+
+// markDeep applies marks to v and to every value nested in it. A mark on
+// a collection alone is not enough: for and splat expressions unmark the
+// collection and bind its elements, which would then reach functions and
+// diagnostics ("with v as ...") unmarked.
+func markDeep(v cty.Value, marks cty.ValueMarks) cty.Value {
+	if len(marks) == 0 {
+		return v
+	}
+	out, err := cty.Transform(v, func(_ cty.Path, e cty.Value) (cty.Value, error) {
+		return e.WithMarks(marks), nil
+	})
+	if err != nil {
+		// Unreachable: the callback never fails. Fall back to the
+		// top-level mark rather than dropping it.
+		return v.WithMarks(marks)
+	}
+	return out
 }
 
 // unmarkAll removes the marks of args, including nested ones, and returns
@@ -108,4 +136,16 @@ func guardAll(fns map[string]function.Function) map[string]function.Function {
 		out[name] = guard(fn)
 	}
 	return out
+}
+
+// registerStrings registers every known string in v, including nested
+// ones, as a secret.
+func registerStrings(v cty.Value) {
+	_ = cty.Walk(v, func(_ cty.Path, e cty.Value) (bool, error) {
+		e, _ = e.UnmarkDeep()
+		if e.IsKnown() && !e.IsNull() && e.Type() == cty.String {
+			secret.Register(e.AsString())
+		}
+		return true, nil
+	})
 }

@@ -66,6 +66,16 @@ type DefaultRoleSetter interface {
 	SetDefaultRoles(r model.Role, cur model.RoleState) []plan.Statement
 }
 
+// RoleKeeper is implemented by dialects that know, from the inspected
+// state, more reasons to keep a role than diff sees: dropping it would
+// change a role, database or schema whose name dbfence does not manage,
+// which model.Current.DropUntrusted left out of the state. KeepRole
+// explains why --prune must not drop the undeclared role id, or returns
+// "". databases lists existing databases that survive the plan.
+type RoleKeeper interface {
+	KeepRole(id model.RoleID, databases []string) string
+}
+
 // PublicDefaulter is implemented by dialects whose new objects grant
 // privileges to PUBLIC (PostgreSQL). DefaultPublicPrivileges returns the
 // privileges PUBLIC holds on obj right after the plan creates it: obj is
@@ -98,13 +108,17 @@ type change struct {
 }
 
 type differ struct {
-	d        Dialect
-	desired  *model.Desired
-	current  *model.Current
-	ignore   ignorer
-	changes  []change
-	warnings []string
-	opts     Options
+	d       Dialect
+	desired *model.Desired
+	current *model.Current
+	// keptOwners holds the databases whose declared owner change is not
+	// planned: it would lock the connected user out.
+	keptOwners map[string]bool
+	ignore     ignorer
+	chain      *chain
+	changes    []change
+	warnings   []string
+	opts       Options
 }
 
 // Compute builds the plan converging current to desired.
@@ -113,7 +127,8 @@ func Compute(desired *model.Desired, current *model.Current, d Dialect, opts Opt
 	if err != nil {
 		return nil, err
 	}
-	df := &differ{d: d, opts: opts, desired: desired, current: sortedCurrent(current), ignore: ig, warnings: slices.Clone(current.Warnings)}
+	df := &differ{d: d, opts: opts, desired: desired, current: sortedCurrent(current), ignore: ig, warnings: slices.Clone(current.Warnings), keptOwners: map[string]bool{}}
+	df.chain = newChain(df.current)
 	if !current.Unreadable.Roles {
 		if err := df.checkReferences(); err != nil {
 			return nil, err
@@ -250,9 +265,18 @@ func (df *differ) roles() {
 	u := df.current.Unreadable
 	for _, r := range df.desired.Roles {
 		cur, exists := df.currentRole(r.ID)
-		self := exists && r.ID == df.current.CurrentUser
+		// The connected user exists even when the role list is unreadable.
+		self := r.ID == df.current.CurrentUser
+		if !self && df.chain.relied[r.ID] {
+			r = df.protectChainRole(r, cur)
+		}
 		if self {
 			r = df.protectCurrentUser(r, cur)
+			if cur.RetainedPassword && r.Password != nil {
+				// dbfence may be connected with the secondary password.
+				df.warn("not discarding the secondary password of the connected user %q: dbfence may be using it", r.ID)
+				cur.RetainedPassword = false
+			}
 		}
 		switch {
 		case !exists && u.Roles:
@@ -285,7 +309,13 @@ func (df *differ) roles() {
 				df.addWarned(phaseMembership, plan.ActionGrant, fmt.Sprintf("membership of %q in %q", r.ID, m), stmts, warns)
 				continue
 			}
-			df.membershipOptions(r.ID, m, opts, cur.MemberOptions[m])
+			if !df.membershipOptions(r.ID, m, opts, cur.MemberOptions[m]) {
+				// Not revoked and granted again: SetDefaultRoles must not
+				// count on it.
+				r.MemberOptions = maps.Clone(r.MemberOptions)
+				opts.Admin = nil
+				r.MemberOptions[m] = opts
+			}
 		}
 		for _, m := range model.SortRoleIDs(slices.Clone(have)) {
 			if unknown || slices.Contains(want, m) {
@@ -296,10 +326,21 @@ func (df *differ) roles() {
 				continue
 			}
 			stmts, warns := df.d.RevokeMembership(r.ID, m)
+			if lost, ok := df.chain.cut(stmts); !ok {
+				df.warn("not revoking membership of %q in %q: the connected user %q is a member of %q through it, and dbfence may rely on it",
+					df.show(r.ID), df.show(m), df.show(df.current.CurrentUser), df.show(lost))
+				continue
+			}
 			df.addWarned(phaseMembership, plan.ActionRevoke, fmt.Sprintf("membership of %q in %q", df.show(r.ID), df.show(m)), stmts, warns)
 		}
 		if s, ok := df.d.(DefaultRoleSetter); ok {
 			if self {
+				// Without its current memberships and default roles, SET
+				// DEFAULT ROLE could deactivate roles dbfence relies on.
+				if (u.Roles && !exists) || (u.Memberships && cur.DefaultRolesUnknown) {
+					df.warn("not setting default roles of the connected user %q: its current default roles are unknown and could be narrowed", df.show(r.ID))
+					continue
+				}
 				r = keepDefaultRoles(r, cur)
 			}
 			df.add(phaseMembership, plan.ActionUpdate, "default roles of "+df.roleResource(r.ID), s.SetDefaultRoles(r, cur))
@@ -323,19 +364,31 @@ func keepDefaultRoles(r model.Role, cur model.RoleState) model.Role {
 }
 
 // membershipOptions converges the declared options of the existing
-// membership of member in role.
-func (df *differ) membershipOptions(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) {
+// membership of member in role. It returns false when the change is not
+// planned because it would revoke a membership the connected user relies
+// on (see chain).
+func (df *differ) membershipOptions(member, role model.RoleID, want model.MembershipOptions, have model.MembershipState) bool {
 	differs := func(w *bool, h bool) bool { return w != nil && *w != h }
 	if !differs(want.Admin, have.Admin) && !differs(want.Inherit, have.Inherit) && !differs(want.Set, have.Set) {
-		return
+		return true
 	}
 	stmts, warns := df.d.AlterMembership(member, role, want, have)
 	df.warnings = append(df.warnings, warns...)
+	if lost, ok := df.chain.cut(stmts); !ok {
+		// MySQL drops the ADMIN OPTION by revoking the role and
+		// granting it again; apply may stop in between.
+		df.warn("not changing the options of membership of %q in %q: that revokes the membership and grants it again, and the connected user %q is a member of %q through it; dbfence may rely on it",
+			df.show(member), df.show(role), df.show(df.current.CurrentUser), df.show(lost))
+		return false
+	}
 	df.add(phaseMembership, plan.ActionUpdate, fmt.Sprintf("options of membership of %q in %q", member, role), stmts)
+	return true
 }
 
 // protectCurrentUser drops the attribute changes of r that would lock
-// the connected user out or strip its superuser status or ADMIN OPTION.
+// the connected user out or strip its superuser status, its INHERIT
+// attribute, or the ADMIN OPTION, INHERIT or SET option of its
+// memberships.
 func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Role {
 	if r.Login != nil && !*r.Login {
 		if cur.Login || cur.AttributesUnknown {
@@ -343,15 +396,80 @@ func (df *differ) protectCurrentUser(r model.Role, cur model.RoleState) model.Ro
 		}
 		r.Login = nil
 	}
+	if r.ConnectionLimit != nil && *r.ConnectionLimit == 0 && !cur.Superuser {
+		// Superusers are exempt from the limit; anyone else could not
+		// connect again.
+		df.warn("not setting connection limit 0 on the connected user %q: it would lock dbfence out", r.ID)
+		r.ConnectionLimit = nil
+	}
 	if r.Superuser != nil && !*r.Superuser && cur.Superuser {
 		df.warn("not removing superuser from the connected user %q: dbfence may rely on it", r.ID)
 		r.Superuser = nil
+	}
+	if r.Inherit != nil && !*r.Inherit {
+		// From PostgreSQL 16 on the attribute also turns off INHERIT on
+		// the existing memberships (see the driver's AlterRole).
+		if _, exists := df.currentRole(r.ID); cur.Inherit || !exists || slices.ContainsFunc(cur.MemberOf, func(m model.RoleID) bool { return cur.MemberOptions[m].Inherit }) {
+			df.warn("not setting NOINHERIT on the connected user %q: it would lose the privileges of its roles, which dbfence may rely on", r.ID)
+		}
+		r.Inherit = nil
 	}
 	opts := maps.Clone(r.MemberOptions)
 	for _, m := range r.MemberOf {
 		if o := opts[m]; o.Admin != nil && !*o.Admin && cur.MemberOptions[m].Admin {
 			df.warn("not revoking ADMIN OPTION on %q from the connected user %q: dbfence may rely on it", m, r.ID)
 			o.Admin = nil
+			opts[m] = o
+		}
+	}
+	r.MemberOptions = opts
+	u := df.current.Unreadable
+	_, exists := df.currentRole(r.ID)
+	return df.keepInheritAndSet(r, cur, u.Roles || u.Memberships || !exists,
+		func(m model.RoleID) string { return fmt.Sprintf("the membership of the connected user %q in %q", r.ID, m) })
+}
+
+// protectChainRole drops the changes of r, a role granted to the
+// connected user, that would take the privileges of the roles it is a
+// member of, or SET ROLE to them, away from the connected user: NOINHERIT
+// on r while it has a membership with INHERIT, and INHERIT FALSE or SET
+// FALSE on such a membership (PostgreSQL 16 needs them on every
+// membership along the chain).
+func (df *differ) protectChainRole(r model.Role, cur model.RoleState) model.Role {
+	user := df.show(df.current.CurrentUser)
+	if r.Inherit != nil && !*r.Inherit {
+		if slices.ContainsFunc(cur.MemberOf, func(m model.RoleID) bool { return cur.MemberOptions[m].Inherit }) {
+			df.warn("not setting NOINHERIT on %q: the connected user %q has its roles through it, and dbfence may rely on their privileges", df.show(r.ID), user)
+			r.Inherit = nil
+		}
+	}
+	return df.keepInheritAndSet(r, cur, false, func(m model.RoleID) string {
+		return fmt.Sprintf("the membership of %q in %q, through which the connected user %q has its roles", df.show(r.ID), df.show(m), user)
+	})
+}
+
+// keepInheritAndSet drops INHERIT FALSE and SET FALSE from the declared
+// memberships of r that have, or with unknown set may have, that option.
+// what names the membership in a warning.
+func (df *differ) keepInheritAndSet(r model.Role, cur model.RoleState, unknown bool, what func(model.RoleID) string) model.Role {
+	opts := maps.Clone(r.MemberOptions)
+	for _, m := range r.MemberOf {
+		o := opts[m]
+		have := cur.MemberOptions[m]
+		if unknown {
+			have = model.MembershipState{Admin: have.Admin, Inherit: true, Set: true}
+		} else if !slices.Contains(cur.MemberOf, m) {
+			have = model.MembershipState{}
+		}
+		if o.Inherit != nil && !*o.Inherit && have.Inherit {
+			df.warn("not setting inherit = false on %s: dbfence may rely on its privileges", what(m))
+			o.Inherit = nil
+		}
+		if o.Set != nil && !*o.Set && have.Set {
+			df.warn("not setting set = false on %s: dbfence may rely on SET ROLE to it", what(m))
+			o.Set = nil
+		}
+		if o != opts[m] {
 			opts[m] = o
 		}
 	}
@@ -367,6 +485,12 @@ func (df *differ) databases() []string {
 		if i < 0 {
 			df.add(phaseDatabase, plan.ActionCreate, res, df.d.CreateDatabase(db))
 			continue
+		}
+		if df.ownerChangeLocksOut(db, df.current.Databases[i]) {
+			df.warn("not changing the owner of database %q to %q: dbfence is connected to it, and the connected user %q connects to it through the privileges of its owner %q, which move to the new owner",
+				db.Name, db.Owner, df.show(df.current.CurrentUser), df.current.Databases[i].Owner)
+			df.keptOwners[db.Name] = true
+			db.Owner = ""
 		}
 		stmts, warns := df.d.AlterDatabase(db, df.current.Databases[i])
 		df.warnings = append(df.warnings, warns...)
@@ -385,6 +509,10 @@ func (df *differ) databases() []string {
 		}
 		if !df.opts.Prune {
 			df.warn("unmanaged database %q (use --prune to drop it)", c.Name)
+			continue
+		}
+		if why := df.current.Entangled[model.Object{Type: model.ObjectDatabase, Database: c.Name}]; why != "" {
+			df.warn("database %q: %s, so it is not pruned; handle it manually", c.Name, why)
 			continue
 		}
 		dropped = append(dropped, c.Name)
@@ -432,6 +560,10 @@ func (df *differ) schemas() {
 			df.warn("unmanaged schema %q in database %q (use --prune to drop it)", c.Name, c.Database)
 			continue
 		}
+		if why := df.current.Entangled[model.Object{Type: model.ObjectSchema, Database: c.Database, Schema: c.Name}]; why != "" {
+			df.warn("schema %q in database %q: %s, so it is not pruned; handle it manually", c.Name, c.Database, why)
+			continue
+		}
 		df.add(phaseDropSchema, plan.ActionDrop, fmt.Sprintf("schema %q in database %q", c.Name, c.Database), df.d.DropSchema(c))
 	}
 }
@@ -445,7 +577,7 @@ func (df *differ) owner(obj model.Object) string {
 }
 
 // desiredOwner returns the declared owner of obj, or "" when the owner
-// is not managed.
+// is not managed or its change is not planned (keptOwners).
 func (df *differ) desiredOwner(obj model.Object) string {
 	if obj.Type == model.ObjectSchema {
 		for _, s := range df.desired.Schemas {
@@ -456,7 +588,7 @@ func (df *differ) desiredOwner(obj model.Object) string {
 		return ""
 	}
 	for _, d := range df.desired.Databases {
-		if d.Name == obj.Database {
+		if d.Name == obj.Database && !df.keptOwners[d.Name] {
 			return d.Owner
 		}
 	}
@@ -508,7 +640,7 @@ func (df *differ) privileges() {
 		return df.desired.Engine == model.EnginePostgres && p.Grantee.Name == df.owner(p.Object)
 	}
 	managed := func(p model.Privilege) bool {
-		if p.Grantee.IsPublic() {
+		if df.isPublic(p.Grantee) {
 			// PUBLIC is managed only where a grant block names it.
 			if !slices.Contains(df.desired.PublicObjects, p.Object) {
 				return false
@@ -590,12 +722,123 @@ func (df *differ) privileges() {
 		stmts, warns := df.d.RevokeGrantOption(g.grantee, g.obj, privs)
 		df.addWarned(phaseRevoke, plan.ActionRevoke, "grant option for "+res(g, privs, "from"), stmts, warns)
 	}
+	keep := df.keepConnect(grants)
 	for _, g := range sortedGroups(revokes) {
-		privs := sortedPrivs(revokes[g])
+		privs := keep(g, sortedPrivs(revokes[g]))
+		if len(privs) == 0 {
+			continue
+		}
 		stmts, warns := df.d.Revoke(g.grantee, g.obj, privs)
 		df.addWarned(phaseRevoke, plan.ActionRevoke, res(g, privs, "from"), stmts, warns)
 		df.warnHeldByPublic(g, privs)
 	}
+}
+
+// ownerChangeLocksOut reports whether changing the owner of the database
+// dbfence is connected to (PostgreSQL) from cur to db takes the
+// connected user's CONNECT on it away: ALTER DATABASE ... OWNER TO moves
+// the old owner's privileges to the new owner. The connected user, not a
+// superuser, holds CONNECT through PUBLIC, itself or a role whose
+// privileges it has. When privileges are unreadable, it is taken to
+// connect through the old owner.
+func (df *differ) ownerChangeLocksOut(db, cur model.Database) bool {
+	self, _ := df.currentRole(df.current.CurrentUser)
+	if df.desired.Engine != model.EnginePostgres || db.Name == "" || db.Name != df.current.CurrentDatabase ||
+		db.Owner == "" || db.Owner == cur.Owner || self.Superuser {
+		return false
+	}
+	obj := model.Object{Type: model.ObjectDatabase, Database: db.Name}
+	holders := map[model.RoleID]bool{}
+	for _, p := range df.current.Privileges {
+		if p.Object == obj && p.Name == "CONNECT" {
+			holders[p.Grantee] = true
+		}
+	}
+	via := df.inheritedRoles()
+	connects := func() bool {
+		for g := range holders {
+			if via[g] {
+				return true
+			}
+		}
+		return false
+	}
+	unknown := df.current.Unreadable.Privileges
+	if !unknown && !connects() {
+		return false
+	}
+	if from := (model.RoleID{Name: cur.Owner}); holders[from] || unknown {
+		delete(holders, from)
+		holders[model.RoleID{Name: db.Owner}] = true
+	}
+	return !connects()
+}
+
+// keepConnect returns a filter for the privileges revoked from a group,
+// applied in plan order, that keeps CONNECT on the database dbfence is
+// connected to (PostgreSQL) when the connected user, not a superuser,
+// would no longer hold it: it could not connect again. It holds CONNECT
+// through PUBLIC, itself or a role whose privileges it has.
+func (df *differ) keepConnect(grants map[grantGroup][]string) func(grantGroup, []string) []string {
+	db := model.Object{Type: model.ObjectDatabase, Database: df.current.CurrentDatabase}
+	self, _ := df.currentRole(df.current.CurrentUser)
+	if df.desired.Engine != model.EnginePostgres || df.current.CurrentDatabase == "" || self.Superuser {
+		return func(_ grantGroup, privs []string) []string { return privs }
+	}
+	holders := map[model.RoleID]bool{}
+	for _, p := range df.current.Privileges {
+		if p = df.afterOwnerChange(p); p.Object == db && p.Name == "CONNECT" {
+			holders[p.Grantee] = true
+		}
+	}
+	for g, privs := range grants {
+		if g.obj == db && slices.Contains(privs, "CONNECT") {
+			holders[g.grantee] = true
+		}
+	}
+	via := df.inheritedRoles()
+	connects := func() bool {
+		for g := range holders {
+			if via[g] {
+				return true
+			}
+		}
+		return false
+	}
+	return func(g grantGroup, privs []string) []string {
+		if g.obj != db || !slices.Contains(privs, "CONNECT") || !holders[g.grantee] {
+			return privs
+		}
+		delete(holders, g.grantee)
+		if connects() {
+			return privs
+		}
+		holders[g.grantee] = true
+		df.warn("not revoking CONNECT on database %q from %q: the connected user %q connects to it through it, and could not connect again",
+			db.Database, df.show(g.grantee), df.show(df.current.CurrentUser))
+		return slices.DeleteFunc(slices.Clone(privs), func(p string) bool { return p == "CONNECT" })
+	}
+}
+
+// inheritedRoles returns PUBLIC, the connected user and the roles it has
+// the privileges of: reached through memberships with INHERIT whose
+// member has the INHERIT attribute (needed before PostgreSQL 16).
+func (df *differ) inheritedRoles() map[model.RoleID]bool {
+	id := df.current.CurrentUser
+	out := map[model.RoleID]bool{model.PublicRole: true, id: true}
+	for queue := []model.RoleID{id}; len(queue) > 0; queue = queue[1:] {
+		r, ok := df.currentRole(queue[0])
+		if !ok || !r.Inherit {
+			continue
+		}
+		for _, m := range r.MemberOf {
+			if r.MemberOptions[m].Inherit && !out[m] {
+				out[m] = true
+				queue = append(queue, m)
+			}
+		}
+	}
+	return out
 }
 
 // createdPublicPrivileges returns the privileges PUBLIC will hold on the
@@ -620,16 +863,22 @@ func (df *differ) createdPublicPrivileges() []model.Privilege {
 	return out
 }
 
+// isPublic reports whether id is PostgreSQL's PUBLIC pseudo-role. On
+// MySQL, 'public'@'' is an ordinary account.
+func (df *differ) isPublic(id model.RoleID) bool {
+	return df.desired.Engine == model.EnginePostgres && id.IsPublic()
+}
+
 // warnHeldByPublic warns when privileges revoked from a role stay
 // available to it because PUBLIC holds them on an object where PUBLIC is
 // not managed.
 func (df *differ) warnHeldByPublic(g grantGroup, privs []string) {
-	if g.grantee.IsPublic() || slices.Contains(df.desired.PublicObjects, g.obj) {
+	if df.isPublic(g.grantee) || slices.Contains(df.desired.PublicObjects, g.obj) {
 		return
 	}
 	var held []string
 	for _, p := range df.current.Privileges {
-		if p.Grantee.IsPublic() && p.Object == g.obj && slices.Contains(privs, p.Name) && !slices.Contains(held, p.Name) {
+		if df.isPublic(p.Grantee) && p.Object == g.obj && slices.Contains(privs, p.Name) && !slices.Contains(held, p.Name) {
 			held = append(held, p.Name)
 		}
 	}
@@ -710,7 +959,7 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 			}
 			continue
 		}
-		if reason := df.keepRole(r.ID, referenced, reliedOn); reason != "" {
+		if reason := df.keepRole(r.ID, referenced, reliedOn, surviving); reason != "" {
 			if df.opts.Prune {
 				df.warn("%s %s; not pruned", df.roleResource(r.ID), reason)
 			}
@@ -726,7 +975,7 @@ func (df *differ) pruneRoles(droppedDatabases []string) {
 
 // keepRole explains why the undeclared role id must survive --prune, or
 // returns "" when it may be dropped.
-func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleID]bool) string {
+func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleID]bool, surviving []string) string {
 	switch {
 	case referenced[id]:
 		return "is referenced by the configuration but not declared (declare it to manage it)"
@@ -747,6 +996,15 @@ func (df *differ) keepRole(id model.RoleID, referenced, reliedOn map[model.RoleI
 				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
 			}
 		}
+		// Undeclared databases where REASSIGN OWNED runs.
+		for _, s := range df.current.OtherSchemas {
+			if s.Owner == id.Name && slices.Contains(surviving, s.Database) && df.ignore.schema(s.Database, s.Name) && !df.d.IsSystemSchema(s.Name) {
+				return fmt.Sprintf("owns the ignored schema %q in database %q", s.Name, s.Database)
+			}
+		}
+	}
+	if k, ok := df.d.(RoleKeeper); ok {
+		return k.KeepRole(id, surviving)
 	}
 	return ""
 }

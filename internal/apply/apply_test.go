@@ -18,8 +18,13 @@ type recorder struct {
 	failAt int
 }
 
-func (r *recorder) Exec(_ context.Context, database, query string) error {
-	r.ran = append(r.ran, database+"|"+query)
+func (r *recorder) Exec(_ context.Context, s plan.Statement) error {
+	query := s.SQL()
+	ran := s.Database + "|" + query
+	if s.AsRole != "" {
+		ran = s.Database + "|as " + s.AsRole + "|" + query
+	}
+	r.ran = append(r.ran, ran)
 	if len(r.ran) != r.failAt {
 		return nil
 	}
@@ -35,10 +40,10 @@ func (r *recorder) Exec(_ context.Context, database, query string) error {
 func testPlan() *plan.Plan {
 	return &plan.Plan{Changes: []plan.Change{
 		{Action: plan.ActionCreate, Resource: `role "a"`, Statements: []plan.Statement{
-			plan.SQL("", `CREATE ROLE "a" WITH PASSWORD `, plan.Secret("'hunter2'")),
+			plan.SQL("", plan.Keyword(`CREATE ROLE "a" WITH PASSWORD `), plan.NewSecret(plan.EscapedLiteral("'hunter2'"))),
 		}},
 		{Action: plan.ActionCreate, Resource: `schema "s"`, Statements: []plan.Statement{
-			plan.SQL("app", `CREATE SCHEMA "s"`),
+			plan.SQL("app", plan.Keyword(`CREATE SCHEMA "s"`)),
 		}},
 	}}
 }
@@ -143,19 +148,72 @@ func TestRunErrors(t *testing.T) {
 	}
 }
 
-func TestRunPrintsCommentsBeforeTheStatement(t *testing.T) {
+func TestRunPrintsNotesBeforeTheStatement(t *testing.T) {
 	t.Parallel()
+	const revoke = `REVOKE CONNECT ON DATABASE "app" FROM "a" CASCADE`
 	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionRevoke, Resource: `CONNECT on database "app" from "a"`, Statements: []plan.Statement{
-		plan.SQL("app", "-- CASCADE: one\n-- two\nREVOKE CONNECT ON DATABASE \"app\" FROM \"a\" CASCADE"),
-		plan.SQL("", "-- only a comment"),
+		plan.SQL("app", plan.Keyword(revoke)).WithNote("two").WithNote("CASCADE: one"),
+		plan.SQL("", plan.Keyword("GRANT X")),
 	}}}}
 	var out strings.Builder
-	if err := Run(t.Context(), &recorder{}, p, &out, false); err != nil {
+	r := &recorder{}
+	if err := Run(t.Context(), r, p, &out, false); err != nil {
 		t.Fatal(err)
 	}
-	want := "-- CASCADE: one\n-- two\n[1/2] (on database \"app\") REVOKE CONNECT ON DATABASE \"app\" FROM \"a\" CASCADE\n[2/2] -- only a comment\n"
+	want := "-- CASCADE: one\n-- two\n[1/2] (on database \"app\") " + revoke + "\n[2/2] GRANT X\n"
 	if out.String() != want {
 		t.Errorf("output =\n%s\nwant\n%s", out.String(), want)
+	}
+	// Notes are never sent to the server.
+	if got := strings.Join(r.ran, "\n"); got != "app|"+revoke+"\n|GRANT X" {
+		t.Errorf("ran =\n%s", got)
+	}
+}
+
+// A statement run as another role reaches the Executor as one statement
+// with AsRole set, and output and errors name the role.
+func TestRunAsRole(t *testing.T) {
+	t.Parallel()
+	const revoke = `REVOKE USAGE ON SCHEMA "api" FROM "app"`
+	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionRevoke, Resource: `USAGE on schema "api" from "app"`, Statements: []plan.Statement{
+		plan.SQL("app", plan.Keyword(revoke)).WithRole("ro"),
+		plan.SQL("", plan.Keyword("GRANT X")).WithRole("g"),
+	}}}}
+	tests := []struct {
+		name    string
+		wantErr string
+		wantRan []string
+		failAt  int
+	}{
+		{name: "success", wantRan: []string{"app|as ro|" + revoke, "|as g|GRANT X"}},
+		{
+			name: "failure names the role", failAt: 1, wantRan: []string{"app|as ro|" + revoke},
+			wantErr: `statement 1/2 (on database "app", as role "ro") failed: `,
+		},
+		{
+			name: "failure without a database", failAt: 2, wantRan: []string{"app|as ro|" + revoke, "|as g|GRANT X"},
+			wantErr: `statement 2/2 (as role "g") failed: `,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &recorder{failAt: tt.failAt}
+			var out strings.Builder
+			err := Run(t.Context(), r, p, &out, false)
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatal(err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Errorf("err = %v, want substring %q", err, tt.wantErr)
+			}
+			if got, want := strings.Join(r.ran, "\n"), strings.Join(tt.wantRan, "\n"); got != want {
+				t.Errorf("ran =\n%s\nwant\n%s", got, want)
+			}
+			if !strings.HasPrefix(out.String(), "[1/2] (on database \"app\", as role \"ro\") "+revoke+"\n") {
+				t.Errorf("output =\n%s", out.String())
+			}
+		})
 	}
 }
 
@@ -196,7 +254,19 @@ func TestWithholdQuoted(t *testing.T) {
 		{name: "truncated at the end of the text", msg: "failed near '" + long[:10], leak: []string{"SECR"}},
 		{name: "backslash-escaped value", msg: `near 'a\'b'c' x`, leak: []string{"a\\'b", "c' x"}},
 		{
-			name: "detail lines are cut separately",
+			name: "multi-line secret",
+			msg:  "Error 1064 (42000): You have an error in your SQL syntax; near 'IDENTIFIED BY 'first\nSECONDLINE' xyz' at line 1",
+			want: "Error 1064 (42000): You have an error in your SQL syntax; near <withheld>" + withheldNote,
+			leak: []string{"first", "SECONDLINE", "xyz"},
+		},
+		{
+			name: "multi-line secret over a detail line",
+			msg:  "ERROR: syntax error at or near \"'pre\nTOPSECRET'\" (SQLSTATE 42601)\nDETAIL: near 'x'",
+			want: "ERROR: syntax error at or near <withheld>" + withheldNote,
+			leak: []string{"pre", "TOPSECRET", "DETAIL"},
+		},
+		{
+			name: "quote on a detail line",
 			msg:  "ERROR: password is too short (SQLSTATE 22023)\nDETAIL: near 'hunter2'",
 			want: "ERROR: password is too short (SQLSTATE 22023)\nDETAIL: near <withheld>" + withheldNote,
 			leak: []string{"hunter2"},
@@ -246,5 +316,23 @@ func TestRunWithholdsErrorsOfSecretStatements(t *testing.T) {
 				t.Errorf("err = %v, want %q without %q", err, tt.want, tt.deny)
 			}
 		})
+	}
+}
+
+func TestRunEscapesControlCharacters(t *testing.T) {
+	t.Parallel()
+	p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionDrop, Resource: "r", Statements: []plan.Statement{
+		plan.SQL("", plan.Keyword("DROP ROLE \"x\x1b[2K\r\n-- ok\"")).WithNote("note \x1b[8m"),
+	}}}}
+	var out strings.Builder
+	r := &recorder{}
+	if err := Run(t.Context(), r, p, &out, false); err != nil {
+		t.Fatal(err)
+	}
+	if want := "-- note \\x1b[8m\n[1/1] DROP ROLE \"x\\x1b[2K\\r\\n-- ok\"\n"; out.String() != want {
+		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+	if want := "|DROP ROLE \"x\x1b[2K\r\n-- ok\""; len(r.ran) != 1 || r.ran[0] != want {
+		t.Errorf("ran = %q, want %q", r.ran, want)
 	}
 }

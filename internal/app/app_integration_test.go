@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	gomysql "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/mazrean/dbfence/internal/app"
 	"github.com/mazrean/dbfence/internal/apply"
@@ -347,6 +348,93 @@ func TestMySQLIntegration(t *testing.T) {
 	}
 }
 
+// TestMySQLRetainedPassword checks that a secondary password kept by
+// RETAIN CURRENT PASSWORD is discarded when the primary already matches.
+func TestMySQLRetainedPassword(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	h.write(mysqlConfig("first"))
+	h.apply(app.Options{})
+	h.exec("ALTER USER 'dbf_it_app'@'%' IDENTIFIED BY 'second' RETAIN CURRENT PASSWORD")
+	h.write(mysqlConfig("second"))
+	if n, out := h.plan(app.Options{}); n != 1 || !strings.Contains(out, "ALTER USER 'dbf_it_app'@'%' DISCARD OLD PASSWORD") {
+		t.Fatalf("retained password plan: %d\n%s", n, out)
+	}
+	h.apply(app.Options{})
+	h.assertConverged(app.Options{})
+	if got := h.query("SELECT User FROM mysql.user WHERE JSON_CONTAINS_PATH(User_attributes, 'one', '$.additional_password')"); len(got) != 0 {
+		t.Errorf("accounts with a secondary password = %q", got)
+	}
+}
+
+// TestMySQLOneStatementPerExec checks that Driver.Exec sends exactly one
+// statement even when the DSN asks for multiStatements.
+func TestMySQLOneStatementPerExec(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	d, err := mysql.Open(t.Context(), h.dsn+"?multiStatements=true&allowAllFiles=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	for _, q := range []plan.Keyword{
+		"SELECT 1; SELECT 2",
+		"CREATE USER 'dbf_ms1'@'%'; CREATE USER 'dbf_ms2'@'%'",
+		"DO 1;DO 2",
+	} {
+		err := d.Exec(t.Context(), plan.SQL("", q))
+		if myErr, ok := errors.AsType[*gomysql.MySQLError](err); !ok || myErr.Number != 1064 {
+			t.Errorf("Exec(%q) = %v, want error 1064", q, err)
+		}
+	}
+	if got := h.query("SELECT User FROM mysql.user WHERE User LIKE 'dbf\\_ms%'"); len(got) != 0 {
+		t.Errorf("users created by rejected statements: %q", got)
+	}
+	if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("DO 1"))); err != nil {
+		t.Errorf("single statement: %v", err)
+	}
+	// MySQL statements never run as another role.
+	if err := d.Exec(t.Context(), plan.SQL("", plan.Keyword("DO 1")).WithRole("r")); err == nil || !strings.Contains(err.Error(), "not supported on MySQL") {
+		t.Errorf("Exec as role = %v", err)
+	}
+}
+
+// TestMySQLPruneKeepsTableRoutineAndProxyPrivileges checks that --prune
+// keeps accounts whose DROP USER would delete table, column, routine or
+// PROXY privileges naming a database or account dbfence does not manage,
+// and still drops an account without them.
+func TestMySQLPruneKeepsTableRoutineAndProxyPrivileges(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, model.EngineMySQL, mysqlContainer)
+	for _, q := range []string{
+		"CREATE DATABASE `ev\x01db`",
+		"CREATE TABLE `ev\x01db`.t (c INT)",
+		"CREATE PROCEDURE `ev\x01db`.p() BEGIN END",
+		"CREATE USER 'dbf_tbl'@'%', 'dbf_col'@'%', 'dbf_proc'@'%', 'dbf_proxy'@'%', 'dbf_plain'@'%', 'ev\x01u'@'%'",
+		"GRANT SELECT ON `ev\x01db`.t TO 'dbf_tbl'@'%'",
+		"GRANT SELECT (c) ON `ev\x01db`.t TO 'dbf_col'@'%'",
+		"GRANT EXECUTE ON PROCEDURE `ev\x01db`.p TO 'dbf_proc'@'%'",
+		// root@'%' may not grant PROXY; GRANT PROXY writes this row.
+		"INSERT INTO mysql.proxies_priv (Host, User, Proxied_host, Proxied_user, With_grant) VALUES ('%', 'dbf_proxy', '%', 'ev\x01u', 0)",
+		"FLUSH PRIVILEGES",
+	} {
+		h.exec(q)
+	}
+	h.write(mysqlConfig("pw"))
+	_, out := h.plan(app.Options{Prune: true})
+	for _, u := range []string{"dbf_tbl", "dbf_col", "dbf_proc", "dbf_proxy"} {
+		if strings.Contains(out, "DROP USER '"+u+"'") {
+			t.Errorf("prune drops %s:\n%s", u, out)
+		}
+		if !strings.Contains(out, `user "`+u+`"@"%" is granted to, has as a granted or default role, or holds privileges`) {
+			t.Errorf("plan does not say why %s is kept:\n%s", u, out)
+		}
+	}
+	if !strings.Contains(out, "DROP USER 'dbf_plain'@'%'") {
+		t.Errorf("prune does not drop dbf_plain:\n%s", out)
+	}
+}
+
 func mysqlConfig(pw string) string {
 	return fmt.Sprintf(`
 role "ro" { name = "dbf_it_ro" }
@@ -623,8 +711,9 @@ func TestMySQLErrorsDoNotLeakSecrets(t *testing.T) {
 	defer func() { _ = drv.Close() }()
 	long := strings.Repeat("SECRET0123456789", 6)
 	tests := []struct {
-		name, prefix, password, wantMsg string
-		leak                            []string
+		name, password, wantMsg string
+		prefix                  plan.Keyword
+		leak                    []string
 	}{
 		{
 			name: "truncated near fragment", prefix: "CREATE USER 'dbf_leak'@'%' IDENTIFIED WITH auth-pam BY ",
@@ -638,7 +727,7 @@ func TestMySQLErrorsDoNotLeakSecrets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &plan.Plan{Changes: []plan.Change{{Action: plan.ActionCreate, Resource: `role "dbf_leak"`, Statements: []plan.Statement{
-				plan.SQL("", tt.prefix, plan.Secret(drv.Literal(tt.password))),
+				plan.SQL("", tt.prefix, plan.NewSecret(drv.Literal(tt.password))),
 			}}}}
 			err := apply.Run(t.Context(), drv, p, io.Discard, false)
 			if err == nil {

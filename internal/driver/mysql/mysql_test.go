@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/mazrean/dbfence/internal/diff"
@@ -31,7 +32,7 @@ func sqls(stmts []plan.Statement) []string {
 
 func planSQL(t *testing.T, desired *model.Desired, cur *model.Current, d Dialect) ([]string, []string) {
 	t.Helper()
-	p, err := diff.Compute(desired, cur, d, diff.Options{})
+	p, err := compute(t, desired, cur, d, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,10 +107,48 @@ func TestMatchPattern(t *testing.T) {
 		{"a%b", "axxb", true},
 		{"a%b", "axxc", false},
 		{"_", "é", true},
+		{"_", "", false},
+		{"a_c", "aéc", true},
+		{"%%%b", "aab", true},
+		{"%%%b", "aaa", false},
+		{"%_%", "", false},
+		{"%_%", "x", true},
+		{`a\`, `a\`, true},
+		{`a\%`, "a%", true},
+		{`a\%`, "ab", false},
+		{"", "", true},
+		{"", "a", false},
 	}
 	for _, tt := range tests {
 		if got := matchPattern(tt.pattern, tt.name); got != tt.want {
 			t.Errorf("matchPattern(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestMatchPatternManyWildcards checks that runs of % in a pattern read
+// from the server do not make matching take exponential time.
+func TestMatchPatternManyWildcards(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pattern, name string
+		want          bool
+	}{
+		{strings.Repeat("%", 31) + "b", strings.Repeat("a", 64), false},
+		{strings.Repeat("%", 63) + "x", strings.Repeat("a", 64), false},
+		{strings.Repeat("%_", 31) + "b", strings.Repeat("a", 64), false},
+		{strings.Repeat("%", 31) + "a", strings.Repeat("a", 64), true},
+	}
+	for _, tt := range tests {
+		done := make(chan bool, 1)
+		go func() { done <- matchPattern(tt.pattern, tt.name) }()
+		select {
+		case got := <-done:
+			if got != tt.want {
+				t.Errorf("matchPattern(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("matchPattern(%q, %q) did not return within 2s", tt.pattern, tt.name)
 		}
 	}
 }

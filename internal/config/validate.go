@@ -55,6 +55,42 @@ func validate(d *decoded) hcl.Diagnostics {
 	}
 
 	diags = append(diags, validateGrants(d, dbs, roles, schemas)...)
+	return append(diags, validateControlChars(d)...)
+}
+
+// validateControlChars rejects names with control characters, which
+// dbfence never manages: Inspect leaves such objects out of the current
+// state (model.Current.DropUntrusted), so declaring one would plan it
+// again on every run. The values are not shown; they may be secret.
+func validateControlChars(d *decoded) hcl.Diagnostics {
+	var diags hcl.Diagnostics
+	check := func(rng hcl.Range, what string, values ...string) {
+		if slices.ContainsFunc(values, model.HasControl) {
+			diags = append(diags, errAt(rng, "Invalid name",
+				what+" must not contain control characters; dbfence does not manage objects whose names contain them."))
+		}
+	}
+	for _, db := range d.databases {
+		check(db.res.nameRange, "database name", db.db.Name)
+		check(attrRange(db.res.attrs, "owner", db.res.block.DefRange), "owner", db.db.Owner)
+	}
+	for _, r := range d.roles {
+		check(r.res.nameRange, r.typ+" name", r.role.ID.Name)
+		check(attrRange(r.res.attrs, "host", r.res.block.DefRange), "host", r.role.ID.Host)
+		for _, m := range r.role.MemberOf {
+			check(attrRange(r.res.attrs, "member_of", r.res.block.DefRange), "member_of entry", m.Name, m.Host)
+		}
+	}
+	for _, s := range d.schemas {
+		check(s.res.nameRange, "schema name", s.schema.Name)
+		check(attrRange(s.res.attrs, "owner", s.res.block.DefRange), "owner", s.schema.Owner)
+	}
+	for _, g := range d.grants {
+		check(attrRange(g.attrs, "role", g.block.DefRange), "role", g.grantee.Name, g.grantee.Host)
+		check(attrRange(g.attrs, "database", g.block.DefRange), "database", g.object.Database)
+		check(attrRange(g.attrs, "database_pattern", g.block.DefRange), "database_pattern", g.object.Pattern)
+		check(attrRange(g.attrs, "schema", g.block.DefRange), "schema", g.object.Schema)
+	}
 	return diags
 }
 

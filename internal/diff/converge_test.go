@@ -28,7 +28,7 @@ type simDialect struct {
 
 func (d *simDialect) op(f func(*model.Current) error) []plan.Statement {
 	d.ops = append(d.ops, f)
-	return []plan.Statement{plan.SQL("", "op "+strconv.Itoa(len(d.ops)-1))}
+	return []plan.Statement{plan.SQL("", plan.Keyword("op "), plan.Number(len(d.ops)-1))}
 }
 
 // apply runs the statements of p against cur.
@@ -440,12 +440,12 @@ func TestComputeConverges(t *testing.T) {
 			cur := tt.current()
 			for i, desired := range tt.steps {
 				d := &simDialect{}
-				p, err := diff.Compute(desired, cur, d, tt.opts)
+				p, err := compute(t, desired, cur, d, tt.opts)
 				if err != nil {
 					t.Fatalf("step %d: %v", i, err)
 				}
 				d.apply(t, p, cur)
-				again, err := diff.Compute(desired, cur, &simDialect{}, tt.opts)
+				again, err := compute(t, desired, cur, &simDialect{}, tt.opts)
 				if err != nil {
 					t.Fatalf("step %d: second plan: %v", i, err)
 				}
@@ -479,7 +479,7 @@ func TestComputeShuffled(t *testing.T) {
 	desired.Roles = append(desired.Roles, model.Role{ID: pgID("x")}, model.Role{ID: pgID("y")})
 
 	run := func(cur *model.Current) []string {
-		p, err := diff.Compute(desired, cur, postgres.Dialect{}, diff.Options{Prune: true})
+		p, err := compute(t, desired, cur, postgres.Dialect{}, diff.Options{Prune: true})
 		if err != nil {
 			t.Fatal(err)
 		}

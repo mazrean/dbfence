@@ -6,61 +6,152 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
+
+	"github.com/mazrean/dbfence/internal/model"
 )
 
-// Secret is a SQL fragment that must be redacted in output.
-type Secret string
-
 // Statement is a single SQL statement executed on Database ("" means the
-// connection given in configuration).
+// connection given in configuration). A Statement is always exactly one
+// SQL command: drivers send it so that the server rejects a second one.
+// Its text is built only from Fragments.
 type Statement struct {
+	role RoleChange
+	// Database is the database the statement runs on.
 	Database string
-	parts    []any
+	// AsRole, when set, is the role the statement runs as. The driver
+	// switches to it for this statement only, so the SQL never chains a
+	// SET ROLE in front of the statement.
+	AsRole string
+	kind   Kind
+	parts  []Fragment
+	notes  []string
+	// defaults are the roles a SET DEFAULT ROLE statement makes the
+	// default roles of its target; empty for SET DEFAULT ROLE NONE.
+	defaults []model.RoleID
+	// privs are the privileges a GRANT or REVOKE of privileges names.
+	privs []string
+	// dependents are the roles that also lose what a REVOKE ... CASCADE
+	// revokes.
+	dependents []model.RoleID
+	target     Target
 }
 
-// SQL builds a statement from string and Secret fragments.
-func SQL(database string, parts ...any) Statement {
-	for _, p := range parts {
-		switch p.(type) {
-		case string, Secret:
-		default:
-			panic(fmt.Sprintf("plan.SQL: unsupported fragment %T", p))
-		}
-	}
-	return Statement{Database: database, parts: parts}
+// New builds a statement of kind on target from SQL fragments. Dialect
+// builders use it, so that every planned statement says what it does.
+func New(database string, kind Kind, target Target, parts ...Fragment) Statement {
+	return Statement{Database: database, kind: kind, target: target, parts: parts}
 }
+
+// SQL builds a statement of KindOther from SQL fragments.
+func SQL(database string, parts ...Fragment) Statement {
+	return New(database, KindOther, Target{}, parts...)
+}
+
+// Kind returns what s does.
+func (s Statement) Kind() Kind { return s.kind }
+
+// Target returns the object s acts on.
+func (s Statement) Target() Target { return s.target }
+
+// RoleChange returns what s sets on the role it creates or alters, or on
+// the membership it grants.
+func (s Statement) RoleChange() RoleChange { return s.role }
+
+// WithRoleChange returns s with the role attributes it sets.
+func (s Statement) WithRoleChange(c RoleChange) Statement {
+	s.role = c
+	return s
+}
+
+// DefaultRoles returns the roles a statement of KindSetDefaultRole makes
+// the default roles of its target role. They replace all current default
+// roles, so an empty result means none.
+func (s Statement) DefaultRoles() []model.RoleID { return slices.Clone(s.defaults) }
+
+// WithDefaultRoles returns s with the default roles it sets (see
+// DefaultRoles).
+func (s Statement) WithDefaultRoles(roles []model.RoleID) Statement {
+	s.defaults = slices.Clone(roles)
+	return s
+}
+
+// Privileges returns the privileges a statement of KindGrant or
+// KindRevoke grants or revokes.
+func (s Statement) Privileges() []string { return slices.Clone(s.privs) }
+
+// WithPrivileges returns s with the privileges it grants or revokes (see
+// Privileges).
+func (s Statement) WithPrivileges(privs []string) Statement {
+	s.privs = slices.Clone(privs)
+	return s
+}
+
+// Dependents returns the roles that also lose what a statement of
+// KindRevoke or KindRevokeMembership revokes, through CASCADE: those that
+// received the privileges or memberships, directly or transitively, from
+// its grantee's grant option or ADMIN OPTION. They lose those grants even
+// when the statement revokes only the option. For KindDropOwned they are
+// the roles that lose, through its CASCADE, a grant of CONNECT on the
+// connected database or a membership made, directly or transitively, by
+// its role.
+func (s Statement) Dependents() []model.RoleID { return slices.Clone(s.dependents) }
+
+// WithDependents returns s with the roles its CASCADE also revokes from
+// (see Dependents).
+func (s Statement) WithDependents(roles []model.RoleID) Statement {
+	s.dependents = slices.Clone(roles)
+	return s
+}
+
+// WithNote returns s with note in front of its other notes. Notes explain
+// the statement in plan and apply output, such as a CASCADE; they are
+// never part of the SQL sent to the server.
+func (s Statement) WithNote(note string) Statement {
+	s.notes = append([]string{note}, s.notes...)
+	return s
+}
+
+// WithRole returns s run as role (see AsRole).
+func (s Statement) WithRole(role string) Statement {
+	s.AsRole = role
+	return s
+}
+
+// Where describes where s runs, such as `on database "app", as role
+// "ro"`, or returns "" for the configured connection and user. Names are
+// Go-quoted, so control characters in them are escaped.
+func (s Statement) Where() string {
+	var parts []string
+	if s.Database != "" {
+		parts = append(parts, fmt.Sprintf("on database %q", s.Database))
+	}
+	if s.AsRole != "" {
+		parts = append(parts, fmt.Sprintf("as role %q", s.AsRole))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Notes returns the notes explaining s, in display order.
+func (s Statement) Notes() []string { return slices.Clone(s.notes) }
 
 // SQL returns the executable text.
 func (s Statement) SQL() string { return s.render(true) }
 
-// Display returns the text with secrets redacted unless showSecrets is set.
-func (s Statement) Display(showSecrets bool) string { return s.render(showSecrets) }
+// Display returns the text for output: secrets are redacted unless
+// showSecrets is set, and control characters are escaped (see Escape).
+func (s Statement) Display(showSecrets bool) string { return Escape(s.render(showSecrets)) }
 
 func (s Statement) render(showSecrets bool) string {
 	var sb strings.Builder
-	for _, p := range s.parts {
-		switch p := p.(type) {
-		case string:
-			sb.WriteString(p)
-		case Secret:
-			if showSecrets {
-				sb.WriteString(string(p))
-			} else {
-				sb.WriteString("'<redacted>'")
-			}
-		}
-	}
+	Seq(s.parts).render(&sb, showSecrets)
 	return sb.String()
 }
 
 // HasSecret reports whether s contains a Secret fragment.
-func (s Statement) HasSecret() bool {
-	return slices.ContainsFunc(s.parts, func(p any) bool {
-		_, ok := p.(Secret)
-		return ok
-	})
-}
+func (s Statement) HasSecret() bool { return hasSecret(Seq(s.parts)) }
 
 // Action is the kind of a change.
 type Action string
@@ -102,7 +193,7 @@ func (p *Plan) Statements() []Statement {
 func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 	var sb strings.Builder
 	for _, warn := range p.Warnings {
-		fmt.Fprintf(&sb, "-- warning: %s\n", warn)
+		fmt.Fprintf(&sb, "-- warning: %s\n", Escape(warn))
 	}
 	if len(p.Warnings) > 0 {
 		sb.WriteString("\n")
@@ -118,10 +209,13 @@ func (p *Plan) Render(w io.Writer, showSecrets bool) error {
 			Count(len(p.Warnings), "warning"))
 	}
 	for _, c := range p.Changes {
-		fmt.Fprintf(&sb, "-- [%s] %s\n", c.Action, c.Resource)
+		fmt.Fprintf(&sb, "-- [%s] %s\n", c.Action, Escape(c.Resource))
 		for _, s := range c.Statements {
-			if s.Database != "" {
-				fmt.Fprintf(&sb, "-- (on database %q)\n", s.Database)
+			if c := s.Where(); c != "" {
+				fmt.Fprintf(&sb, "-- (%s)\n", c)
+			}
+			for _, n := range s.notes {
+				fmt.Fprintf(&sb, "-- %s\n", Escape(n))
 			}
 			sb.WriteString(s.Display(showSecrets))
 			sb.WriteString(";\n")
@@ -142,7 +236,7 @@ func (p *Plan) summary(sb *strings.Builder) {
 	for _, c := range p.Changes {
 		counts[c.Action]++
 		if c.Action == ActionDrop {
-			drops = append(drops, c.Resource)
+			drops = append(drops, Escape(c.Resource))
 		}
 	}
 	parts := []string{fmt.Sprintf("%d to create", counts[ActionCreate]), fmt.Sprintf("%d to change", counts[ActionUpdate])}
@@ -163,7 +257,7 @@ func (p *Plan) summary(sb *strings.Builder) {
 func (p *Plan) WriteWarnings(w io.Writer) error {
 	var sb strings.Builder
 	for _, warn := range p.Warnings {
-		fmt.Fprintf(&sb, "warning: %s\n", warn)
+		fmt.Fprintf(&sb, "warning: %s\n", Escape(warn))
 	}
 	_, err := io.WriteString(w, sb.String())
 	return err
@@ -176,4 +270,36 @@ func Count(n int, noun string) string {
 		return "1 " + noun
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// Escape returns s with control characters, including line breaks, and
+// bidirectional formatting characters written as Go escapes (\x1b, \n,
+// \u202e). Names read from the server may contain them; escaped, they
+// cannot redraw the terminal or forge lines of output.
+func Escape(s string) string { return escape(s, false) }
+
+// EscapeLines is Escape that keeps line breaks and tabs, for multi-line
+// messages such as configuration diagnostics.
+func EscapeLines(s string) string { return escape(s, true) }
+
+func escape(s string, keepLines bool) string {
+	unsafe := func(r rune) bool {
+		if keepLines && (r == '\n' || r == '\t') {
+			return false
+		}
+		return unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r)
+	}
+	if !strings.ContainsFunc(s, unsafe) {
+		return s
+	}
+	var sb strings.Builder
+	for _, r := range s {
+		if !unsafe(r) {
+			sb.WriteRune(r)
+			continue
+		}
+		q := strconv.QuoteRune(r)
+		sb.WriteString(q[1 : len(q)-1])
+	}
+	return sb.String()
 }

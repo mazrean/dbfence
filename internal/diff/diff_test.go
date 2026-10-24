@@ -88,7 +88,7 @@ func pgMatching(t *testing.T) *model.Current {
 func TestComputeCreateAll(t *testing.T) {
 	t.Parallel()
 	cur := &model.Current{CurrentUser: pgID("postgres"), Roles: []model.RoleState{{ID: pgID("postgres")}}, Databases: []model.Database{{Name: "postgres"}}}
-	p, err := diff.Compute(pgDesired(), cur, postgres.Dialect{}, diff.Options{})
+	p, err := compute(t, pgDesired(), cur, postgres.Dialect{}, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestComputeCreateAll(t *testing.T) {
 
 func TestComputeNoChanges(t *testing.T) {
 	t.Parallel()
-	p, err := diff.Compute(pgDesired(), pgMatching(t), postgres.Dialect{}, diff.Options{})
+	p, err := compute(t, pgDesired(), pgMatching(t), postgres.Dialect{}, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestComputeDrift(t *testing.T) {
 
 	d := pgDesired()
 	d.Roles[1].ConnectionLimit = new(-1)
-	p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{})
+	p, err := compute(t, d, cur, postgres.Dialect{}, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestComputeUnmanaged(t *testing.T) {
 	d := pgDesired()
 	d.Ignore.Roles = []string{"data.*"}
 
-	p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{})
+	p, err := compute(t, d, cur, postgres.Dialect{}, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestComputeUnmanaged(t *testing.T) {
 		t.Errorf("warnings (-want +got):\n%s", diff)
 	}
 
-	p, err = diff.Compute(d, cur, postgres.Dialect{}, diff.Options{Prune: true})
+	p, err = compute(t, d, cur, postgres.Dialect{}, diff.Options{Prune: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestComputePassword(t *testing.T) {
 				cur.Roles[4].PasswordHash = tt.hash
 			}
 			cur.Roles[4].PasswordReadable = tt.readable
-			p, err := diff.Compute(pgDesired(), cur, postgres.Dialect{}, diff.Options{ForcePassword: tt.force})
+			p, err := compute(t, pgDesired(), cur, postgres.Dialect{}, diff.Options{ForcePassword: tt.force})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -250,7 +250,7 @@ func TestComputeMissingReference(t *testing.T) {
 	t.Parallel()
 	d := pgDesired()
 	d.Roles[1].MemberOf = []model.RoleID{pgID("ghost")}
-	_, err := diff.Compute(d, pgMatching(t), postgres.Dialect{}, diff.Options{})
+	_, err := compute(t, d, pgMatching(t), postgres.Dialect{}, diff.Options{})
 	if err == nil || !strings.Contains(err.Error(), `role "ghost"`) {
 		t.Errorf("err = %v", err)
 	}
@@ -278,7 +278,7 @@ func TestComputeMySQL(t *testing.T) {
 		Roles:       []model.RoleState{{ID: root, Login: true}, {ID: model.RoleID{Name: "mysql.sys", Host: "localhost"}}},
 		Databases:   []model.Database{{Name: "mysql"}, {Name: "sys"}},
 	}
-	p, err := diff.Compute(d, cur, mysql.Dialect{}, diff.Options{})
+	p, err := compute(t, d, cur, mysql.Dialect{}, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestComputeMySQL(t *testing.T) {
 		{Grantee: app, Object: dbObj("app"), Name: "SELECT"},
 		{Grantee: app, Object: dbObj("app"), Name: "DELETE", GrantOption: true},
 	}
-	p, err = diff.Compute(d, cur, mysql.Dialect{}, diff.Options{})
+	p, err = compute(t, d, cur, mysql.Dialect{}, diff.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestComputeMySQLUnreadable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(desired(), tt.current, mysql.Dialect{}, tt.opts)
+			p, err := compute(t, desired(), tt.current, mysql.Dialect{}, tt.opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -449,7 +449,7 @@ func TestComputeIgnoreSchemas(t *testing.T) {
 			d.Databases = append(d.Databases, model.Database{Name: "analytics", Owner: "owner"})
 			d.Ignore.Schemas = tt.patterns
 
-			p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{Prune: true})
+			p, err := compute(t, d, cur, postgres.Dialect{}, diff.Options{Prune: true})
 			if err != nil {
 				t.Fatal(err)
 			}

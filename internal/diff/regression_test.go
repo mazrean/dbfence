@@ -10,6 +10,7 @@ import (
 	"github.com/mazrean/dbfence/internal/driver/mysql"
 	"github.com/mazrean/dbfence/internal/driver/postgres"
 	"github.com/mazrean/dbfence/internal/model"
+	"github.com/mazrean/dbfence/internal/password"
 )
 
 // TestComputeOrder checks the relative order of plan phases.
@@ -49,7 +50,7 @@ func TestComputeOrder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(tt.desired, tt.current, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, tt.desired, tt.current, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -86,12 +87,44 @@ func TestComputeCurrentUser(t *testing.T) {
 			},
 		},
 		{
+			name:      "postgres connection limit 0 on a non-superuser",
+			dialect:   postgres.Dialect{},
+			role:      model.Role{ID: pgID("admin"), Login: new(true), ConnectionLimit: new(0), CreateDB: new(true)},
+			state:     model.RoleState{ID: pgID("admin"), Login: true, ConnectionLimit: -1},
+			want:      []string{`ALTER ROLE "admin" WITH CREATEDB`},
+			wantWarns: []string{`not setting connection limit 0 on the connected user "admin": it would lock dbfence out`},
+		},
+		{
+			name:      "postgres connection limit 0 on a superuser",
+			dialect:   postgres.Dialect{},
+			role:      model.Role{ID: pgID("admin"), Login: new(true), ConnectionLimit: new(0)},
+			state:     model.RoleState{ID: pgID("admin"), Login: true, Superuser: true, ConnectionLimit: -1},
+			want:      []string{`ALTER ROLE "admin" WITH CONNECTION LIMIT 0`},
+			wantWarns: []string{},
+		},
+		{
+			name:      "postgres connection limit 1 is applied",
+			dialect:   postgres.Dialect{},
+			role:      model.Role{ID: pgID("admin"), Login: new(true), ConnectionLimit: new(1)},
+			state:     model.RoleState{ID: pgID("admin"), Login: true, ConnectionLimit: -1},
+			want:      []string{`ALTER ROLE "admin" WITH CONNECTION LIMIT 1`},
+			wantWarns: []string{},
+		},
+		{
 			name:      "mysql account lock",
 			dialect:   mysql.Dialect{},
 			role:      model.Role{ID: myAdmin, Login: new(false)},
 			state:     model.RoleState{ID: myAdmin, Login: true},
 			want:      []string{},
 			wantWarns: []string{`not disabling login of the connected user "admin"@"%": it would lock dbfence out`},
+		},
+		{
+			name:      "mysql secondary password of the connected user is kept",
+			dialect:   mysql.Dialect{},
+			role:      model.Role{ID: myAdmin, Login: new(true), Password: new("pw")},
+			state:     model.RoleState{ID: myAdmin, Login: true, AuthPlugin: password.PluginNative, PasswordHash: []byte(password.MySQLNative("pw")), RetainedPassword: true},
+			want:      []string{},
+			wantWarns: []string{`not discarding the secondary password of the connected user "admin"@"%": dbfence may be using it`},
 		},
 		{
 			name:      "login already declared",
@@ -111,7 +144,7 @@ func TestComputeCurrentUser(t *testing.T) {
 			}
 			d := &model.Desired{Engine: engine, Roles: []model.Role{tt.role}}
 			cur := &model.Current{CurrentUser: tt.state.ID, Roles: []model.RoleState{tt.state, {ID: pgID("x")}}}
-			p, err := diff.Compute(d, cur, tt.dialect, diff.Options{})
+			p, err := compute(t, d, cur, tt.dialect, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -178,7 +211,7 @@ func TestComputeTemplateSchema(t *testing.T) {
 				Roles:       []model.RoleState{{ID: pgID("admin"), Login: true}},
 				Databases:   []model.Database{{Name: "postgres", Owner: "admin"}},
 			}
-			p, err := diff.Compute(d, cur, postgres.Dialect{}, diff.Options{})
+			p, err := compute(t, d, cur, postgres.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -341,7 +374,7 @@ func TestComputePruneProtection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p, err := diff.Compute(tt.desired, tt.current, tt.dialect, diff.Options{Prune: !tt.noPrune})
+			p, err := compute(t, tt.desired, tt.current, tt.dialect, diff.Options{Prune: !tt.noPrune})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -363,11 +396,13 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 	dba := model.RoleID{Name: "dba", Host: "%"}
 	role := func(n string) model.RoleID { return model.RoleID{Name: n, Host: "%"} }
 	tests := []struct {
-		opts     map[model.RoleID]model.MembershipOptions
-		name     string
-		memberOf []model.RoleID
-		want     []string
-		current  model.RoleState
+		opts       map[model.RoleID]model.MembershipOptions
+		name       string
+		memberOf   []model.RoleID
+		want       []string
+		warns      []string
+		current    model.RoleState
+		unreadable model.Unreadable
 	}{
 		{
 			name:     "empty member_of keeps every default role",
@@ -397,6 +432,36 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 				`SET DEFAULT ROLE 'dbarole'@'%', 'extra'@'%' TO 'dba'@'%'`,
 			},
 		},
+		{
+			name:       "unknown memberships and default roles are not replaced",
+			memberOf:   []model.RoleID{role("extra")},
+			current:    model.RoleState{ID: dba, Login: true, DefaultRolesUnknown: true},
+			unreadable: model.Unreadable{Memberships: true},
+			want:       []string{`GRANT 'extra'@'%' TO 'dba'@'%'`},
+			warns:      []string{`not setting default roles of the connected user "dba"@"%": its current default roles are unknown and could be narrowed`},
+		},
+		{
+			name:       "unknown memberships keep the known default roles",
+			memberOf:   []model.RoleID{role("extra")},
+			current:    model.RoleState{ID: dba, Login: true, DefaultRoles: []model.RoleID{role("dbarole")}},
+			unreadable: model.Unreadable{Memberships: true},
+			want: []string{
+				`GRANT 'extra'@'%' TO 'dba'@'%'`,
+				`SET DEFAULT ROLE 'dbarole'@'%', 'extra'@'%' TO 'dba'@'%'`,
+			},
+		},
+		{
+			name:       "unreadable role list is not replaced",
+			memberOf:   []model.RoleID{role("extra")},
+			unreadable: model.Unreadable{Roles: true, RoleAttributes: true},
+			want: []string{
+				`CREATE USER IF NOT EXISTS 'dba'@'%'`,
+				`CREATE USER IF NOT EXISTS 'dbarole'@'%'`,
+				`CREATE USER IF NOT EXISTS 'extra'@'%'`,
+				`GRANT 'extra'@'%' TO 'dba'@'%'`,
+			},
+			warns: []string{`not setting default roles of the connected user "dba"@"%": its current default roles are unknown and could be narrowed`},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -405,13 +470,166 @@ func TestComputeConnectedUserDefaultRoles(t *testing.T) {
 				{ID: dba, Login: new(true), MemberOf: tt.memberOf, MemberOptions: tt.opts},
 				{ID: role("dbarole")}, {ID: role("extra")},
 			}}
-			cur := &model.Current{CurrentUser: dba, Roles: []model.RoleState{tt.current, {ID: role("dbarole")}, {ID: role("extra")}}}
-			p, err := diff.Compute(desired, cur, mysql.Dialect{}, diff.Options{})
+			cur := &model.Current{CurrentUser: dba, Unreadable: tt.unreadable}
+			if !tt.unreadable.Roles {
+				cur.Roles = []model.RoleState{tt.current, {ID: role("dbarole")}, {ID: role("extra")}}
+			}
+			p, err := compute(t, desired, cur, mysql.Dialect{}, diff.Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
 				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			var warns []string
+			for _, w := range p.Warnings {
+				if strings.HasPrefix(w, "not setting default roles") {
+					warns = append(warns, w)
+				}
+			}
+			if d := cmp.Diff(tt.warns, warns, cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
+			}
+		})
+	}
+}
+
+// TestComputePruneOtherSchemaOwners checks that --prune keeps the owners
+// of ignored schemas in undeclared databases where REASSIGN OWNED runs.
+func TestComputePruneOtherSchemaOwners(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		other     []model.Schema
+		want      []string
+		wantWarns []string
+	}{
+		{
+			name:      "ignored schema in an undeclared database",
+			other:     []model.Schema{{Database: "postgres", Name: "monitoring", Owner: "monitor"}},
+			want:      []string{`DROP DATABASE "old"`},
+			wantWarns: []string{`role "monitor" owns the ignored schema "monitoring" in database "postgres"; not pruned`},
+		},
+		{
+			name:  "schema that is not ignored",
+			other: []model.Schema{{Database: "postgres", Name: "reports", Owner: "monitor"}},
+			want: []string{
+				`DROP DATABASE "old"`,
+				`app: REASSIGN OWNED BY "monitor" TO CURRENT_USER`,
+				`app: DROP OWNED BY "monitor"`,
+				`postgres: REASSIGN OWNED BY "monitor" TO CURRENT_USER`,
+				`postgres: DROP OWNED BY "monitor"`,
+				`DROP ROLE "monitor"`,
+			},
+		},
+		{
+			name:  "ignored schema in a pruned database",
+			other: []model.Schema{{Database: "old", Name: "monitoring", Owner: "monitor"}},
+			want: []string{
+				`DROP DATABASE "old"`,
+				`app: REASSIGN OWNED BY "monitor" TO CURRENT_USER`,
+				`app: DROP OWNED BY "monitor"`,
+				`postgres: REASSIGN OWNED BY "monitor" TO CURRENT_USER`,
+				`postgres: DROP OWNED BY "monitor"`,
+				`DROP ROLE "monitor"`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{
+				Engine:    model.EnginePostgres,
+				Roles:     []model.Role{{ID: pgID("admin"), Login: new(true)}},
+				Databases: []model.Database{{Name: "app", Owner: "admin"}},
+				Ignore:    model.Ignore{Schemas: []string{"monitoring"}},
+			}
+			current := &model.Current{
+				CurrentUser:        pgID("admin"),
+				CurrentDatabase:    "postgres",
+				Roles:              []model.RoleState{{ID: pgID("admin"), Login: true}, {ID: pgID("monitor")}},
+				Databases:          []model.Database{{Name: "app", Owner: "admin"}, {Name: "old", Owner: "admin"}, {Name: "postgres", Owner: "admin"}},
+				InspectedDatabases: []string{"app"},
+				OtherSchemas:       tt.other,
+			}
+			p, err := compute(t, desired, current, postgres.Dialect{}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			var warns []string
+			for _, w := range p.Warnings {
+				if strings.Contains(w, `"monitor"`) {
+					warns = append(warns, w)
+				}
+			}
+			if d := cmp.Diff(tt.wantWarns, warns, cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
+			}
+		})
+	}
+}
+
+// TestComputePruneEntangled checks that --prune keeps the databases and
+// schemas model.Current.Entangled names, with a warning, and drops the
+// others.
+func TestComputePruneEntangled(t *testing.T) {
+	t.Parallel()
+	db := func(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
+	sch := func(d, name string) model.Object { return model.Object{Type: model.ObjectSchema, Database: d, Schema: name} }
+	tests := []struct {
+		entangled map[model.Object]string
+		name      string
+		want      []string
+		wantWarns []string
+	}{
+		{
+			name: "nothing entangled",
+			want: []string{`app: DROP SCHEMA "old"`, `DROP DATABASE "old"`},
+		},
+		{
+			name:      "database",
+			entangled: map[model.Object]string{db("old"): "it is owned by role X"},
+			want:      []string{`app: DROP SCHEMA "old"`},
+			wantWarns: []string{`database "old": it is owned by role X, so it is not pruned; handle it manually`},
+		},
+		{
+			name:      "schema",
+			entangled: map[model.Object]string{sch("app", "old"): "it grants USAGE to role X"},
+			want:      []string{`DROP DATABASE "old"`},
+			wantWarns: []string{`schema "old" in database "app": it grants USAGE to role X, so it is not pruned; handle it manually`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app", Owner: "admin"}}}
+			current := &model.Current{
+				CurrentUser:        pgID("admin"),
+				CurrentDatabase:    "postgres",
+				Roles:              []model.RoleState{{ID: pgID("admin"), Login: true, Superuser: true}},
+				Databases:          []model.Database{{Name: "app", Owner: "admin"}, {Name: "old", Owner: "admin"}, {Name: "postgres", Owner: "admin"}},
+				Schemas:            []model.Schema{{Database: "app", Name: "old", Owner: "admin"}},
+				InspectedDatabases: []string{"app"},
+				Entangled:          tt.entangled,
+			}
+			p, err := compute(t, desired, current, postgres.Dialect{}, diff.Options{Prune: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tt.want, statements(p), cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("statements (-want +got):\n%s", d)
+			}
+			var warns []string
+			for _, w := range p.Warnings {
+				if strings.Contains(w, "it is not pruned") {
+					warns = append(warns, w)
+				}
+			}
+			if d := cmp.Diff(tt.wantWarns, warns, cmpopts.EquateEmpty()); d != "" {
+				t.Errorf("warnings (-want +got):\n%s", d)
 			}
 		})
 	}
