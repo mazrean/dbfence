@@ -101,7 +101,7 @@ Authentication is one of:
 - `aws_iam { region = "..." }`: an [Amazon RDS IAM authentication token](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html) for `host`, `port` and `user`, signed with the standard AWS credentials. `region` defaults to that of the AWS configuration (`AWS_REGION`). Needs `host`, not `socket`.
 - `gcp_iam {}`: a Google Cloud access token of the [application default credentials](https://cloud.google.com/docs/authentication/application-default-credentials) for a Cloud SQL IAM database user; `user` is the database user name of the IAM principal, which Cloud SQL derives from its email address as described in the [Cloud SQL IAM documentation](https://cloud.google.com/sql/docs/postgres/iam-logins).
 
-IAM tokens expire, so a new one is taken for every connection dbfence opens. They are sent as a cleartext password (MySQL: the `mysql_clear_password` plugin), so `tls` must be `"require"` or a verifying mode, except over a MySQL `socket`.
+Setups are shown in [Amazon RDS](aws-rds.md) and [Google Cloud SQL](gcp-cloud-sql.md). IAM tokens expire, so a new one is taken for every connection dbfence opens. They are sent as a cleartext password (MySQL: the `mysql_clear_password` plugin), so `tls` must be `"require"` or a verifying mode, except over a MySQL `socket`.
 
 ## `role "<label>"` / `user "<label>"`
 
@@ -125,20 +125,16 @@ The two are the same, except for the login default: `login` defaults to `false` 
 
 ### `aws_iam {}`
 
-The role logs in with an [Amazon RDS IAM authentication token](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.DBAccounts.html) instead of a password.
+The role logs in with an Amazon RDS IAM authentication token instead of a password. What this sets on the server is described in [Amazon RDS](aws-rds.md#users-that-log-in-with-iam).
 
-- PostgreSQL: the role is a member of `rds_iam`. The membership is granted, and never revoked by `member_of`, which need not list it. Plan fails when the server has no `rds_iam` role.
-- MySQL: the account is `IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'`, with a warning when the plugin is not active.
 - Cannot be combined with `password` or `auth_plugin`, and needs login (`user`, or `login = true`).
 - Without `aws_iam`, IAM authentication is left unmanaged: an existing `rds_iam` membership is revoked only by a `member_of` that omits it.
 
 ### `gcp_iam {}`
 
-The role is a [Cloud SQL IAM user, service account or group](https://cloud.google.com/sql/docs/postgres/iam-logins). Only the Cloud SQL Admin API creates those, so it must already exist: create it with `gcloud sql users create NAME --instance=INSTANCE --type=cloud_iam_user` (or `cloud_iam_service_account`, `cloud_iam_group`) or Terraform.
+The role is an existing Cloud SQL IAM user, service account or group. How these are created and handled is described in [Google Cloud SQL](gcp-cloud-sql.md#iam-users-service-accounts-and-groups).
 
 - Set `name` to the database user name Cloud SQL gives it (PostgreSQL: the email address, without `.gserviceaccount.com` for a service account; MySQL: the part before `@`).
-- dbfence never creates it (plan fails when it does not exist, and when the roles cannot be listed it is not created, with a warning) and does not change its authentication. Its other attributes, memberships and grants are managed as declared.
-- On PostgreSQL its memberships in `cloudsqliamuser`, `cloudsqliamserviceaccount` and `cloudsqliamgroup` are kept: `member_of` neither grants nor revokes them.
 - Cannot be combined with `password`, `auth_plugin` or `aws_iam`. A group is not a login: declare it as a `role`.
 
 ## `member_of`

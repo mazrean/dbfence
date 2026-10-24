@@ -8,7 +8,11 @@ written in HCL. Tables are out of scope; use your schema migration tool for thos
 - `apply` runs that SQL.
 - There is no state file: every run compares the HCL with the live server.
 
-Supported engines: MySQL 8.0+ and PostgreSQL.
+Supported engines: MySQL 8.0+ and PostgreSQL, including Amazon RDS and Google Cloud SQL:
+
+- dbfence can connect with RDS or Cloud SQL IAM database authentication instead of a password.
+- Users can be declared to log in with IAM (`aws_iam {}`, `gcp_iam {}`).
+- Passwords and endpoints can come from AWS Secrets Manager, GCP Secret Manager or Terraform state.
 
 ## Install
 
@@ -99,4 +103,5 @@ See [Safety](docs/safety.md) for the details.
 - [Passwords](docs/passwords.md): how passwords are compared and set
 - [Safety](docs/safety.md): what dbfence never drops or changes
 - [Required privileges](docs/privileges.md): what the connected user needs
+- [Amazon RDS](docs/aws-rds.md) and [Google Cloud SQL](docs/gcp-cloud-sql.md): IAM authentication and other setups
 - [Development](docs/development.md): tests, lint and the SQL building rules
