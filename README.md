@@ -4,11 +4,15 @@ Declarative management of the *outer frame* of MySQL and PostgreSQL servers —
 databases, users / roles, role memberships, privileges and PostgreSQL schemas —
 written in HCL. Tables are out of scope; use your schema migration tool for those.
 
-- `plan` compares the configuration with the live server and prints the SQL it would run (dry run). Passwords are redacted.
+- `plan` compares the configuration with the live server and prints the SQL it would run. Passwords are redacted.
 - `apply` runs that SQL.
-- dbfence keeps no state file. It always compares the HCL with the live server.
+- There is no state file: every run compares the HCL with the live server.
 
-Supported engines: MySQL 8.0+ and PostgreSQL. Membership `inherit` / `set` options need PostgreSQL 16+.
+Supported engines: MySQL 8.0+ and PostgreSQL, including Amazon RDS and Google Cloud SQL:
+
+- dbfence can connect with RDS or Cloud SQL IAM database authentication instead of a password.
+- Users can be declared to log in with IAM (`aws_iam {}`, `gcp_iam {}`).
+- Passwords and endpoints can come from AWS Secrets Manager, GCP Secret Manager or Terraform state.
 
 ## Install
 
@@ -16,321 +20,88 @@ Supported engines: MySQL 8.0+ and PostgreSQL. Membership `inherit` / `set` optio
 go install github.com/mazrean/dbfence@latest
 ```
 
-To try it on local PostgreSQL and MySQL servers, see [`examples/`](examples):
+## Quick start
 
-```sh
-docker compose -f examples/compose.yaml up -d --wait
-go run . -C examples/postgres plan
-```
-
-## Usage
-
-```sh
-dbfence validate          # load and evaluate every *.hcl file in the working directory
-dbfence plan              # dry run: print the SQL
-dbfence apply             # print the SQL, ask for "yes", then execute
-dbfence -C infra/db plan  # use the *.hcl files in infra/db instead
-```
-
-Like Terraform, dbfence reads every `*.hcl` file directly in the directory
-(not in subdirectories) and merges them into one configuration, so other
-HCL files (Packer, Nomad, ...) must not share the directory.
-
-| Flag | Commands | Meaning |
-|---|---|---|
-| `-C`, `--chdir` (`$DBFENCE_CHDIR`) | all | The directory whose `*.hcl` files are the configuration (default `.`, the working directory; an empty value also means the default) |
-| `--prune` | plan, apply | Drop databases, schemas and roles that are not declared (without it they only produce warnings) |
-| `--force-password` | plan, apply | Set declared passwords even if they cannot be verified or already match. The plan then always contains a password statement for every role that declares one |
-| `--show-secrets` | plan, apply | Turn off all redaction: print passwords instead of `'<redacted>'`, and print known secrets in every message on stdout and stderr, errors included (see [Output and exit codes](#output-and-exit-codes)) |
-| `--target ADDRESS` | plan, apply | Plan only the changes of a declared block and the creation of the objects they need (repeatable; see [Targeting](#targeting)). Cannot be combined with `--prune` |
-| `--detailed-exitcode` | plan | Exit with 2 when there are changes. Warnings alone exit with 0 |
-| `--auto-approve` | apply | Skip the confirmation prompt |
-| `--version` | — | Print the version |
-
-### Targeting
-
-Like Terraform's `-target`, `--target` limits `plan` and `apply` to some declared blocks, for example to create a new user before the rest of a change is ready:
-
-```sh
-dbfence plan --target user.app --target database.analytics
-```
-
-- An address is `role.<label>` or `user.<label>` (role and user blocks share their labels, so either form finds both), `database.<label>` or `schema.<label>`. An address that names no declared block is an error. `grant` and `ignore` blocks have no address: a grant belongs to its role and to its database or schema.
-- A role or user selects its own create or alter, its default roles (MySQL), its `member_of` memberships (as the member, not the memberships others have in it) and the privileges granted to or revoked from it. A database or schema selects its own create or alter and the privileges on it, PUBLIC's included.
-- The plan always compares the whole configuration with the server and then keeps only the selected changes. Statements planned together with a selected one stay with it, even when they act on other roles, such as a revoke with `CASCADE` and the grants that restore the declared privileges it took away; no other unselected change is planned.
-- When a selected change names a role, database or schema that the plan creates (a grantee, an owner, a member's role, a schema's database), that create is selected too. Nothing else is.
-- `--prune` cannot be combined with `--target`: undeclared objects have no address, so nothing would be dropped.
-- Every targeted plan starts with the warning `--target is in effect: ...`. Run `plan` without `--target` afterwards to see what is left.
-- The [safety check](#independent-safety-check) runs on the selected plan. When the whole plan passes it but the selection does not (a left-out change made a selected one safe), the command fails with `dbfence: error: the plan selected by --target fails the safety check: ...; select more objects or run without --target`.
-
-### Output and exit codes
-
-`plan` writes annotated SQL to stdout (abridged):
-
-```sql
--- warning: unmanaged user "stray" (use --prune to drop it)
-
--- [create] user "app"
-CREATE ROLE "app" WITH LOGIN CONNECTION LIMIT 20 PASSWORD '<redacted>';
-
--- [create] schema "api" in database "app"
--- (on database "app")
-CREATE SCHEMA "api" AUTHORIZATION "app_owner";
-
--- ...
-
--- [revoke] CONNECT, TEMPORARY on database "app" from PUBLIC
-REVOKE CONNECT, TEMPORARY ON DATABASE "app" FROM PUBLIC;
-
--- Plan: 5 to create, 0 to change, 4 to grant, 1 to revoke, 0 to drop (10 statements).
-```
-
-- Each change starts with `-- [create|update|grant|revoke|drop] <resource>`. Statements that must run in another database are preceded by `-- (on database "x")`. A PostgreSQL revoke of another grantor's grant runs as that grantor and is preceded by `-- (as role "g")` (or `-- (on database "x", as role "g")`); `apply` runs it in a transaction of its own under `SET LOCAL ROLE`, so a failure leaves the session's role unchanged.
-- Unmanaged roles are reported as `unmanaged user "x"` when they can log in, and `unmanaged role "x"` otherwise.
-- A PostgreSQL revoke that cascades is preceded by `-- CASCADE: privileges on <object> that "<grantor>" granted to ... are revoked too; declared ones are granted again` (or `memberships in "<role>" that ...`). Such explanatory comment lines are only printed; they are not part of the SQL sent to the server.
-- When something is dropped, the summary is followed by `-- DESTRUCTIVE: this plan drops N objects: ...`.
-- An empty plan prints `-- No changes. The server matches the configuration.`, or, when there are warnings, `-- No changes to apply. See the N warnings above ...`.
-- Warnings are also written to stderr as `warning: ...`, so they stay visible when stdout is redirected.
-- Control characters (other than line breaks and tabs that separate lines and columns of output) are printed as Go escapes (`\x1b`, `\r`) everywhere on stdout and stderr; control characters inside names read from the server, line breaks included, are escaped in the plan, warnings, `apply` progress and errors. Messages that the MySQL client library logs itself (prefixed `[mysql]`, for example an authentication plugin the server asked for that is not supported) go to stderr the same way, and so do the warnings and errors that the AWS and GCP SDKs and the HCP Terraform client log. The SDKs' debug logs, which quote whole responses (secret payloads and state files included), are not printed: `GOOGLE_SDK_GO_LOGGING_LEVEL` and `AZURE_SDK_GO_LOGGING` are ignored. The SQL sent to the server is unchanged.
-- As a last line of defense, every known secret is replaced by `<redacted>` wherever it appears in stdout and stderr, for example in a server error or a name that happens to equal a password. Known secrets are role passwords, the `password` of the `connection` block and the IAM tokens dbfence sends instead, the userinfo (user name and password), query string, query values and fragment of a literal `tfstate` state URL (`https://user:token@host/...?token=...`), and every string returned by `secretenv`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate` (including strings nested in their objects and lists), and every string a function computes from them (such as a field `jsondecode` takes out of a secret, or `upper(secretenv("PW"))`). Besides its raw form, a secret is also found NFC-normalised, URL-encoded (as `urlencode` does, and as a URL query or path), base64-encoded (standard and URL alphabets), JSON-escaped, Go-quoted and SQL-quoted (`'` doubled, with or without `\` doubled as well) and identifier-quoted (`"` or `` ` `` doubled), each also with control characters escaped as printed. A multi-line secret is found as a whole across output lines (a line that may begin one is printed once the next lines show it does not), and each of its lines is also found alone. Secrets shorter than 4 bytes are not redacted, since they would match ordinary output. A name or host taken from `tfstate` (or equal to a password) is redacted too: use `env` or a literal for values that should stay visible. A secret equal (ignoring case) to an engine name or to the user or database of the connection, such as the password of a default `postgres:postgres` or `root:root` account, is not redacted, since output shows those names by design; SQL output still prints passwords as `'<redacted>'`. `--show-secrets` turns this redaction off.
-
-`apply` prints the same plan, asks for `yes` (anything else, or a closed stdin, cancels with exit 1), and prints `[k/N] <statement>` for each statement (its comment lines first). Statements run one by one, without a transaction, and apply stops at the first error. The error says how many statements were applied; run `plan` again to see what is left. An interrupted apply stops before the next statement, and the error ends with the cause, such as `interrupt signal received`.
-
-`validate` prints a summary such as `The configuration is valid (postgres: 1 database, 3 roles, 1 schema, 3 privileges).`
-
-Errors are printed to stderr as `dbfence: error: ...` (configuration diagnostics follow unindented) and exit with 1. The source lines that diagnostics quote show the value of every `password` assignment (to the end of its line, and further while it has open brackets, heredocs or `${ ... }` / `%{ ... }` template sequences, so a multi-line `format(...)`, `trimspace(<<EOT ...)` or a `${ ... }` spanning lines is hidden as a whole) as `*`, even with `--show-secrets`, since an error can come before the value is known to be a secret. A file with a syntax error that assigns `password` is quoted without source: its diagnostics name the file and line only; the literal strings of `password` values (also inside lists, conditionals and function calls other than `env`, `secretenv`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate`, whose arguments name the secret) are known secrets as soon as the file is parsed. `plan --detailed-exitcode` exits with 2 when the plan has changes; everything else that succeeds exits with 0.
-
-## Configuration
+Write the configuration in `*.hcl` files. This example is for PostgreSQL; see [`examples/mysql`](examples/mysql) for MySQL.
 
 ```hcl
-connection "postgres" {                                # "postgres" or "mysql"
+connection "postgres" {
   host     = "db.internal"
   user     = "admin"
   password = secretenv("PGPASSWORD")
   tls      = "verify-full"
 }
 
-role "app_owner" {}                                    # role: NOLOGIN
+role "readonly" {}                 # role: cannot log in
 
-user "app" {                                           # user: LOGIN
-  password         = jsondecode(gcp_secretmanager("projects/p/secrets/app")).password
-  member_of        = [role.readonly.id, { role = role.app_owner.id, inherit = false }]
-  connection_limit = 20                                # PostgreSQL only
-}
-
-user "batch" {
-  aws_iam {}                                           # logs in with an RDS IAM token
+user "app" {                       # user: can log in
+  password  = secretenv("APP_PASSWORD")
   member_of = [role.readonly.id]
 }
 
-role "readonly" {}
-
 database "app" {
-  owner    = role.app_owner.name                       # PostgreSQL only
-  encoding = "UTF8"                                    # PostgreSQL: encoding / lc_collate / lc_ctype
-}
-
-schema "api" {                                         # PostgreSQL only
-  database = database.app.name
-  owner    = role.app_owner.name
-}
-
-grant {
-  role       = user.app.id
-  database   = database.app.name
-  privileges = ["CONNECT", "TEMPORARY"]
+  owner = user.app.name
 }
 
 grant {
   role       = role.readonly.id
-  database   = schema.api.database
-  schema     = schema.api.name
-  privileges = ["USAGE"]
-}
-
-grant {                                                # PostgreSQL only: undeclared roles may not connect
-  role       = "PUBLIC"
   database   = database.app.name
-  privileges = []
-}
-
-ignore {                                               # unmanaged objects to neither warn about nor prune
-  roles = ["datadog", "rds_.*"]                        # anchored regular expressions
+  privileges = ["CONNECT"]
 }
 ```
 
-Every SQL statement is sent on its own, so the server rejects a query that holds a second statement: PostgreSQL statements use the extended query protocol, and MySQL connections do not allow multiple statements.
-
-### Blocks
-
-- **`connection "<engine>"`**: required, exactly one; the label is `"postgres"` or `"mysql"`. The attributes below, and the password, are always taken from the configuration: on PostgreSQL the matching `PG*` environment variables and `~/.pgpass` are not read. TLS certificate settings (`PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `~/.postgresql/`), `PGOPTIONS` and `PGSERVICE` still apply as in libpq.
-  - `host`: required, not empty. On PostgreSQL a `host` starting with `/` is the directory of a Unix-domain socket.
-  - `socket` (MySQL only): the path of a Unix-domain socket, instead of `host` and `port`.
-  - `user`: required, not empty.
-  - `port`: default 5432 (PostgreSQL) or 3306 (MySQL).
-  - `database`: the database to connect to; default `"postgres"` on PostgreSQL, none on MySQL.
-  - `tls`: `"disable"`, `"prefer"` (TLS when the server supports it), `"require"` (always TLS, the certificate is not verified) or `"verify-full"` (always TLS, the certificate and host name are verified: on PostgreSQL against `tls_ca_file`, `PGSSLROOTCERT` or `~/.postgresql/root.crt`, otherwise the system roots; on MySQL against `tls_ca_file` or the system roots). PostgreSQL also takes `"allow"` (TLS only when the server requires it) and `"verify-ca"` (the certificate is verified, the host name is not). The default is `"prefer"`, `"require"` with IAM authentication, and `"disable"` with `socket`. `"verify-full"` cannot be used with `socket`.
-  - `tls_ca_file`: a PEM file of the certificates that verify the server, such as the RDS or Cloud SQL CA bundle; only with `"verify-ca"` or `"verify-full"`. A relative path is in the configuration directory.
-  - `connect_timeout`: seconds, default 10. On MySQL it covers the handshake and session setup as well as the dial (`connect to mysql: timed out after 10s`). PostgreSQL reports a host's timeout once, even with `tls = "prefer"`.
-  - Authentication, one of:
-    - `password`: optional; without it (and without the blocks below) dbfence connects without a password.
-    - `aws_iam { region = "..." }`: an [Amazon RDS IAM authentication token](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html) for `host`, `port` and `user`, signed with the standard AWS credentials. `region` defaults to that of the AWS configuration (`AWS_REGION`). Needs `host`, not `socket`.
-    - `gcp_iam {}`: a Google Cloud access token of the [application default credentials](https://cloud.google.com/docs/authentication/application-default-credentials) for a Cloud SQL IAM database user; `user` is the database user name of the IAM principal, which Cloud SQL derives from its email address as described in the [Cloud SQL IAM documentation](https://cloud.google.com/sql/docs/postgres/iam-logins).
-
-    IAM tokens expire, so a new one is taken for every connection dbfence opens; they are known secrets. They are sent as a cleartext password (MySQL: the `mysql_clear_password` plugin), so `tls` must be `"require"` or a verifying mode, except over a MySQL `socket`.
-- **`role "<label>"` / `user "<label>"`**: these two are the same thing, except for the login default.
-  - `name` overrides the label. Use it, with an identifier-safe label, for names with upper case, spaces or quotes, because only such labels can be referenced (`user.<label>.name`).
-  - `password`, `login` and `member_of` work on both engines.
-  - PostgreSQL only: `superuser`, `createdb`, `createrole`, `inherit`, `replication`, `bypassrls` and `connection_limit` (-1 or more).
-  - MySQL only: `host` (default `"%"`, lower-cased, must not be empty or contain `@`) and `auth_plugin` (letters, digits and `_`; `AWSAuthenticationPlugin` is set with its authentication string `AS 'RDS'`). On MySQL a non-login role is a locked account. `auth_plugin` works without a password for passwordless plugins; a login account with neither gets a warning.
-  - Attributes you leave out are not managed, except `login`: it is always managed, and defaults to `false` for `role` (NOLOGIN / ACCOUNT LOCK) and `true` for `user`. Declaring an existing login account as a `role` without `login = true` disables its login.
-  - `name` and `host` accept only literals and functions, not references to other blocks.
-  - Names are checked against the engine limits: 63 bytes on PostgreSQL; 32 characters for MySQL users, 64 for databases and 255 for hosts. PostgreSQL role names `public` (in any case), `none` and `pg_*` are reserved.
-  - `password = ""` is an error on PostgreSQL. Omit `password` to leave it unmanaged.
-  - `aws_iam {}`: the role logs in with an [Amazon RDS IAM authentication token](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.DBAccounts.html) instead of a password, like `connection { aws_iam {} }`. On PostgreSQL it is a member of `rds_iam` (granted, and never revoked by `member_of`, which need not list it; plan fails when the server has no `rds_iam` role); on MySQL it is `IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'`, with a warning when the plugin is not active. It cannot be combined with `password` or `auth_plugin`, and needs login (`user`, or `login = true`). Without `aws_iam`, IAM authentication is left unmanaged: an existing `rds_iam` membership is revoked only by a `member_of` that omits it.
-  - `gcp_iam {}`: the role is a [Cloud SQL IAM user, service account or group](https://cloud.google.com/sql/docs/postgres/iam-logins), which only the Cloud SQL Admin API creates, so it must already exist: create it with `gcloud sql users create NAME --instance=INSTANCE --type=cloud_iam_user` (or `cloud_iam_service_account`, `cloud_iam_group`) or Terraform, and set `name` to the database user name Cloud SQL gives it (PostgreSQL: the email address, without `.gserviceaccount.com` for a service account; MySQL: the part before `@`). dbfence never creates it (plan fails when it does not exist, and when the roles cannot be listed it is not created, with a warning) and does not change its authentication; its other attributes, memberships and grants are managed as declared. On PostgreSQL its memberships in `cloudsqliamuser`, `cloudsqliamserviceaccount` and `cloudsqliamgroup` are kept: `member_of` neither grants nor revokes them. It cannot be combined with `password`, `auth_plugin` or `aws_iam`. A group is not a login: declare it as a `role`.
-- **`member_of`**: a list of role ids, or objects `{ role = <id>, admin = bool, inherit = bool, set = bool }`; both can be mixed.
-  - When `member_of` is set, it must be complete: memberships that aren't listed are revoked. Cycles, duplicates and self-membership are errors.
-  - Options written in an object are managed; omitted ones (and the string form) are left alone.
-  - `admin` (`WITH ADMIN OPTION`) works on both engines. On PostgreSQL, revoking it cascades to the memberships the member granted with it, and declared ones are granted again. On MySQL, removing it revokes the role and grants it again. The connected user's ADMIN OPTION is never revoked (a warning is printed). Likewise `inherit = false` and `set = false` are not applied to a membership of the connected user that has, or may have, `INHERIT` or `SET` (a warning is printed); they apply to its new memberships.
-  - `inherit` and `set` are PostgreSQL 16+ only (a validation error on MySQL; plan fails on older PostgreSQL). On PostgreSQL 16+ the role's `inherit` attribute is only the default for new grants, so dbfence also sets `inherit` on the role's existing memberships to match, except those that declare their own `inherit`. A warning is printed while the two disagree.
-  - On PostgreSQL 16+ each grantor's grant is changed with `GRANTED BY`; an option counts as held when any grant has it.
-  - On MySQL the declared `member_of` becomes exactly the account's default roles (`SET DEFAULT ROLE`), so the roles are active without `SET ROLE`. The connected account's default roles are never narrowed: they also keep the memberships it keeps and its current default roles, and when those cannot be read its default roles are left unchanged with a warning.
-- **`database "<label>"`**: `name`, `owner`, `encoding`, `lc_collate` and `lc_ctype` (PostgreSQL; the last three are create-only; none may be empty), or `charset` and `collation` (MySQL; letters, digits and `_`).
-- **`schema "<label>"`**: PostgreSQL only. Takes `database`, `name` and `owner`. `schema "public"` (or another template schema) can also be declared in a database the plan creates; only its owner and grants are planned.
-- **`grant`**: takes `role`, `database` (or `database_pattern` on MySQL), an optional `schema` (PostgreSQL), `privileges` and `with_grant_option`.
-  - `ALL` expands to every privilege of that object type. `GRANT OPTION` is not a privilege; use `with_grant_option = true`.
-  - A declared role's privileges on declared databases or schemas that aren't listed are revoked. Grants to an object's owner have no effect (a warning is printed).
-  - The database (and schema) must be declared.
-  - MySQL: only database-level privileges (`ON db.*`) are managed. Every grant block for the same account and database (or pattern) must use the same `with_grant_option`, because MySQL keeps one grant option per database. `_` and `%` in `database` names are escaped (`my\_app`), so a `database` grant never acts as a wildcard. With `partial_revokes` ON, MySQL reads names literally, so escaped rows of declared databases are revoked and granted again on the literal name.
-- **`grant` with `database_pattern`** (MySQL only): a wildcard grant such as `ON tenant\_%.*`.
-  - The pattern is used verbatim: `%` and `_` are wildcards and `\` escapes them (write `"tenant\\_%"` in HCL for `tenant\_%`). It needs at least one wildcard, and the databases it matches need not be declared.
-  - A declared role's privileges on a declared pattern that aren't listed are revoked. Patterns that no grant block declares are not managed; a warning is printed when one held by a declared account matches a declared database.
-  - MySQL does not add up database-level grants: for an account it uses only the most specific `mysql.db` row that matches a database. When an account has both a `database` grant and a matching pattern, or two matching patterns, plan warns that the pattern's privileges don't apply to that database.
-  - Needs `partial_revokes` OFF (plan fails otherwise, because MySQL then reads `%` and `_` literally). Wildcards in database-level grants are deprecated since MySQL 8.2 and are to become literals in a future release.
-
-  ```hcl
-  grant {
-    role             = user.app.id
-    database_pattern = "tenant\\_%"          # tenant_a, tenant_b, ... (not tenantX)
-    privileges       = ["SELECT", "INSERT"]
-  }
-  ```
-- **`grant` to `PUBLIC`** (PostgreSQL only): `role = "PUBLIC"` (any case, no role block needed).
-  - PUBLIC is managed only on databases and schemas that have at least one PUBLIC grant block. There, PUBLIC's undeclared privileges are revoked; elsewhere they are left alone.
-  - `privileges = []` (allowed only for PUBLIC) revokes everything PUBLIC holds on that object. It cannot be combined with another PUBLIC grant block on the same object.
-  - `with_grant_option = true` is invalid for PUBLIC.
-  - PostgreSQL's defaults are visible: `CONNECT` and `TEMPORARY` on every database, and `USAGE` on schema `public` (`CREATE` and `USAGE` before PostgreSQL 15). To manage the `public` schema's PUBLIC grants, declare `schema "public" { database = ... }`.
-  - When a role loses a privilege that PUBLIC still holds on an unmanaged object, the plan warns that the role keeps it through PUBLIC. Add a PUBLIC grant block (for example `privileges = []`) to take it away.
-- **`ignore`**: takes `roles`, `databases` and `schemas` (PostgreSQL) regexps. Each pattern must be a valid regexp on its own and is anchored to the whole string; `.` also matches a newline.
-  - On MySQL, `roles` patterns match the name or `name@host`: `"datadog"` ignores every host, `"datadog@%"` only the host `%` (`%` is a literal here), and `"datadog@10\\.0\\.0\\.%"` one host. An account with an empty host (shown as `"name"@""`) matches `"name@"`.
-  - `schemas` patterns match the schema name or `<database>.<schema>`: `"staging"` ignores it in every database, `"analytics\\.staging"` only in `analytics` (escape the dot; an unescaped `.` matches any character).
-  - Declared databases and schemas stay managed even when a pattern matches them.
-
-References: `role.<label>` and `user.<label>` expose `name`, `host` and `id`. `id` is `name@host` on MySQL; use it in `member_of` and `grant.role`, because a bare name means `name@%`. `database.<label>.name` and `schema.<label>.name` / `.database` are also available. On MySQL, `role = "public"` without a host is an error; write `"public@%"` or use `.id`.
-
-### What `--prune` never drops
-
-Built-in objects are never reported or pruned:
-
-- PostgreSQL roles `postgres`, `pg_*`, `rdsadmin`, `rdsrepladmin`, `rdstopmgr`, `rds_*`, `cloudsql*`, `azure*` and `alloydb*`; databases `postgres`, `template0`, `template1`, `rdsadmin`, `cloudsqladmin`, `azure_maintenance`, `azure_sys` and `alloydbadmin`; schemas `public`, `information_schema` and `pg_*`.
-- MySQL accounts `root`, `mariadb.sys`, `debian-sys-maint`, `mysql.*`, `rds*`, `aws_*`, `cloudsql*` and `azure_*`; databases `mysql`, `sys`, `information_schema`, `performance_schema` and `ndbinfo`.
-
-Also kept, with a warning under `--prune` (both engines; on MySQL the database is the `database` of the `connection` block, read through `DATABASE()`): the connected user and the database it is connected to, roles the configuration references without declaring them, roles granted to the connected user, and owners of ignored databases or schemas (PostgreSQL also reads the schema owners and schema privileges of every other connectable, undeclared and not ignored database). Changes to the connected user that would lock it out are skipped, and so is `inherit = false` on it (`NOINHERIT` would take away the privileges of its roles). Memberships of other roles through which the connected user is a member of a role (`admin` → `ops` → `dba`: the membership of `ops` in `dba`) are not revoked while it has no other path to that role, with a warning, and on MySQL their ADMIN OPTION is then not removed either, since that revokes the role and grants it again. Roles granted to the connected user (`ops` above) keep the `INHERIT` attribute while they have a membership with INHERIT, and their existing memberships keep `INHERIT` and `SET` (`inherit = false` and `set = false` are skipped with a warning; new memberships may still declare them): PostgreSQL 16 needs both options on every membership along the chain, and before 16 the `INHERIT` attribute of `ops` decides whether `admin` gets the privileges of `dba`. On PostgreSQL, `CONNECT` on the database dbfence is connected to is not revoked (a warning is printed; the other privileges of the revoke still are) from PUBLIC, the connected user or a role it inherits privileges from, when the connected user is not a superuser and would hold `CONNECT` there through none of them afterwards: it could not connect again. For the same reason its owner is not changed (`ALTER DATABASE ... OWNER TO` moves the old owner's privileges to the new one) when the connected user holds `CONNECT` there only as, or through, the old owner, with a warning. A PostgreSQL revoke whose `CASCADE` reaches the connected user is skipped with a warning as well: a revoke of `CONNECT` on that database, or of its grant option, when the grants it removes include one to PUBLIC, the connected user or a role it inherits privileges from (and the connected user is not a superuser), and (16+) a revoke of a membership or its ADMIN OPTION when the memberships it removes include one of the connected user or of a role it is a member of, directly or transitively (it may have that membership, or its `INHERIT` and `SET`, only through the removed grant).
-
-PostgreSQL `--prune` of a role runs `REASSIGN OWNED BY ... TO CURRENT_USER` and `DROP OWNED` in every connectable database, then `DROP ROLE`. Privileges and memberships the pruned role granted to others are revoked by `DROP OWNED`, except grants it made while holding an owner's privileges through a membership with INHERIT. dbfence therefore revokes those memberships first (with `CASCADE` on PostgreSQL 16+ for memberships it granted from them). Afterwards it grants the declared ones again (memberships only on PostgreSQL 16+), unless the grantee still holds the privilege from another grantor such as the owner; this needs the connected user to be allowed to grant them, and a warning is printed when owner memberships or re-grants cannot be handled. A role is kept instead, with a warning, when its `DROP OWNED` would revoke with `CASCADE` a grant it made, directly or through other roles, that the connected user may rely on: `CONNECT` on the database dbfence is connected to, granted to PUBLIC or to the connected user or a role it is a member of (when the connected user is not a superuser), or (16+) a membership of the connected user or of a role it is a member of, including the grants that carry its `INHERIT` and `SET`. A role is also kept, with a warning naming it and the database, when it owns objects or holds or granted privileges (`pg_shdepend`) in a database where `DROP OWNED` runs and a role with a name dbfence does not manage (see below) owns objects or holds privileges too: privileges on tables, functions and types are not inspected, so its `DROP OWNED` could revoke one it granted to that role. Roles that own objects or hold privileges in databases dbfence cannot connect to (no `CONNECT`, `ALLOW_CONNECTIONS false`, templates, provider databases) or that are ignored are named in a warning, even without `--prune`: `DROP ROLE` fails for them until those objects are reassigned or dropped in that database.
-
-### Names dbfence does not manage
-
-Names read from the server are treated as untrusted input. Roles (MySQL accounts, by name or host), databases and schemas whose names contain control characters (C0, DEL, C1), are not valid UTF-8, or are longer than the engine allows (PostgreSQL: 63 bytes; MySQL: 32 characters for user names, 255 for hosts, 64 for databases) are left out of the inspected state, with one warning per object: `role "x\n": its name contains control characters, so dbfence does not manage it (...); handle it manually`. Nothing is created, altered, granted, revoked or dropped for them, `--prune` never drops them, and memberships, default roles and privileges that name them are left alone. When such a role is the grantor of a grant that differs from the configuration (PostgreSQL), that change is skipped with a warning instead of naming the grantor in `GRANTED BY` or `SET ROLE`. Likewise a PostgreSQL revoke whose `CASCADE` would also take privileges or memberships from such a role (because they were granted, directly or transitively, by the role losing them) is skipped with a warning to handle it manually, and `--prune` keeps (with a warning) a role whose drop would change one of these objects. On PostgreSQL that is a role that is a member of such a role, has one as a member or as the grantor of one of its memberships, owns such a database or schema (`REASSIGN OWNED` would change its owner), holds or granted a privilege on one, holds a privilege such a role granted, or whose `DROP OWNED` would revoke a privilege or (16+) membership it granted, directly or through other roles, to such a role or in such a role, on an object it does not own. The schemas checked are those of declared databases and of the other connectable databases where `REASSIGN OWNED` and `DROP OWNED` run; grants on tables, functions and other objects inside schemas are not inspected. Because both statements also change shared objects from any database, PostgreSQL also keeps (naming them in the warning) a role that owns or has privileges on a tablespace, a parameter (`GRANT SET ON PARAMETER`), or a database dbfence does not read (templates and databases with `ALLOW_CONNECTIONS false` that are not declared), whatever its name. On MySQL that is an account granted to such an account or one of its default roles, one that has such an account as a granted or default role, or one that holds privileges on such a database, or on tables, columns or routines in one (`mysql.tables_priv`, `columns_priv`, `procs_priv`), or a `PROXY` privilege for such an account (`mysql.proxies_priv`) (`DROP USER` removes all of them; when those tables cannot be read, a warning says that their rows are not checked); the default roles of an account that has such a role as a default role are not set either. `--prune` also keeps (with a warning to handle it manually) an undeclared database or schema whose drop would drop such objects: on PostgreSQL, a database or schema owned by such a role or granting a privilege to one, a database holding a schema with such a name or owned by or granting to such a role, and a database in which such a role owns objects or holds privileges (`pg_shdepend`, also for databases dbfence cannot connect to), and a schema containing tables, functions or types in a declared database where such a role owns objects or holds privileges, or that also contains a schema with such a name or owned by such a role, whose objects may depend on it (which schema those objects are in, and what depends on what, is not read; a schema without them is dropped without `CASCADE`, which fails if anything still depends on it). PostgreSQL `--prune` also keeps every undeclared database dbfence cannot connect to (no `CONNECT`, or the connection fails), since what it contains is not known. A connected user with such a name is an error. Declared names (and `owner`, `member_of`, grant `role`/`database`/`schema`/`database_pattern`) must not contain control characters either.
-
-### Independent safety check
-
-Before `plan` prints its result and before `apply` asks for confirmation, dbfence checks the finished plan (and with `--target`, also the selected plan that is printed and executed) again, separately from the code that computed it, against the rules above: no drop (or `REASSIGN OWNED` / `DROP OWNED`) of the connected user, of built-in, ignored, declared or referenced roles, of roles granted to the connected user or of owners of ignored objects; no `DROP OWNED` of a role in a database unless `REASSIGN OWNED` of the same role ran there first; no `REASSIGN OWNED` or `DROP OWNED` (PostgreSQL) of a role in a database where both it and a role dbfence does not manage own objects or hold privileges; no drop of the connected database or of built-in, ignored or declared databases and schemas, nor of those whose drop would drop objects of or privileges held by roles, or schemas, dbfence does not manage, or whose contents it could not read; nothing dropped without `--prune`; no change to the connected user that disables its login, locks it, removes its superuser status or sets connection limit 0 on a non-superuser, sets `NOINHERIT` on it, or sets `INHERIT FALSE` or `SET FALSE` on a membership of it that has (or, when memberships are unreadable, may have) that option, nor `NOINHERIT` on a role granted to the connected user that has a membership with INHERIT, nor `INHERIT FALSE` or `SET FALSE` on an existing membership of such a role that has that option; no revoke of the connected user's memberships or ADMIN OPTION, nor of another role's membership through which the connected user is the last to reach a role it is a member of (checked statement by statement, so a revoke that is granted again later still counts); no revoke of `CONNECT` on the connected database (PostgreSQL) after which the connected user, not a superuser, no longer holds it through PUBLIC, itself or a role it inherits privileges from (when privileges are unreadable, any such revoke from them), counting the roles whose grants its `CASCADE` removes, also for a revoke of only the grant option, as losing `CONNECT`; no revoke of a membership or its ADMIN OPTION (PostgreSQL) whose `CASCADE` removes a membership of the connected user or of a role granted to it; no `DROP OWNED` (PostgreSQL) whose `CASCADE` removes a grant of `CONNECT` on the connected database or a membership, made directly or transitively by the dropped role, to PUBLIC, the connected user or a role granted to it; no `ALTER DATABASE ... OWNER TO` of the connected database (PostgreSQL) that moves the old owner's `CONNECT` away in the same way (when privileges are unreadable, any owner change to a role it does not inherit privileges from); no `SET DEFAULT ROLE` that removes one of the connected account's current default roles (MySQL; all its granted roles when the default roles cannot be read); and no statement that names (as target, grantee, `GRANTED BY` grantor, owner or default role), or runs as, a role, database or schema dbfence does not manage (see above). A plan that breaks one of them is still printed, but the command fails with exit 1 and `dbfence: error: internal safety check failed: ... (this is a bug in dbfence; please report it)`, and `apply` executes nothing.
-
-Known limits of these protections:
-
-- They fail safe rather than exact. Under `--prune` a role is kept when it granted the connected user `CONNECT` on the connected database or a membership on its chain, even if the connected user also holds them another way (for example through PUBLIC); drop such a role by hand.
-- A schema matched by `ignore.schemas` in a declared database is not checked for views or functions that depend on a schema `--prune` drops with `CASCADE`.
-- The `sqlfragment` lint rule (see Development) catches mistakes, not deliberately obfuscated code.
-
-### Functions
-
-| Function | Returns |
-|---|---|
-| `env(name, [default])` | An environment variable. It is an error if the variable is unset and no default is given |
-| `secretenv(name, [default])` | Like `env`, for a variable that holds a secret such as a password: its value is treated as a secret (see below) |
-| `aws_secretsmanager(secret_id, [json_key])` | An AWS Secrets Manager secret string, or one key of a JSON secret (a string, number or boolean; use `jsondecode(aws_secretsmanager(id))` for objects and arrays). Standard AWS credentials and `AWS_ENDPOINT_URL` apply |
-| `gcp_secretmanager(name, [version])` | A GCP Secret Manager payload. `name` is `projects/<p>/secrets/<s>[/versions/<v>]` (regional `locations/` names are not supported), and `version` defaults to `latest` |
-| `tfstate(url, address)` | A value from a Terraform state on `s3://`, `gs://`, a local path, and so on. Relative paths are resolved against the configuration directory. Examples: `aws_db_instance.main.address`, `output.db_host` |
-| `urlencode(str)` | `str` percent-encoded for any URL part, such as the userinfo of a `tfstate` URL. A space becomes `%20` (not `+` as in Terraform) and `+` becomes `%2B` |
-
-A subset of the cty standard library is also available: `abs`, `base64decode`, `base64encode`, `chomp`, `coalesce`, `concat`, `contains`, `csvdecode`, `distinct`, `flatten`, `format`, `formatlist`, `join`, `jsondecode`, `jsonencode`, `keys`, `length`, `lookup`, `lower`, `merge`, `regex`, `replace`, `split`, `substr`, `tolist`, `tomap`, `tonumber`, `toset`, `tostring`, `trimspace`, `upper` and `values`. `lookup(map, key, default)` requires all three arguments.
-
-Results of `secretenv`, `aws_secretsmanager`, `gcp_secretmanager` and `tfstate`, and every value computed from them, are treated as secrets: when a function fails on such a value (for example `tonumber(secretenv("PW"))`), its error is replaced by `the error is not shown because the arguments include a secret value`, and a duplicate key error of a `for` expression does not show a secret-derived key. `env` is not: use `secretenv` for environment variables that hold passwords.
-
-Each secret is fetched once per run. Secret payloads and `base64decode` results must be valid UTF-8, and strings are NFC-normalised (a password in decomposed Unicode form reaches the server composed).
-
-### Passwords
-
-dbfence compares a declared password with the stored verifier without changing it:
-
-- **PostgreSQL**: `SCRAM-SHA-256` and `md5`, read from `pg_authid`. Reading them needs superuser. Under `password_encryption = scram-sha-256` an `md5` verifier counts as a mismatch, so setting the password again upgrades it to SCRAM. A password that looks like a verifier (`md5` + 32 characters, or `SCRAM-SHA-256$...`) is an error, because PostgreSQL would store it as is.
-- **MySQL**: `caching_sha2_password`, `mysql_native_password` and `sha256_password`, read from `mysql.user`. Other plugins cannot be compared and always produce a warning. When a password is declared and the account still has a secondary password kept by `RETAIN CURRENT PASSWORD` (MySQL 8.0.14+), plan adds `ALTER USER ... DISCARD OLD PASSWORD`, so that only the declared password logs in. The connected account keeps its secondary password (with a warning), because dbfence may be logged in with it.
-
-Passwords are sent in plaintext (`PASSWORD '...'`, `IDENTIFIED BY '...'`), so that the server hashes them with its own settings (`password_encryption`, `scram_iterations`) and password policies apply (`passwordcheck` / `credcheck`, MySQL `validate_password`). As a consequence, PostgreSQL statement logging (`log_statement = ddl` or `all`, and `log_min_error_statement` for failed statements) records the password; MySQL rewrites passwords in its logs. Disable such logging for the dbfence session or role if that matters.
-
-When a statement with a password fails, the server's message is shown up to its first quote, and nothing after it (later lines included), because servers quote parts of the statement in their messages. Policy rejections such as `Your password does not satisfy the current policy requirements` contain no quotes and are shown in full. `--show-secrets` shows the whole message.
-
-Verifiers come from the server and are checked before use: a verifier or authentication string longer than 1024 bytes, or a SCRAM iteration count below 1 or above 1,000,000, is not compared, with the same `cannot compare the password` warning (use `--force-password` to set it).
-
-If the verifier can't be read (for example on RDS or Cloud SQL, where the admin is not a superuser), plan prints one warning listing the roles whose passwords are not compared. `--force-password` sets the password anyway.
-
-### Required privileges (PostgreSQL)
-
-Without superuser, changes the connected user may not make are not planned and produce a warning instead:
-
-- Altering a role needs ADMIN OPTION on it (superuser for superuser roles).
-- Changing a privilege grant made by another grantor needs superuser, or, for revokes, `SET` on that grantor.
-- Granting or revoking a membership needs ADMIN OPTION on the role on PostgreSQL 16+ (revoking another grantor's membership grant needs superuser); before 16, ADMIN OPTION or CREATEROLE for a role that is not a superuser. Membership re-grants after a `CASCADE` follow the same rules.
-- Creating schemas in, or granting on, objects owned by another role needs that owner's privileges. The warning names the `GRANT` to run: on PostgreSQL 16+ `GRANT <owner> TO <user> WITH INHERIT TRUE, SET TRUE` (`WITH SET TRUE, INHERIT FALSE` when only an owner change needs it, `WITH INHERIT TRUE` when only its privileges are needed); before 16 a plain `GRANT <owner> TO <user>`.
-- Pruning a role needs the connected user to have that role's privileges; a warning names the `GRANT` to run.
-
-Privileges and memberships are revoked per grantor.
-
-### Required privileges (MySQL)
-
-dbfence works best when it can read `mysql.user`, `mysql.db`, `mysql.role_edges` and `mysql.default_roles`.
-If it can't read them, it falls back as follows:
-
-| Can't read | Fallback |
-|---|---|
-| `mysql.user` | Accounts are listed from `information_schema.USER_ATTRIBUTES` (needs `CREATE USER`). Login state, authentication plugin and passwords of existing accounts are not compared (`--force-password` still sets the password) |
-| `mysql.user`, and the account list is not complete | `USER_ATTRIBUTES` hides accounts that hold `SYSTEM_USER` unless the connected user has it too. Declared accounts are then created with `CREATE USER IF NOT EXISTS` on every run, and existing ones are not updated. Unmanaged accounts are not reported or pruned |
-| `mysql.role_edges` | Declared memberships are granted on every run (`GRANT` is idempotent). Undeclared memberships are not revoked |
-| `mysql.default_roles` | `SET DEFAULT ROLE` is issued on every run for declared accounts with `member_of` |
-| `mysql.db` | Declared privileges are granted on every run. Undeclared privileges are not revoked |
-
-Each fallback is reported as a warning in `plan`. Statements that are re-asserted on every run (`CREATE USER IF NOT EXISTS`, declared memberships, default roles and grants) always appear in the plan, so `--detailed-exitcode` returns 2 while there are any. A fallback with nothing to re-assert (for example, only `mysql.user` is unreadable and no password is forced) can leave the plan empty, and the exit code is then 0 despite the warnings.
-
-## Upgrading
-
-- MySQL: database grants written by earlier versions without escaping (`GRANT ... ON my_app.*`, a wildcard) are revoked and granted again escaped (`my\_app`). The plan shows them under `database pattern "my_app"`.
-- PostgreSQL role and user names equal to `public` in any case are reserved, because grant blocks read them as PUBLIC.
-- PostgreSQL passwords are sent in plaintext and hashed by the server again, so server-side password policies apply. Statement logging can record them (see Passwords).
-- MySQL `role = "public"` without a host is an error; write `"public@%"`.
-- PostgreSQL's default privileges of PUBLIC are now read. Where a grant block manages PUBLIC, undeclared defaults are revoked; elsewhere the only new output is the "keeps ... through PUBLIC" warning when a role loses a privilege PUBLIC still holds.
-
-## Development
+Then, in the same directory:
 
 ```sh
-mise run test               # unit tests (-short)
-mise run test:integration   # also starts MySQL 8.4 / PostgreSQL 17 containers with dockertest
-mise run lint               # go vet -vettool=$(go tool -n lint) ./...
-mise run generate           # regenerate kessoku injectors
-mise run test:fuzz          # run each Go fuzz target for 30s
+dbfence validate   # check the configuration
+dbfence plan       # print the SQL it would run
+dbfence apply      # print the SQL, ask for "yes", then run it
 ```
 
-Fuzz targets (`Fuzz*`) cover ignore patterns, the MySQL database pattern matcher, the SCRAM / md5 / caching_sha2 / sha256 / native verifier parsers, the inspected PostgreSQL ACL and membership state, loading a configuration file, and the SQL of both Dialects: for arbitrary names every statement must lex as a single statement with no `;`, `--`, `/*` (or MySQL `#`) outside quoted identifiers and literals. Their seed corpora run with the normal `go test`.
+dbfence reads every `*.hcl` file in the working directory (`-C DIR` for another one) and merges them.
 
-SQL statements are built only from typed fragments (`internal/plan`): SQL text is a constant `plan.Keyword`, and names, literals, privilege and charset words and numbers enter only through the engine Dialect, which quotes, escapes or validates them. A runtime string passed as SQL does not compile, and the `sqlfragment` lint rule rejects converting a non-constant to `plan.Keyword` (or to a pointer, slice, struct or other type built from it) and building quoted fragments outside `internal/driver`. Outside `internal/plan` and tests it also rejects the ways to fill a `plan.Keyword` without a conversion: pointers to values that contain one (`&k`, `new`, `*plan.Keyword` types, which `json.Unmarshal` or `fmt.Sscan` would write through), instantiating a generic defined outside `internal/plan` with a type argument that contains one, slicing or indexing a `plan.Keyword` and concatenating Keywords at runtime (`k + k2`, `k += k2`; join fragments with `plan.Seq` instead), importing `reflect`, `unsafe` or `encoding/gob`, and code it cannot read: function declarations without a Go body (assembly) and non-Go files such as `.s` or `.syso`. `mise run lint` checks the host build, and a test fails on any file excluded by a build constraint or a `_GOOS`/`_GOARCH` suffix, with or without cgo, so every build compiles exactly the files the linter checked. Each planned statement also records what it does (`Kind`: create role, grant, drop database, ...) and its target object, plus what a role change sets (login disabled, account lock, superuser removed, connection limit), so plans can be checked without parsing SQL. The lint rule catches mistakes, not deliberate obfuscation: picking one-character constant Keywords by a runtime index can still spell any string, and code review has to reject that.
+`plan` prints annotated SQL:
+
+```sql
+-- warning: unmanaged user "stray" (use --prune to drop it)
+
+-- [create] role "readonly"
+CREATE ROLE "readonly" WITH NOLOGIN;
+
+-- [create] user "app"
+CREATE ROLE "app" WITH LOGIN PASSWORD '<redacted>';
+
+-- [grant] membership of "app" in "readonly"
+GRANT "readonly" TO "app";
+
+-- [create] database "app"
+CREATE DATABASE "app" OWNER "app";
+
+-- [grant] CONNECT on database "app" to "readonly"
+GRANT CONNECT ON DATABASE "app" TO "readonly";
+
+-- Plan: 3 to create, 0 to change, 2 to grant, 0 to drop (5 statements).
+```
+
+To try it on local servers, see [`examples/`](examples).
+
+## Safety
+
+- Nothing is dropped unless you pass `--prune`; undeclared roles, databases and schemas only produce warnings.
+- Built-in objects, the connected user and the database it is connected to are never dropped, and changes that would lock the connected user out are skipped.
+- Every plan is checked again, by code independent of the planner, before it is printed or applied.
+- Secrets are redacted from all output.
+
+See [Safety](docs/safety.md) for the details.
+
+## Documentation
+
+- [CLI](docs/cli.md): commands, flags, `--target`, output and exit codes
+- [Configuration](docs/configuration.md): every block and attribute
+- [Functions](docs/functions.md): `env`, `secretenv`, secret stores, Terraform state
+- [Secrets](docs/secrets.md): which values are secrets and how output is redacted
+- [Passwords](docs/passwords.md): how passwords are compared and set
+- [Safety](docs/safety.md): what dbfence never drops or changes
+- [Required privileges](docs/privileges.md): what the connected user needs
+- [Amazon RDS](docs/aws-rds.md) and [Google Cloud SQL](docs/gcp-cloud-sql.md): IAM authentication and other setups
+- [Development](docs/development.md): tests, lint and the SQL building rules
