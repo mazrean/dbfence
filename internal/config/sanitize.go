@@ -211,11 +211,23 @@ func maskedFiles(files map[string]*hcl.File) map[string]*hcl.File {
 		if f == nil {
 			continue
 		}
+		if secretAssign.Match(f.Bytes) && !parses(name, f.Bytes) {
+			// Where the syntax is broken, masking can only guess where a
+			// value ends. Leave the file out: its diagnostics keep their
+			// position and message but quote no source.
+			continue
+		}
 		c := *f
 		c.Bytes = maskSecrets(f.Bytes)
 		out[name] = &c
 	}
 	return out
+}
+
+// parses reports whether src is syntactically valid HCL.
+func parses(name string, src []byte) bool {
+	_, diags := hclsyntax.ParseConfig(src, name, hcl.InitialPos)
+	return !diags.HasErrors()
 }
 
 // registerLiteralSecrets registers the literal parts of every password

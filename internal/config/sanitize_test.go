@@ -136,6 +136,16 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			shown:  "****",
 		},
 		{
+			name:   "continued string line that looks like an attribute",
+			src:    pgConn + "user \"app\" {\n  password = \"part1\nHh1Key=Hh1ValueSecret9\"\n}\n",
+			leaked: "Hh1ValueSecret9",
+		},
+		{
+			name:   "continued string line that looks like a closing brace",
+			src:    pgConn + "user \"app\" {\n  password = \"part1\n}Gg2ClosingSecret9\"\n}\n",
+			leaked: "Gg2ClosingSecret9",
+		},
+		{
 			name:   "multi-line block comment between = and the value",
 			src:    pgConn + "user \"app\" {\n  password = /*\n */ \"Qq6BlkCmtPw9\" 1\n}\n",
 			leaked: "Qq6BlkCmtPw9",
@@ -151,6 +161,13 @@ func TestDiagnosticsMaskSecrets(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), tt.leaked) {
 				t.Errorf("error shows %q:\n%s", tt.leaked, err)
+			}
+			if !parses("dbfence.hcl", []byte(tt.src)) {
+				// Files that do not parse are quoted without source.
+				if !strings.Contains(err.Error(), " line ") || strings.Contains(err.Error(), "*") {
+					t.Errorf("error of a file that does not parse should name the line and quote no source:\n%s", err)
+				}
+				return
 			}
 			if !strings.Contains(err.Error(), tt.shown) {
 				t.Errorf("error does not show the masked source %q:\n%s", tt.shown, err)

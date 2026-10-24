@@ -46,7 +46,7 @@ tools/lint/          repo linter module (+ outputsink analyzer)
 
 ## Coding Standards
 
-- Wrap errors with `fmt.Errorf("context: %w", err)`; never include secret values in errors or logs (HCL diagnostics quote source masked by `config.maskSecrets`: a new secret attribute goes into `secretAttrs` and `secretAssign`).
+- Wrap errors with `fmt.Errorf("context: %w", err)`; never include secret values in errors or logs (HCL diagnostics quote source masked by `config.maskSecrets`, and none from files that do not parse and assign a secret attribute: a new secret attribute goes into `secretAttrs` and `secretAssign`).
 - Identifiers are quoted and literals escaped only through the engine Dialect; passwords go into SQL only as `plan.Secret`.
 - SQL is built only from `plan` fragments: SQL text is a constant `plan.Keyword`, runtime values enter only as `plan.QuotedIdent`/`EscapedLiteral`/`NewToken`/`Number` made by Dialect code under `internal/driver` (lint `sqlfragment`); outside `internal/plan` and tests, no pointers to Keyword-containing values, no non-`plan` generics instantiated with them, no slicing/indexing of a Keyword or non-constant Keyword `+`/`+=` (use `plan.Seq`), no `reflect`/`unsafe`/`encoding/gob` imports, no function declarations without a Go body and no non-Go files (`.s`, `.syso`, C); Dialect statements use `plan.New` with their `Kind` and a `Target` that records every name they render (grantor of `GRANTED BY`, owner) apart from `AsRole`/`DefaultRoles`.
 - One `plan.Statement` is exactly one SQL command, sent alone (`;` never chains statements); to run as another role set `AsRole`, never prepend `SET ROLE`.
