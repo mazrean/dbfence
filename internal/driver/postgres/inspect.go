@@ -165,6 +165,7 @@ func (d *Driver) Inspect(ctx context.Context, desired *model.Desired) (*model.Cu
 			delete(st.connectable, db)
 		}
 	}
+	st.entangleUnread(cur)
 	st.otherOwners = map[model.Object]string{}
 	for _, s := range cur.OtherSchemas {
 		st.otherOwners[model.Object{Type: model.ObjectSchema, Database: s.Database, Schema: s.Name}] = s.Owner
@@ -733,6 +734,21 @@ func (st *state) addACL(cur *model.Current, e aclEntry) {
 		}
 	}
 	cur.Privileges = append(cur.Privileges, p)
+}
+
+// entangleUnread records in cur.Entangled the undeclared databases with
+// names dbfence manages that it cannot connect to (no CONNECT, or the
+// connection failed): what they contain is not known, so --prune keeps
+// them. Provider databases are never dropped.
+func (st *state) entangleUnread(cur *model.Current) {
+	for _, db := range cur.Databases {
+		if st.connectable[db.Name] || providerDatabase(db.Name) || unmanagedName(model.NameDatabase, db.Name) ||
+			slices.ContainsFunc(st.desired.Databases, func(d model.Database) bool { return d.Name == db.Name }) {
+			continue
+		}
+		cur.Entangle(model.Object{Type: model.ObjectDatabase, Database: db.Name},
+			"dbfence cannot connect to it and does not know what it contains")
+	}
 }
 
 // otherSchemaDatabases returns the connectable databases that are neither

@@ -161,3 +161,38 @@ func TestIntegrationPruneKeepsContainersOfUnmanaged(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationPruneKeepsUnreadDatabases checks against a real server
+// that --prune keeps an undeclared database the connected user owns but
+// may not connect to: what it contains is not known.
+func TestIntegrationPruneKeepsUnreadDatabases(t *testing.T) {
+	t.Parallel()
+	s := startServer(t)
+	s.exec(t,
+		"CREATE ROLE ur_admin LOGIN CREATEROLE CREATEDB PASSWORD 'pw'",
+		"CREATE DATABASE app OWNER ur_admin",
+		"CREATE DATABASE olddb OWNER ur_admin", "CREATE DATABASE plaindb OWNER ur_admin",
+		"REVOKE ALL ON DATABASE olddb FROM PUBLIC, ur_admin",
+	)
+	d := s.open(t, "ur_admin")
+	desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app", Owner: "ur_admin"}}}
+	cur, err := d.Inspect(t.Context(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := compute(t, desired, cur, d, diff.Options{Prune: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sqlOf(p.Statements())
+	warns := strings.Join(p.Warnings, "\n")
+	if strings.Contains(got, `DROP DATABASE "olddb"`) {
+		t.Errorf("plan drops olddb, which dbfence cannot connect to:\n%s\nwarnings:\n%s", got, warns)
+	}
+	if !strings.Contains(got, `DROP DATABASE "plaindb"`) {
+		t.Errorf("plan does not drop plaindb:\n%s\nwarnings:\n%s", got, warns)
+	}
+	if w := `database "olddb": dbfence cannot connect to it and does not know what it contains, so it is not pruned`; !strings.Contains(warns, w) {
+		t.Errorf("warnings do not contain %q:\n%s", w, warns)
+	}
+}

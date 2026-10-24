@@ -86,3 +86,51 @@ func TestPruneKeepsContainersOfUnmanaged(t *testing.T) {
 		}
 	}
 }
+
+// TestPruneKeepsUnreadDatabases checks that --prune keeps an undeclared
+// database with a managed name and owner that dbfence cannot connect to
+// (no CONNECT, or the connection failed): its schemas were never read, so
+// DROP DATABASE could drop what dbfence does not manage.
+func TestPruneKeepsUnreadDatabases(t *testing.T) {
+	t.Parallel()
+	desired := &model.Desired{Engine: model.EnginePostgres, Databases: []model.Database{{Name: "app", Owner: "postgres"}}}
+	dbObj := func(name string) model.Object { return model.Object{Type: model.ObjectDatabase, Database: name} }
+	cur := &model.Current{
+		CurrentUser:     pg("postgres"),
+		CurrentDatabase: "postgres",
+		Roles:           []model.RoleState{{ID: pg("postgres"), Superuser: true}},
+		Databases: []model.Database{
+			{Name: "postgres", Owner: "postgres"}, {Name: "app", Owner: "postgres"},
+			{Name: "olddb", Owner: "postgres"}, {Name: "plaindb", Owner: "postgres"},
+		},
+		Schemas:            []model.Schema{{Database: "app", Name: "public", Owner: "pg_database_owner"}},
+		InspectedDatabases: []string{"app"},
+	}
+	st := &state{
+		desired: desired, user: "postgres", superuser: true, version: 170000,
+		connectable: map[string]bool{"postgres": true, "app": true, "plaindb": true},
+		owners: map[model.Object]string{
+			dbObj("app"): "postgres", dbObj("postgres"): "postgres", dbObj("olddb"): "postgres", dbObj("plaindb"): "postgres",
+		},
+		otherOwners: map[model.Object]string{}, objects: map[model.Object]int{}, roles: map[string]roleAccess{},
+	}
+	st.entangleUnread(cur)
+	if _, err := cur.DropUntrusted(model.EnginePostgres); err != nil {
+		t.Fatal(err)
+	}
+	p, err := compute(t, desired, cur, &Driver{st: st}, diff.Options{Prune: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sqlOf(p.Statements())
+	warns := strings.Join(p.Warnings, "\n")
+	if strings.Contains(got, `DROP DATABASE "olddb"`) {
+		t.Errorf("prune drops database olddb, whose schemas were never inspected:\n%s", got)
+	}
+	if !strings.Contains(got, `DROP DATABASE "plaindb"`) {
+		t.Errorf("plan does not drop plaindb:\n%s", got)
+	}
+	if w := `database "olddb": dbfence cannot connect to it and does not know what it contains, so it is not pruned`; !strings.Contains(warns, w) {
+		t.Errorf("warnings do not contain %q:\n%s", w, warns)
+	}
+}
