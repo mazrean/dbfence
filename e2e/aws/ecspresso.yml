@@ -1,0 +1,9 @@
+# One-shot ECS task of the end-to-end test (`ecspresso run`, see
+# .github/workflows/e2e.yml). There is no ECS service: `run` takes the launch
+# type and network configuration from the local service definition file.
+# Every value comes from the e2e-aws GitHub environment (docs/e2e.md).
+region: '{{ must_env `AWS_REGION` }}'
+cluster: '{{ must_env `DBFENCE_E2E_ECS_CLUSTER` }}'
+task_definition: ecs-task-def.jsonnet
+service_definition: ecs-service-def.jsonnet
+timeout: 20m
