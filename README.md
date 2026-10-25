@@ -20,6 +20,46 @@ Supported engines: MySQL 8.0+ and PostgreSQL, including Amazon RDS and Google Cl
 go install github.com/mazrean/dbfence@latest
 ```
 
+Prebuilt binaries for Linux, macOS and Windows are on the [releases page](https://github.com/mazrean/dbfence/releases).
+
+<details>
+<summary>Homebrew, Linux packages, Docker</summary>
+
+### Homebrew (macOS)
+
+```sh
+brew install --cask mazrean/tap/dbfence
+```
+
+### Linux packages (Debian / Ubuntu / RHEL / Fedora / openSUSE / Alpine)
+
+```sh
+# Debian / Ubuntu
+curl -LO https://github.com/mazrean/dbfence/releases/latest/download/dbfence_<version>_linux_amd64.deb
+sudo dpkg -i dbfence_<version>_linux_amd64.deb
+
+# RHEL / Fedora / openSUSE
+sudo rpm -i dbfence_<version>_linux_amd64.rpm
+
+# Alpine
+apk add --allow-untrusted dbfence_<version>_linux_amd64.apk
+```
+
+### Docker
+
+The image `ghcr.io/mazrean/dbfence` (linux/amd64, linux/arm64) is tagged with the release (`v1.2.3`), its minor version (`1.2`) and `latest`.
+It runs as a non-root user and includes CA certificates for TLS connections.
+
+```sh
+docker run --rm -v "$PWD:/work:ro" ghcr.io/mazrean/dbfence -C /work plan
+docker run --rm -it -v "$PWD:/work:ro" ghcr.io/mazrean/dbfence -C /work apply
+```
+
+`apply` needs `-it` for its confirmation prompt (or `--auto-approve`).
+Pass the environment variables the configuration reads (`-e PGPASSWORD`, AWS / GCP credentials, ...) to the container.
+
+</details>
+
 ## Quick start
 
 Write the configuration in `*.hcl` files. This example is for PostgreSQL; see [`examples/mysql`](examples/mysql) for MySQL.

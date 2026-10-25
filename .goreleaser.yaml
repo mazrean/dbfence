@@ -1,9 +1,19 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 version: 2
 
+# Build the dbfence module alone: in workspace mode the go commands below
+# rewrite go.work.sum, which would dirty the tree (see the hooks below).
+env:
+  - GOWORK=off
+
 before:
   hooks:
-    - go mod tidy
+    # NOTE: never `go mod tidy` here. The binary's version comes from
+    # runtime/debug.ReadBuildInfo() VCS stamping (see version.go), which the
+    # Go toolchain only performs when the working tree is clean at the tagged
+    # commit.
+    - go mod download
+    - go mod verify
 
 builds:
   - id: dbfence
@@ -11,6 +21,13 @@ builds:
     binary: dbfence
     env:
       - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # The version comes from the build info stamped by the Go toolchain
+    # (see version.go), so no -X ldflag is needed.
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - linux
       - darwin
@@ -18,18 +35,20 @@ builds:
     goarch:
       - amd64
       - arm64
-    # The version comes from the build info stamped by the Go toolchain
-    # (see version.go), so no -X ldflag is needed.
-    ldflags:
-      - -s -w
 
 archives:
-  - formats: [tar.gz]
+  - id: dbfence
+    ids:
+      - dbfence
+    formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     format_overrides:
       - goos: windows
         formats: [zip]
+    files:
+      - README.md
+      - LICENSE
 
 checksum:
   name_template: checksums.txt
@@ -42,11 +61,89 @@ changelog:
       - "^test:"
       - "^chore:"
 
+# Homebrew (cask, not the deprecated `brews`) in github.com/mazrean/homebrew-tap.
 homebrew_casks:
   - name: dbfence
+    binaries:
+      - dbfence
+    ids:
+      - dbfence
+    directory: Casks
     repository:
       owner: mazrean
       name: homebrew-tap
     homepage: https://github.com/mazrean/dbfence
     description: Declarative management of databases, roles, schemas and privileges for MySQL and PostgreSQL.
     license: MIT
+    commit_msg_template: "chore: brew cask update for {{ .ProjectName }} version {{ .Tag }}"
+    hooks:
+      post:
+        # The released binaries are not notarized; strip the quarantine bit so
+        # macOS Gatekeeper does not refuse to run them.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/dbfence"]
+          end
+
+# Linux packages: deb (apt), rpm (yum/dnf) and apk (Alpine).
+nfpms:
+  - id: dbfence
+    package_name: dbfence
+    ids:
+      - dbfence
+    formats:
+      - deb
+      - rpm
+      - apk
+    vendor: mazrean
+    homepage: https://github.com/mazrean/dbfence
+    maintainer: mazrean <mazrean@users.noreply.github.com>
+    description: Declarative management of databases, roles, schemas and privileges for MySQL and PostgreSQL.
+    license: MIT
+    bindir: /usr/bin
+    file_name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    contents:
+      - src: LICENSE
+        dst: /usr/share/licenses/dbfence/LICENSE
+        file_info:
+          mode: 0644
+      - src: README.md
+        dst: /usr/share/doc/dbfence/README.md
+        file_info:
+          mode: 0644
+
+# Container image ghcr.io/mazrean/dbfence, built with ko (no Dockerfile or
+# Docker daemon). It reuses the env, flags and ldflags of the dbfence build.
+# Pushing needs a prior `docker login ghcr.io` (see release.yml).
+kos:
+  - id: dbfence
+    build: dbfence
+    main: .
+    repositories:
+      - ghcr.io/mazrean/dbfence
+    bare: true
+    # Distroless, nonroot, ships CA certificates for TLS to the servers.
+    base_image: cgr.dev/chainguard/static
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Tag }}"
+      - "{{ if not .Prerelease }}{{ .Major }}.{{ .Minor }}{{ end }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+    sbom: spdx
+    # Override the labels inherited from the base image.
+    labels:
+      org.opencontainers.image.title: dbfence
+      org.opencontainers.image.url: https://github.com/mazrean/dbfence
+      org.opencontainers.image.source: https://github.com/mazrean/dbfence
+      org.opencontainers.image.vendor: mazrean
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+      org.opencontainers.image.description: Declarative management of databases, roles, schemas and privileges for MySQL and PostgreSQL.
+      org.opencontainers.image.licenses: MIT
+    disable: "{{ .IsSnapshot }}"

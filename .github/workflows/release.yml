@@ -9,6 +9,10 @@ jobs:
   goreleaser:
     runs-on: ubuntu-latest
     environment: Release
+    permissions:
+      contents: read
+      # ko pushes ghcr.io/mazrean/dbfence with the workflow GITHUB_TOKEN.
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -27,6 +31,15 @@ jobs:
           repositories: |
             dbfence
             homebrew-tap
+
+      # ko reads registry credentials from the Docker config, not from the
+      # GITHUB_TOKEN environment variable below (the App token).
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run GoReleaser
         run: mise run release:publish
