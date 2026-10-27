@@ -13,7 +13,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/rds/auth v1.7.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.6
-	github.com/aws/smithy-go v1.28.6
+	github.com/aws/smithy-go v1.28.7
 	github.com/fujiwara/tfstate-lookup v1.12.1
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/go-cmp v0.7.0
